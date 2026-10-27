@@ -743,48 +743,103 @@ function deployView(pid) {
     if (!D.order) D.order = D.meta.hosts.map(x => x.uuid);
     D.order = D.order.filter(t => t[0] !== '#' || locTok.includes(t));
     locTok.forEach(t => { if (!D.order.includes(t)) D.order.push(t); });
-    if (D.sel && !D.order.includes(D.sel)) D.sel = null;
     const byId = Object.fromEntries(D.meta.hosts.map(x => [x.uuid, x]));
-    const changed = () => { D.orderTouched = true; UI.haptic('select'); UI.nav.refresh(); };
-    const move = (t, d) => { const i = D.order.indexOf(t), j = i + d; if (j < 0 || j >= D.order.length) return; [D.order[i], D.order[j]] = [D.order[j], D.order[i]]; changed(); };
-    const putAfter = (t, after) => { D.order.splice(D.order.indexOf(t), 1); D.order.splice(after === null ? 0 : D.order.indexOf(after) + 1, 0, t); D.sel = null; changed(); };
     const numOf = (it, n) => { const d = (D.domains[it.loc] || [])[n - 1]; const m = d && d.split('.')[0].match(/(\d+)$/); return m ? m[1] : String(n); };
     const remarkOf = (it, n) => { const loc = L(it.loc), d = (D.domains[it.loc] || [])[n - 1] || it.loc + n + '.' + (D.zone || 'example.com');
       return (D.remark || '{flag} {country} {n}').replace('{flag}', loc.flag).replace('{country}', countryOf(loc)).replace('{n}', numOf(it, n))
         .replace('{name}', d.split('.')[0]).replace('{domain}', d).replace(/\s+/g, ' ').trim() || d; };
-    const mini = (ic, label, on, flip, pressed) => h('button', { class: 'btn tinted small', type: 'button', 'aria-label': label, 'aria-pressed': pressed === undefined ? undefined : String(pressed),
-      style: 'min-width:38px;padding:6px 8px' + (flip ? ';transform:scaleY(-1)' : ''), onclick: e => { e.stopPropagation(); on(); } }, icon(ic));
-    const rows = [];
-    if (D.sel) rows.push(row({ icon: 'arrowDown', tile: '#34C759', title: 'В самое начало', cls: 'accent', onClick: () => putAfter(D.sel, null) }));
-    const isHost = t => t[0] !== '#';
-    D.order.forEach((t, i) => {
-      if (isHost(t)) {
-        const x = byId[t];
-        if (!x) return;
-        const sub = [x.address, x.balancer ? 'балансировщик' : '', x.hidden ? 'скрытый' : '', x.disabled ? 'выключен' : '', (x.tags || []).join(' ')].filter(Boolean).join(' · ');
-        const hr = row({ title: x.remark || x.address, sub, onClick: D.sel ? () => putAfter(D.sel, t) : null, chevron: false,
-          right: D.sel ? h('span', { class: 'd' }, 'после него') : null });
-        if (x.disabled || x.hidden) hr.style.opacity = '.62';
-        rows.push(hr);
-        return;
-      }
-      const it = D.items.find(x => '#' + x.loc === t);
-      const names = it.count === 1 ? remarkOf(it, 1) : it.count === 2 ? remarkOf(it, 1) + ', ' + remarkOf(it, 2) : remarkOf(it, 1) + ' … ' + remarkOf(it, it.count);
-      const bal = D.hostMode === 'balancer' ? ' + балансировщик, если его ещё нет' : '';
-      const r = row({ cls: 'wrap', title: names, sub: `новые · ${it.count} ${UI.plural(it.count, 'хост', 'хоста', 'хостов')}${bal}`, chevron: false,
-        right: h('div', { style: 'display:flex;gap:6px' },
-          mini('arrowDown', 'Выше', () => move(t, -1), true), mini('arrowDown', 'Ниже', () => move(t, 1)),
-          mini('stack', 'Выбрать место в списке', () => { D.sel = D.sel === t ? null : t; UI.haptic('select'); UI.nav.refresh(); }, false, D.sel === t)) });
-      r.style.cssText += ';background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)';
-      rows.push(r);
-    });
-    const box = h('div', { class: 'list', style: 'max-height:440px;overflow:auto' }, rows);
-    const foot = D.sel ? 'Нажмите на хост — новые встанут сразу после него.'
-      : (D.meta.hosts.length ? `В панели ${D.meta.hosts.length} ${UI.plural(D.meta.hosts.length, 'хост', 'хоста', 'хостов')}. ` : 'В панели пока нет хостов. ')
-        + (D.orderTouched ? 'Новые встанут туда, где они сейчас в списке.' : 'По умолчанию новые идут в конец — двигайте стрелками или кнопкой выбора места.');
-    v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Порядок хостов'), box,
-      D.orderTouched ? h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 0', onclick: () => { D.order = null; D.orderTouched = false; D.sel = null; UI.nav.refresh(); } }, 'Сбросить — в конец') : null,
-      h('div', { class: 'group-f' }, foot)));
+    // список рисуется сам, без перерисовки страницы — прокрутка не сбрасывается
+    const box = h('div', { class: 'list', style: 'max-height:60vh;overflow:auto;position:relative;overscroll-behavior:contain' });
+    const footEl = h('div', { class: 'group-f' });
+    const resetBtn = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 0' }, 'Сбросить — в конец');
+    const status = () => {
+      footEl.textContent = (D.meta.hosts.length ? `В панели ${D.meta.hosts.length} ${UI.plural(D.meta.hosts.length, 'хост', 'хоста', 'хостов')}. ` : 'В панели пока нет хостов. ')
+        + (D.orderTouched ? 'Новые встанут туда, где они сейчас в списке.' : 'По умолчанию новые идут в конец. Зажмите блок новых хостов (или потяните за ≡) и перетащите на нужное место.');
+      resetBtn.style.display = D.orderTouched ? '' : 'none';
+    };
+    const commit = () => { D.order = [...box.querySelectorAll('[data-tok]')].map(e => e.dataset.tok); D.orderTouched = true; status(); };
+    const tg = window.Telegram && window.Telegram.WebApp;
+    const sortable = (el, handle) => {
+      let timer = null, drag = null, raf = 0, lastY = 0;
+      const place = () => {
+        const dy = lastY - drag.y0 + (box.scrollTop - drag.st0) - drag.shift;
+        const next = el.nextElementSibling, prev = el.previousElementSibling;
+        if (next && dy > next.offsetHeight / 2) { box.insertBefore(next, el); drag.shift += next.offsetHeight; UI.haptic('select'); return place(); }
+        if (prev && dy < -prev.offsetHeight / 2) { box.insertBefore(el, prev); drag.shift -= prev.offsetHeight; UI.haptic('select'); return place(); }
+        el.style.transform = `translateY(${dy}px)`;
+      };
+      const tick = () => {  // у края списка — прокручиваем его сами
+        if (!drag) return;
+        const r = box.getBoundingClientRect(), edge = 56;
+        const v = lastY < r.top + edge ? -Math.ceil((r.top + edge - lastY) / 5) : lastY > r.bottom - edge ? Math.ceil((lastY - r.bottom + edge) / 5) : 0;
+        if (v) { const before = box.scrollTop; box.scrollTop += v; if (box.scrollTop !== before) place(); }
+        raf = requestAnimationFrame(tick);
+      };
+      const begin = () => {
+        drag = { y0: lastY, st0: box.scrollTop, shift: 0 };
+        Object.assign(el.style, { position: 'relative', zIndex: 3, transition: 'none', boxShadow: '0 10px 28px rgba(0,0,0,.45)', transform: 'scale(1.02)' });
+        try { tg && tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
+        UI.haptic('select'); raf = requestAnimationFrame(tick);
+      };
+      const end = () => {
+        clearTimeout(timer); timer = null;
+        if (!drag) return;
+        cancelAnimationFrame(raf); drag = null;
+        Object.assign(el.style, { transform: '', boxShadow: '', zIndex: '' });
+        try { tg && tg.enableVerticalSwipes && tg.enableVerticalSwipes(); } catch (e) {}
+        commit();
+      };
+      el.addEventListener('touchstart', e => {
+        lastY = e.touches[0].clientY;
+        if (handle.contains(e.target)) begin(); else timer = setTimeout(begin, 300);  // зажать — и тащить
+      }, { passive: true });
+      el.addEventListener('touchmove', e => {
+        const y = e.touches[0].clientY;
+        if (!drag) { if (Math.abs(y - lastY) > 8) { clearTimeout(timer); timer = null; } return; }
+        e.preventDefault(); lastY = y; place();
+      }, { passive: false });
+      el.addEventListener('touchend', end); el.addEventListener('touchcancel', end);
+      el.addEventListener('contextmenu', e => e.preventDefault());
+      handle.addEventListener('mousedown', e => {  // мышью — за ≡
+        e.preventDefault(); lastY = e.clientY; begin();
+        const mv = ev => { lastY = ev.clientY; place(); };
+        const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); end(); };
+        window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+      });
+    };
+    const draw = () => {
+      const st = box.scrollTop;
+      box.replaceChildren();
+      D.order.forEach(t => {
+        if (t[0] !== '#') {
+          const x = byId[t];
+          if (!x) return;
+          const sub = [x.address, x.balancer ? 'балансировщик' : '', x.hidden ? 'скрытый' : '', x.disabled ? 'выключен' : '', (x.tags || []).join(' ')].filter(Boolean).join(' · ');
+          const hr = row({ title: x.remark || x.address, sub, chevron: false });
+          hr.dataset.tok = t;
+          if (x.disabled || x.hidden) hr.style.opacity = '.62';
+          box.append(hr);
+          return;
+        }
+        const it = D.items.find(x => '#' + x.loc === t);
+        const names = it.count === 1 ? remarkOf(it, 1) : it.count === 2 ? remarkOf(it, 1) + ', ' + remarkOf(it, 2) : remarkOf(it, 1) + ' … ' + remarkOf(it, it.count);
+        const bal = D.hostMode === 'balancer' ? ' + балансировщик, если его ещё нет' : '';
+        const handle = h('span', { 'aria-label': 'Перетащить', style: 'font-size:24px;line-height:1;padding:10px 6px 10px 14px;color:var(--accent-text);cursor:grab;touch-action:none' }, '≡');
+        const r = row({ cls: 'wrap', title: names, sub: `новые · ${it.count} ${UI.plural(it.count, 'хост', 'хоста', 'хостов')}${bal}`, chevron: false, right: handle });
+        r.dataset.tok = t;
+        r.style.cssText += ';background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent);-webkit-user-select:none;user-select:none;-webkit-touch-callout:none';
+        sortable(r, handle);
+        box.append(r);
+      });
+      box.scrollTop = st;
+      status();
+    };
+    resetBtn.onclick = () => { D.orderTouched = false; D.order = D.meta.hosts.map(x => x.uuid).concat(locTok); draw(); box.scrollTop = box.scrollHeight; };
+    draw();
+    v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Порядок хостов'), box, resetBtn, footEl));
+    box.addEventListener('scroll', () => { D.orderScroll = box.scrollTop; }, { passive: true });
+    // прокрутка списка переживает перерисовку страницы; в первый раз показываем конец, где стоят новые
+    requestAnimationFrame(() => { box.scrollTop = D.orderScroll != null ? D.orderScroll : box.scrollHeight; });
   }
 
   // итог

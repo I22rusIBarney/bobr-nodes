@@ -487,6 +487,14 @@ async def main():
     cur = sorted(world.hosts, key=lambda x: x['viewPosition'])
     ok([x['uuid'] for x in meta['hosts']] == [x['uuid'] for x in cur] and 'remark' in meta['hosts'][0],
        'мастер видит текущие хосты панели по порядку')
+    # у хоста может быть обычный Xray-шаблон (не балансировщик) — это просто хост
+    world.templates.append({'uuid': 'aaaaaaaa-0000-0000-0000-000000000001', 'name': 'Default JSON', 'templateType': 'XRAY_JSON',
+                            'templateJson': {'outbounds': []}, 'tags': []})
+    plain_h = next(h for h in world.hosts if not h.get('xrayJsonTemplateUuid'))
+    plain_h['xrayJsonTemplateUuid'] = 'aaaaaaaa-0000-0000-0000-000000000001'
+    st, meta2 = await wapi(f'profiles/{pid}/panel')
+    ok(next(x for x in meta2['hosts'] if x['uuid'] == plain_h['uuid'])['balancer'] is False
+       and any(x['balancer'] for x in meta2['hosts']), 'хост с обычным Xray-шаблоном — не балансировщик')
     first, others = meta['hosts'][0]['uuid'], [x['uuid'] for x in meta['hosts'][1:]]
     st, d1 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 2, 'base': 'example.net'})
     st, d2 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'nl', 'count': 1, 'base': 'example.net', 'exclude': d1['domains']})

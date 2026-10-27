@@ -495,9 +495,10 @@ class Panel:
                                    'security': i.get('security')} for i in p.get('inbounds', [])],
                      'psiphon': psiphon_of(p.get('config')) is not None, 'warp': warp_of(p.get('config'))}
                     for p in self.call('GET', '/api/config-profiles')['configProfiles']]
+        btpl = {t['uuid'] for t in tpls if t['balancer_tag']}
         hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''),
                   'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
-                  'balancer': bool(x.get('xrayJsonTemplateUuid'))}
+                  'balancer': x.get('xrayJsonTemplateUuid') in btpl}
                  for x in sorted(self.call('GET', '/api/hosts'), key=lambda x: x.get('viewPosition', 0))]
         return {'squads': squads, 'templates': tpls, 'profiles': profiles, 'hosts': hosts}
 
@@ -531,6 +532,11 @@ class Panel:
             self.call('POST', '/api/hosts/actions/reorder', {'hosts': changes})
         prev = rest[idx]['remark'] if idx >= 0 else None
         log('панель: хосты поставлены ' + (f'после «{prev}»' if prev else 'в начало списка'))
+
+    def balancer_templates(self) -> set[str]:
+        """UUID Xray-шаблонов с балансировкой (injectHosts по тегу). Просто шаблон у хоста — ещё не балансировщик."""
+        return {t['uuid'] for t in self.call('GET', '/api/subscription-templates')['templates']
+                if t.get('templateType') == 'XRAY_JSON' and balancer_tag_of(t.get('templateJson'))}
 
     def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof: dict, inbound: dict,
                         node: dict, log, tls: bool = True) -> str | None:
@@ -716,11 +722,12 @@ class Panel:
         hidden = bool(opts.get('hidden', balancer))
         tags = [t for t in (opts.get('tags') or []) if re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
         hosts = self.call('GET', '/api/hosts')
+        btpl = self.balancer_templates()
         mine = []
         for n, inbound in enumerate(inbounds, 1):
             host = next((h for h in hosts if h['address'] == node['domain']
                          and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
-                         and not h.get('xrayJsonTemplateUuid')), None)
+                         and h.get('xrayJsonTemplateUuid') not in btpl), None)
             if host:
                 log(f'панель: хост {inbound.get("tag", "")} уже есть')
                 continue
@@ -1413,8 +1420,9 @@ def remove_node(prof: dict, ip: str, domain: str, log: Callable[[str], None]) ->
         for h in panel.call('GET', '/api/hosts'):
             if h.get('address') in names:
                 hosts[h['uuid']] = h
+        btpl = panel.balancer_templates()
         for h in hosts.values():
-            if h.get('xrayJsonTemplateUuid'):  # хост-балансировщик страны общий — оставляем
+            if h.get('xrayJsonTemplateUuid') in btpl:  # хост-балансировщик страны общий — оставляем
                 log(f'панель: хост-балансировщик «{h.get("remark", "")}» оставлен (общий для страны)')
                 continue
             panel.call('DELETE', f'/api/hosts/{h["uuid"]}')
