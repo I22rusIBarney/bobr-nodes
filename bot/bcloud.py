@@ -1,6 +1,9 @@
 """Клиент служебного API bcloud (/api/svc). Покупка идёт с баланса указанного админа."""
 from __future__ import annotations
 
+import asyncio
+import time
+
 import httpx
 
 
@@ -8,7 +11,14 @@ class BcloudError(Exception):
     pass
 
 
+class BcloudUnavailable(BcloudError):
+    """bcloud не ответил (перезапускается, сеть) — запрос можно повторить позже."""
+
+
 class Bcloud:
+    # сколько ждать bcloud, если он недоступен (например, bcloud update пересобирает контейнер)
+    RETRY_FOR = 180.0
+
     def __init__(self, url: str, token: str, tg_id: int, timeout: float = 60):
         if not (url and token and tg_id):
             raise BcloudError('bcloud не настроен: нужны адрес, токен и аккаунт для покупок (панель → Подключения → bcloud)')
@@ -20,11 +30,20 @@ class Bcloud:
         self.timeout = timeout
 
     async def _call(self, method: str, path: str, **kw):
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as c:
-                r = await c.request(method, self.base + path, headers=self.h, **kw)
-        except httpx.HTTPError as e:
-            raise BcloudError(f'bcloud недоступен: {e}') from e
+        # Повторяем, только когда запрос точно не дошёл (нет соединения, имя не разрешилось) — это безопасно и для
+        # покупки. Чтение (GET) повторяем при любой сетевой ошибке. Ответ bcloud с ошибкой не повторяем.
+        end, wait = time.monotonic() + self.RETRY_FOR, 2.0
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as c:
+                    r = await c.request(method, self.base + path, headers=self.h, **kw)
+                break
+            except httpx.HTTPError as e:
+                safe = method == 'GET' or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                if not safe or time.monotonic() + wait > end:
+                    raise BcloudUnavailable(f'bcloud недоступен: {e}') from e
+                await asyncio.sleep(wait)
+                wait = min(wait * 2, 20.0)
         try:
             payload = r.json()
         except ValueError:

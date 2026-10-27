@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from . import engine
-from .bcloud import Bcloud, BcloudError
+from .bcloud import Bcloud, BcloudError, BcloudUnavailable
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -157,7 +157,9 @@ class Runner:
             if not prof:
                 continue
             try:
-                srv = await self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof)).server(int(d['server_id']))
+                bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
+                bc.RETRY_FOR = 0  # фоновая сверка: bcloud недоступен — просто проверим в следующий раз
+                srv = await bc.server(int(d['server_id']))
             except BcloudError as e:  # 404 — сервер передан другому клиенту или bcloud недоступен: ничего не удаляем
                 log.info('sync bcloud job %s: %s', j['id'], e)
                 continue
@@ -369,8 +371,16 @@ class Runner:
             await self._set(jid, status='provisioning', stage='ip', error='')
             self.last[jid] = 'ждём, пока bcloud создаст сервер'
             end = time.monotonic() + self.ip_timeout
-            while True:
-                srv = await bc.server(d['server_id'])
+            while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
+                try:
+                    srv = await bc.server(d['server_id'])
+                except BcloudUnavailable as e:
+                    if time.monotonic() > end:
+                        raise Fail(f'{e} — проверьте, что bcloud запущен, и нажмите «Повторить»') from e
+                    self.last[jid] = 'bcloud не отвечает — жду'
+                    await self.render(jid)
+                    await asyncio.sleep(self.poll_every)
+                    continue
                 if srv['status'] == 'active' and srv.get('ip'):
                     if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
                         engine.forget_host(self.known_hosts(), srv['ip'])
@@ -381,10 +391,12 @@ class Runner:
                 if time.monotonic() > end:
                     raise Fail('сервер слишком долго создаётся — проверьте его в bcloud и нажмите «Повторить»')
                 await asyncio.sleep(self.poll_every)
-            try:
-                await bc.rename(d['server_id'], d['name'])
-            except BcloudError as e:
-                log.info('rename %s: %s', jid, e)
+            if not d.get('renamed'):
+                try:
+                    await bc.rename(d['server_id'], d['name'])
+                    d = self.store.patch_job_data(jid, renamed=True)
+                except BcloudError as e:  # имя в bcloud — удобство, не повод останавливать установку
+                    log.info('rename %s: %s', jid, e)
 
             self.last[jid] = 'ждём свободный слот установки'
             await self.render(jid)

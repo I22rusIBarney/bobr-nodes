@@ -68,6 +68,13 @@ SEC_HEADERS = {
 FAIL_LIMIT, FAIL_WINDOW = 20, 600   # 20 запросов без доступа за 10 минут с одного IP — пауза
 
 
+def bc_ui(store, tg_id=None):
+    """Клиент bcloud для ответов админке: недоступный bcloud ждём недолго, чтобы страница не висела."""
+    b = bcloud_from(store, tg_id)
+    b.RETRY_FOR = 8
+    return b
+
+
 def client_ip(request) -> str:
     # бот доступен только через свой Caddy или Caddy bcloud (порт не опубликован) — им можно верить
     xff = request.headers.get('X-Forwarded-For', '')
@@ -222,7 +229,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/check/bcloud')
     async def check_bcloud(_):
         try:
-            bal = await bcloud_from(store).balance()
+            bal = await bc_ui(store).balance()
             return J({'ok': True, 'message': f'Подключено. Баланс: {bal / 100:,.0f} ₽'.replace(',', ' ')})
         except BcloudError as e:
             return J({'ok': False, 'message': str(e)})
@@ -278,7 +285,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if cur and owner == cur.get('owner') and cur.get('owner_tg_id'):
             return prof
         try:
-            u = await bcloud_from(store).resolve(owner)
+            u = await bc_ui(store).resolve(owner)
         except BcloudError as e:
             raise ApiError(f'Клиент bcloud: {e}') from None
         if u.get('banned'):
@@ -435,7 +442,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if bd.get('server_id'):
             bc = {'server_id': bd['server_id'], 'price_kop': None}
             try:
-                srv = await bcloud_from(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))
+                srv = await bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))
                 bc['price_kop'] = srv.get('change_ip_price_kop')
             except BcloudError as e:
                 bc['error'] = str(e)
@@ -613,7 +620,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         p = profile_or_404(request.query.get('pid', 0))
         cat = await svc.load_catalog(store, p)
         try:
-            bal = await bcloud_from(store, buyer_of(store, p)).balance()
+            bal = await bc_ui(store, buyer_of(store, p)).balance()
         except BcloudError:
             bal = None
         return J({'locations': cat['locations'], 'periods': cat['periods'], 'os_label': cat['os_label'], 'balance_kop': bal,
@@ -681,7 +688,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             pos += n
             total += q['total_kop']
         q = {'total_kop': total}
-        bal = await bcloud_from(store, buyer_of(store, p)).balance()
+        bal = await bc_ui(store, buyer_of(store, p)).balance()
         if bal < q['total_kop']:
             who = p.get('owner_label') or 'вашего аккаунта'
             raise ApiError(f'Не хватает денег: на балансе {who} {bal / 100:.0f} ₽, нужно {q["total_kop"] / 100:.0f} ₽')

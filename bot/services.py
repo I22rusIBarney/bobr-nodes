@@ -40,7 +40,9 @@ def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
 
 async def load_catalog(store: Store, prof: dict | None = None) -> dict:
     """Каталог bcloud для развёртывания (цены — для покупателя группы): только локации с тарифами, ОС выбрана автоматически."""
-    cat = await bcloud_from(store, buyer_of(store, prof or {})).catalog()
+    bc = bcloud_from(store, buyer_of(store, prof or {}))
+    bc.RETRY_FOR = 8  # каталог открывают в админке — долго не ждём
+    cat = await bc.catalog()
     if cat.get('maintenance'):
         raise BcloudError('в bcloud включён режим «продажи закрыты»')
     os_code = naming.pick_os([o['code'] for o in cat['os']])
