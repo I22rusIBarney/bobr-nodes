@@ -47,7 +47,12 @@ jobs:
         env:
           BCLOUD_DIR: ${{ github.workspace }}/_deps/bobr-cloud
           NV_SRC: ${{ github.workspace }}/_deps/nuvrion/src
-        run: pytest -q
+        # упавшие проверки — ещё и аннотациями: их видно через API без скачивания логов
+        run: |
+          set -o pipefail
+          pytest -q -rA 2>&1 | tee /tmp/pytest.out || {
+            grep -E '^(FAIL |FAILED |E  |ERROR )|Traceback|Error:' /tmp/pytest.out | head -40 | cut -c1-900 | sed 's/^/::error::/'
+            exit 1; }
 
   # Готовый образ для серверов: только с main и только если тесты прошли.
   # bnodes update скачивает ghcr.io/<владелец>/<репозиторий>:sha-<коммит> вместо сборки на VPS.
