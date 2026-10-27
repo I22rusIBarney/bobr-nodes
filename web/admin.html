@@ -499,14 +499,18 @@ function deployView(pid) {
   if (D.tags === undefined || D.tagsMode !== D.hostMode) { D.tags = 'NORMAL'; D.tagsMode = D.hostMode; }
   const input = (val, ph, on, mono) => { const i = h('input', { type: 'text', placeholder: ph, autocapitalize: 'off', spellcheck: false, style: 'text-align:left' + (mono ? ';font-family:ui-monospace,monospace' : '') }); i.value = val; i.addEventListener('input', () => on(i.value)); return i; };
   const loc0 = L(one.loc);
-  const preview = tpl => (tpl || '').replace('{flag}', loc0.flag).replace('{country}', loc0.name).replace('{n}', '1').replace('{name}', one.loc + '1').replace('{domain}', one.loc + '1.' + (D.zone || 'example.com')).replace(/\s+/g, ' ').trim();
+  if (!D.lang) { try { D.lang = localStorage.getItem('remark_lang') || 'ru'; } catch (e) { D.lang = 'ru'; } }
+  const countryOf = loc => { if (D.lang !== 'en') return loc.name; try { const c = loc.code.replace(/[^a-z]/gi, '').slice(0, 2).toUpperCase(); const n = new Intl.DisplayNames(['en'], { type: 'region' }).of(c); return n && n !== c ? n : loc.name; } catch (e) { return loc.name; } };
+  const preview = tpl => (tpl || '').replace('{flag}', loc0.flag).replace('{country}', countryOf(loc0)).replace('{n}', '1').replace('{name}', one.loc + '1').replace('{domain}', one.loc + '1.' + (D.zone || 'example.com')).replace(/\s+/g, ' ').trim();
   const prevEl = h('div', { class: 'group-f' });
   const setPrev = () => { prevEl.textContent = 'Например: ' + preview(D.remark) + '. {flag} — флаг, {country} — страна, {n} — номер ноды, {name}, {domain}.'; };
   setPrev();
   const modes = [{ value: 'simple', label: 'Обычные' }, { value: 'balancer', label: 'По стране' }, { value: 'normal', label: 'Общий NORMAL' }];
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Хосты в панели'),
     h('div', { style: 'padding:0 12px 12px' }, UI.segmented(modes, D.hostMode, x => { D.hostMode = x; D.hostTouched = true; UI.nav.refresh(); })),
-    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), input(D.remark, '{flag} {country} {n}', x => { D.remark = x; setPrev(); }))),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), input(D.remark, '{flag} {country} {n}', x => { D.remark = x; setPrev(); })),
+      row({ title: 'Страна в названии', right: UI.segmented([{ value: 'ru', label: 'Русский' }, { value: 'en', label: 'English' }], D.lang,
+        x => { D.lang = x; try { localStorage.setItem('remark_lang', x); } catch (e) {} setPrev(); }) })),
     prevEl));
   if (D.hostMode === 'normal') {
     v.append(group('Общий балансировщик', [h('label', { class: 'field stack' }, h('label', {}, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true))],
@@ -548,7 +552,7 @@ function deployView(pid) {
     const items = D.items.map(it => ({ location: it.loc, idx: it.idx, domains: D.domains[it.loc] || [] }));
     const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, items, period: D.period,
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
-      balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null }), 'Задачи запущены');
+      balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });

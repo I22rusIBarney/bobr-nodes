@@ -117,10 +117,26 @@ DEFAULT_REMARK = '{flag} {country} {n}'
 DEFAULT_BALANCER_REMARK = '{flag} {country}'
 
 
-def render_remark(tpl: str, loc: dict, name: str, domain: str, i: int) -> str:
+_EN: dict | None = None
+
+
+def country_name(loc: dict, lang: str = 'ru') -> str:
+    """Название страны локации: как в bcloud (русское) или английское по ISO-коду."""
+    global _EN
+    if lang != 'en':
+        return loc.get('name', '')
+    if _EN is None:
+        import json
+        from pathlib import Path
+        _EN = json.loads((Path(__file__).parent / 'countries_en.json').read_text(encoding='utf-8'))
+    code = re.sub(r'[^a-z]', '', (loc.get('code') or '').lower())[:2]
+    return _EN.get(code) or loc.get('name', '')
+
+
+def render_remark(tpl: str, loc: dict, name: str, domain: str, i: int, lang: str = 'ru') -> str:
     m = re.search(r'(\d+)$', name)
     n = m.group(1) if m else str(i)
-    out = (tpl or DEFAULT_REMARK).replace('{flag}', loc.get('flag', '')).replace('{country}', loc.get('name', '')) \
+    out = (tpl or DEFAULT_REMARK).replace('{flag}', loc.get('flag', '')).replace('{country}', country_name(loc, lang)) \
         .replace('{n}', n).replace('{name}', name).replace('{domain}', domain)
     return ' '.join(out.split())[:100] or name
 
@@ -155,7 +171,7 @@ def host_options(location: str, mode: str = 'simple', tags: str | list | None = 
 
 async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int,
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
-                      host: dict | None = None) -> list[int]:
+                      host: dict | None = None, lang: str = 'ru') -> list[int]:
     q = quote(cat, location, idx, period, len(domains))
     loc, offer = q['loc'], q['offer']
     batch = secrets.token_hex(4)
@@ -163,12 +179,12 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
     ids = []
     host = host or {'mode': 'simple'}
     if host.get('mode') == 'balancer':
-        host = {**host, 'balancer': {**host['balancer'], 'remark': render_remark(host['balancer']['remark'], loc, '', '', 1)}}
+        host = {**host, 'balancer': {**host['balancer'], 'remark': render_remark(host['balancer']['remark'], loc, '', '', 1, lang)}}
     for i, dom in enumerate(domains, 1):
         name = naming.node_name(dom)
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
-                'remark': render_remark(remark, loc, name, dom, i), 'password': gen_password(),
+                'remark': render_remark(remark, loc, name, dom, i, lang), 'password': gen_password(),
                 'host': host, 'squads': squads, 'script_id': (store.profile(pid) or {}).get('script_id'),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)

@@ -372,7 +372,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         ids = []
         for (loc, idx, doms), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
-                                         squads, str(b.get('remark') or '')[:100], host)
+                                         squads, str(b.get('remark') or '')[:100], host,
+                                         'en' if b.get('remark_lang') == 'en' else 'ru')
         return J({'ids': ids})
 
     # ── мои скрипты ──
