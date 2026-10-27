@@ -14,7 +14,7 @@ from aiohttp import web
 
 from . import engine, forms, services as svc
 from .bcloud import BcloudError
-from .runner import STAGES, Runner, bcloud_from
+from .runner import STAGES, Runner, bcloud_from, buyer_of
 from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
@@ -117,9 +117,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                       'value': '' if secret else v, 'hint': hint(v) if secret else ''}
         return out
 
-    def profile_summary(p: dict) -> dict:
+    def profile_summary(p: dict, jobs: list[dict]) -> dict:
+        mine = [j for j in jobs if j['profile_id'] == p['id']]
         return {'id': p['id'], 'name': p['name'], 'panel_url': p['panel_url'], 'base_domain': p.get('base_domain', ''),
-                'traffic_control': p.get('traffic_control', True)}
+                'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
+                'servers': sum(1 for j in mine if j['status'] == 'done'),
+                'active': sum(1 for j in mine if j['status'] in ACTIVE),
+                'failed': sum(1 for j in mine if j['status'] == 'failed')}
 
     def issues() -> list[str]:
         from .handlers import ready_issues
@@ -127,8 +131,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/state')
     async def state(request):
-        jobs = store.jobs(200)
-        return J({'settings': settings_view(), 'profiles': [profile_summary(p) for p in store.profiles()],
+        jobs = store.jobs(1000)
+        return J({'settings': settings_view(), 'profiles': [profile_summary(p, jobs) for p in store.profiles()],
                   'issues': issues(), 'bot_username': bot_username,
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
@@ -178,7 +182,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     # ── профили ──
     def profile_view(p: dict) -> dict:
         out = {k: ('' if k in forms.SECRET_FIELDS else p.get(k, '')) for k in forms.PFIELDS}
-        out.update({'id': p['id'], 'traffic_control': p.get('traffic_control', True),
+        out.update({'id': p['id'], 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
                     'hints': {k: hint(str(p.get(k) or '')) for k in forms.SECRET_FIELDS}})
         return out
 
@@ -193,23 +197,42 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles')
     async def create_profile(request):
-        prof = forms.clean_profile(await body(request))
+        prof = await with_owner(forms.clean_profile(await body(request)))
         prof['id'] = store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
 
     @r.put('/api/profiles/{pid}')
     async def update_profile(request):
         cur = profile_or_404(request.match_info['pid'])
-        prof = forms.clean_profile(await body(request), cur)
+        prof = await with_owner(forms.clean_profile(await body(request), cur), cur)
         prof['id'] = cur['id']
         store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
+
+    async def with_owner(prof: dict, cur: dict | None = None) -> dict:
+        """Владелец группы в bcloud: по ID или @username находим клиента и запоминаем его ID и подпись."""
+        owner = prof.get('owner') or ''
+        if not owner:
+            prof['owner_tg_id'], prof['owner_label'] = '', ''
+            return prof
+        if cur and owner == cur.get('owner') and cur.get('owner_tg_id'):
+            return prof
+        try:
+            u = await bcloud_from(store).resolve(owner)
+        except BcloudError as e:
+            raise ApiError(f'Клиент bcloud: {e}') from None
+        if u.get('banned'):
+            raise ApiError('Клиент bcloud заблокирован')
+        prof['owner_tg_id'] = str(u['tg_id'])
+        name = u.get('first_name') or ''
+        prof['owner_label'] = (f'@{u["username"]}' if u.get('username') else name or str(u['tg_id']))
+        return prof
 
     @r.delete('/api/profiles/{pid}')
     async def delete_profile(request):
         p = profile_or_404(request.match_info['pid'])
         if any(j['profile_id'] == p['id'] for j in store.active_jobs()):
-            raise ApiError('У профиля есть задачи в работе — дождитесь их')
+            raise ApiError('У группы есть задачи в работе — дождитесь их')
         store.delete_profile(p['id'])
         return J({'ok': True})
 
@@ -226,13 +249,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     # ── развёртывание ──
     @r.get('/api/catalog')
-    async def catalog(_):
-        cat = await svc.load_catalog(store)
+    async def catalog(request):
+        p = profile_or_404(request.query.get('pid', 0))
+        cat = await svc.load_catalog(store, p)
         try:
-            bal = await bcloud_from(store).balance()
+            bal = await bcloud_from(store, buyer_of(store, p)).balance()
         except BcloudError:
             bal = None
-        return J({'locations': cat['locations'], 'periods': cat['periods'], 'os_label': cat['os_label'], 'balance_kop': bal})
+        return J({'locations': cat['locations'], 'periods': cat['periods'], 'os_label': cat['os_label'], 'balance_kop': bal,
+                  'buyer': p.get('owner_label') or 'ваш аккаунт'})
 
     @r.post('/api/domains/auto')
     async def domains_auto(request):
@@ -257,11 +282,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not 1 <= len(domains) <= 50:
             raise ApiError('Нужно от 1 до 50 доменов')
         domains = await svc.check_domains(store, p, domains, len(domains))
-        cat = await svc.load_catalog(store)
+        cat = await svc.load_catalog(store, p)
         q = svc.quote(cat, str(b.get('location')), int(b.get('idx')), str(b.get('period') or '1m'), len(domains))
-        bal = await bcloud_from(store).balance()
+        bal = await bcloud_from(store, buyer_of(store, p)).balance()
         if bal < q['total_kop']:
-            raise ApiError(f'На балансе bcloud {bal / 100:.0f} ₽, а нужно {q["total_kop"] / 100:.0f} ₽')
+            who = p.get('owner_label') or 'вашего аккаунта'
+            raise ApiError(f'Не хватает денег: на балансе {who} {bal / 100:.0f} ₽, нужно {q["total_kop"] / 100:.0f} ₽')
         ids = await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, str(b['location']),
                                     int(b['idx']), str(b.get('period') or '1m'), domains)
         return J({'ids': ids})
@@ -272,7 +298,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         out = {'id': j['id'], 'domain': d['domain'], 'status': j['status'], 'stage': j['stage'], 'error': j['error'],
                'flag': d.get('flag', ''), 'loc_name': d.get('loc_name', ''), 'spec': d.get('spec', ''),
                'ip': d.get('ip'), 'created_at': j['created_at'], 'updated_at': j['updated_at'],
-               'profile': (store.profile(j['profile_id']) or {}).get('name', '')}
+               'profile': (store.profile(j['profile_id']) or {}).get('name', ''), 'profile_id': j['profile_id']}
         if full:
             out['stages'] = [{'code': c, 'label': lbl} for c, lbl in STAGES]
             out['last'] = runner.last.get(j['id'], '')
@@ -294,8 +320,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return j
 
     @r.get('/api/jobs')
-    async def jobs(_):
-        return J({'jobs': [job_view(j) for j in store.jobs(60)]})
+    async def jobs(request):
+        pid = request.query.get('pid')
+        js = store.jobs(500 if pid else 60)
+        if pid:
+            js = [j for j in js if str(j['profile_id']) == pid]
+        return J({'jobs': [job_view(j) for j in js]})
 
     @r.get('/api/jobs/{jid}')
     async def job(request):

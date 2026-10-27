@@ -9,7 +9,7 @@ import string
 
 from . import engine, naming
 from .bcloud import BcloudError
-from .runner import Runner, bcloud_from
+from .runner import Runner, bcloud_from, buyer_of
 from .store import Store
 
 PERIOD_LABEL = {'1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год'}
@@ -38,9 +38,9 @@ def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
     return engine.Cloudflare(prof.get('cf_token') or store.get('cf_token'))
 
 
-async def load_catalog(store: Store) -> dict:
-    """Каталог bcloud для развёртывания: только локации с тарифами, ОС выбрана автоматически."""
-    cat = await bcloud_from(store).catalog()
+async def load_catalog(store: Store, prof: dict | None = None) -> dict:
+    """Каталог bcloud для развёртывания (цены — для покупателя группы): только локации с тарифами, ОС выбрана автоматически."""
+    cat = await bcloud_from(store, buyer_of(store, prof or {})).catalog()
     if cat.get('maintenance'):
         raise BcloudError('в bcloud включён режим «продажи закрыты»')
     os_code = naming.pick_os([o['code'] for o in cat['os']])
@@ -64,7 +64,7 @@ def quote(cat: dict, location: str, idx: int, period: str, count: int) -> dict:
 
 async def auto_domains(store: Store, prof: dict, location: str, count: int) -> list[str]:
     if not prof.get('base_domain'):
-        raise ValueError('в профиле не задан домен для автоимён')
+        raise ValueError('в группе не задан домен для автоимён')
 
     def pick():
         cf = cf_for(store, prof)
@@ -118,7 +118,7 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
                 'remark': f'{loc["flag"]} {loc["name"]} {name}'.strip(), 'password': gen_password(),
-                'price_kop': q['one_kop']}
+                'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)
         await runner.render(jid, force=True)

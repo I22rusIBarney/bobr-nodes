@@ -1,5 +1,5 @@
 """Telegram-чат: меню с кнопкой веб-админки, быстрый мастер развёртывания, задачи и их ход.
-Настройки и профили панелей — в веб-админке (bot/web.py)."""
+Настройки и группы — в веб-админке (bot/web.py)."""
 from __future__ import annotations
 
 import html
@@ -107,7 +107,7 @@ def ready_issues(store: Store) -> list[str]:
     if not store.get('cf_token') and not any(p.get('cf_token') for p in store.profiles()):
         out.append('добавьте токен Cloudflare')
     if not store.profiles():
-        out.append('создайте профиль панели')
+        out.append('создайте группу')
     return out
 
 
@@ -117,7 +117,7 @@ def main_text(store: Store) -> str:
     if issues:
         lines.append('Чтобы начать, в панели управления: ' + ', '.join(issues) + '.')
     else:
-        lines.append(f'Профилей панелей: {len(store.profiles())}')
+        lines.append(f'Групп: {len(store.profiles())}')
     active = len(store.active_jobs())
     if active:
         lines.append(f'В работе задач: {active}')
@@ -164,7 +164,7 @@ async def deploy_start(c: CallbackQuery, state: FSMContext, store: Store, public
     ps = store.profiles()
     if len(ps) == 1:
         return await deploy_profile(c, state, store, ps[0]['id'])
-    await show(c, '<b>🚀 Куда ставим ноды?</b>\n\nВыберите профиль панели:',
+    await show(c, '<b>🚀 Куда ставим ноды?</b>\n\nВыберите группу:',
                kb(*[[(f'🗂 {p["name"]}', f'd:p:{p["id"]}')] for p in ps], BACK))
 
 
@@ -175,7 +175,7 @@ async def deploy_profile_cb(c: CallbackQuery, state: FSMContext, store: Store):
 
 async def deploy_profile(c: CallbackQuery, state: FSMContext, store: Store, pid: int):
     try:
-        cat = await svc.load_catalog(store)
+        cat = await svc.load_catalog(store, store.profile(pid))
     except BcloudError as e:
         return await show(c, f'❌ {html.escape(str(e))}', kb(BACK))
     await state.update_data(w={'pid': pid, 'cat': cat})
@@ -255,7 +255,7 @@ async def deploy_count(target, state: FSMContext, store: Store, n: int):
         sample = f'{naming.render(p.get("name_pattern") or naming.DEFAULT_PATTERN, naming.cc_of(w["loc"]), 1)}.{p["base_domain"]}'
         rows.append([(f'🤖 Автоматически ({sample}…)', 'd:dom:auto')])
     rows.append([('✍️ Ввести вручную', 'd:dom:manual')])
-    hint = '' if p.get('base_domain') else '\n\nДля автоимён задайте «Домен для автоимён» в профиле (панель управления).'
+    hint = '' if p.get('base_domain') else '\n\nДля автоимён задайте «Домен для автоимён» в настройках группы (панель управления).'
     await show(target, f'Домены для {n} нод:{hint}', kb(*rows, [('« Отмена', 'm:main')]))
 
 
@@ -291,18 +291,18 @@ async def deploy_manual_msg(m: Message, state: FSMContext, store: Store):
 
 
 async def confirm(target, state: FSMContext, store: Store):
-    from .runner import bcloud_from
+    from .runner import bcloud_from, buyer_of
     w = await wizard(state)
     p = store.profile(w['pid'])
     q = svc.quote(w['cat'], w['loc'], w['idx'], w['period'], w['count'])
     try:
-        bal = await bcloud_from(store).balance()
-        bal_line = f'Баланс bcloud: {rub(bal)}' + ('' if bal >= q['total_kop'] else ' — ⚠️ <b>не хватает</b>')
+        bal = await bcloud_from(store, buyer_of(store, p)).balance()
+        bal_line = f'Баланс {html.escape(p.get("owner_label") or "bcloud")}: {rub(bal)}' + ('' if bal >= q['total_kop'] else ' — ⚠️ <b>не хватает</b>')
     except BcloudError as e:
-        bal, bal_line = None, f'Баланс bcloud: ❓ {html.escape(str(e))}'
+        bal, bal_line = None, f'Баланс: ❓ {html.escape(str(e))}'
     loc, offer = q['loc'], q['offer']
     lines = ['<b>Проверьте заказ</b>', '',
-             f'🗂 {html.escape(p["name"])}',
+             f'🗂 {html.escape(p["name"])}' + (f' · для {html.escape(p["owner_label"])}' if p.get('owner_label') else ''),
              f'{loc["flag"]} {html.escape(loc["name"])} · {svc.spec_text(offer)}',
              f'💿 {html.escape(w["cat"]["os_label"])} · {svc.PERIOD_LABEL.get(w["period"], w["period"])}',
              f'🛡 Traffic Control: {"да" if p.get("traffic_control", True) else "нет"}', '',

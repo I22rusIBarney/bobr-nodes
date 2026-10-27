@@ -121,6 +121,17 @@ def v_pubkey(v, _=None):
     return v
 
 
+def v_owner(v, _=None):
+    v = v.strip()
+    if v in ('', '-'):
+        return ''
+    if re.fullmatch(r'\d{3,15}', v):
+        return v
+    if re.fullmatch(r'@?[A-Za-z][A-Za-z0-9_]{3,31}', v):
+        return '@' + v.lstrip('@')
+    raise ValueError('нужен Telegram ID (цифры) или @username')
+
+
 def v_parallel(v, _=None):
     if not v.strip().isdigit() or not 1 <= int(v) <= 10:
         raise ValueError('число от 1 до 10')
@@ -131,7 +142,7 @@ def v_parallel(v, _=None):
 SETTINGS = {
     'bcloud_url': ('Адрес bcloud', 'Адрес бота bcloud, как PUBLIC_URL, например https://bobr-cloud.online', False, v_url),
     'bcloud_token': ('Токен bcloud', 'На сервере bcloud выполните: <code>bcloud api-token</code>', True, v_nonempty),
-    'bcloud_tg_id': ('Аккаунт bcloud (Telegram ID)', 'С его баланса идут покупки. Должен быть в ADMIN_IDS bcloud.', False, v_int),
+    'bcloud_tg_id': ('Ваш аккаунт в bcloud (Telegram ID)', 'С его баланса покупаются серверы групп без своего клиента.', False, v_int),
     'cf_token': ('Токен Cloudflare', 'Права: Zone → DNS → Edit и Zone → Zone → Read', True, v_nonempty),
     'ssh_pubkey': ('Мой SSH-ключ', 'Публичный ключ (содержимое .pub) — добавим на каждый сервер. «-» — не добавлять', False, v_pubkey),
     'parallel': ('Параллельных установок', 'Сколько нод ставить одновременно, 1–10', False, v_parallel),
@@ -139,7 +150,8 @@ SETTINGS = {
 SECRET_SETTINGS = {k for k, (_, _, secret, _) in SETTINGS.items() if secret}
 
 PFIELDS = {
-    'name': ('Название', 'Как называть профиль, например «Основная панель»', False, v_text),
+    'name': ('Название группы', 'Например «Мои ноды» или имя клиента', False, v_text),
+    'owner': ('Клиент bcloud', 'Telegram ID или @username владельца в bcloud: серверы покупаются от его имени, с его баланса и видны ему в bcloud. Пусто — с вашего аккаунта', False, v_owner),
     'panel_url': ('Адрес панели', 'Как открываете панель в браузере: https://panel.example.com', False, v_url),
     'panel_token': ('API-токен панели', 'Панель → Настройки → API Tokens → создать', True, v_nonempty),
     'panel_cookie': ('Cookie-защита', 'Пришлите секретную ссылку входа целиком или пару ИМЯ=ЗНАЧЕНИЕ. «-» — защиты нет', True, v_cookie),
@@ -149,12 +161,12 @@ PFIELDS = {
     'name_pattern': ('Шаблон автоимён', '{cc} — код локации, {n} — номер. По умолчанию {cc}{n}. Без «vpn»', False, v_pattern),
     'squads': ('Сквады', 'UUID внутренних сквадов через запятую — туда добавим inbound новых нод. «-» — не добавлять', False, v_squads),
     'node_port': ('Порт API ноды', 'По умолчанию 2222', False, v_port),
-    'cf_token': ('Свой токен Cloudflare', 'Если домены профиля в другом аккаунте Cloudflare. «-» — общий из настроек', True, v_opt_token),
+    'cf_token': ('Токен Cloudflare группы', 'Если домены группы в другом аккаунте Cloudflare. Пусто — общий из «Подключений»', True, v_opt_token),
 }
 SECRET_FIELDS = {k for k, (_, _, secret, _) in PFIELDS.items() if secret}
 REQUIRED = ['name', 'panel_url', 'panel_token', 'outgoing_ips', 'email']
 WIZARD = ['name', 'panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'email', 'base_domain']
-PROFILE_DEFAULTS = {'name_pattern': naming.DEFAULT_PATTERN, 'node_port': 2222, 'traffic_control': True, 'squads': '',
+PROFILE_DEFAULTS = {'owner': '', 'owner_tg_id': '', 'owner_label': '', 'name_pattern': naming.DEFAULT_PATTERN, 'node_port': 2222, 'traffic_control': True, 'squads': '',
                     'cf_token': '', 'panel_cookie': '', 'base_domain': '', 'autoremove': True}
 
 

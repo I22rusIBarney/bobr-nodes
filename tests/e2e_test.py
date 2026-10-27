@@ -268,7 +268,7 @@ async def main():
     world.records.append({'id': 'x', 'type': 'A', 'name': 'de1.example.com', 'content': '192.0.2.1'})
 
     # ── развёртывание из админки: 2 ноды в Германии, автоимена
-    st, cat = await wapi('catalog')
+    st, cat = await wapi(f'catalog?pid={pid}')
     ok(st == 200 and cat['os_label'] and cat['balance_kop'] == 100_000 and cat['locations'][0]['offers'], 'каталог bcloud в админке')
     st, js = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 2})
     ok(js['domains'] == ['de2.example.com', 'de3.example.com'], f'автоимена пропускают занятый de1: {js}')
@@ -299,8 +299,42 @@ async def main():
         bal = (await s.get(BD.User, 1)).balance_kop
     ok(bal < 100_000, 'покупки списаны с баланса в bcloud')
 
+    # ── группа клиента: покупки от его имени и с его баланса
+    st, js = await wapi('profiles', 'POST', {**prof_in, 'name': 'Клиент Вася', 'base_domain': 'example.com', 'owner': '@nobody_here'})
+    ok(st == 400 and 'Клиент bcloud' in js['detail'], 'неизвестный клиент bcloud — понятная ошибка')
+    async with BD.session() as s_:
+        s_.add(BD.User(tg_id=77, username='Vasya_Client', first_name='Вася'))
+        await s_.commit()
+        await BD.change_balance(s_, 77, 30_000, 'admin_adjust')
+    st, js = await wapi('profiles', 'POST', {**prof_in, 'name': 'Клиент Вася', 'base_domain': 'example.com', 'owner': 'vasya_client',
+                                             'cf_token': 'cf-token-123456'})
+    ok(st == 200, f'группа клиента создана по @username: {js}')
+    gid = js['id']
+    g = store.profile(gid)
+    ok(g['owner_tg_id'] == '77' and g['owner_label'] == '@Vasya_Client', 'клиент найден в bcloud, запомнены ID и подпись')
+    st, js = await wapi('state')
+    gs = {x['id']: x for x in js['profiles']}
+    ok(gs[pid]['servers'] == 2 and gs[gid]['servers'] == 0 and gs[gid]['owner_label'] == '@Vasya_Client', 'группы: серверов по группам и клиент')
+    st, cat2 = await wapi(f'catalog?pid={gid}')
+    ok(cat2['buyer'] == '@Vasya_Client' and cat2['balance_kop'] == 30_000, 'каталог группы: платит клиент, его баланс')
+    st, dj = await wapi('domains/auto', 'POST', {'pid': gid, 'location': 'nl', 'count': 1})
+    st, js = await wapi('deploy', 'POST', {'pid': gid, 'location': 'nl', 'idx': 1, 'period': '1m', 'domains': dj['domains']})
+    ok(st == 400 and 'Не хватает денег' in js['detail'] and '@Vasya_Client' in js['detail'], 'не хватает денег клиента — понятная ошибка')
+    st, js = await wapi('deploy', 'POST', {'pid': gid, 'location': 'nl', 'idx': 0, 'period': '1m', 'domains': dj['domains']})
+    ok(st == 200, 'деплой в группу клиента')
+    await runner.wait_all()
+    cj = store.job(js['ids'][0])
+    ok(cj['status'] == 'done' and cj['data']['buyer'] == 77, f'нода клиента развёрнута: {cj["error"]}')
+    async with BD.session() as s_:
+        csrv = await s_.get(BD.Server, cj['data']['server_id'])
+        cbal = (await s_.get(BD.User, 77)).balance_kop
+    ok(csrv.tg_id == 77 and cbal < 30_000, 'сервер в аккаунте клиента в bcloud, оплачен с его баланса')
+    st, js = await wapi(f'jobs?pid={gid}')
+    ok([x['id'] for x in js['jobs']] == [cj['id']], 'серверы группы отдельно от других групп')
+
     # ── ручные домены: чужая зона и успешная попытка с ошибкой установщика
     await tap('m:deploy')
+    out = await tap(f'd:p:{pid}')
     await tap('d:l:nl')
     out = await tap('d:o:0')
     await tap('d:t:1m') if 'Срок' in last(out) else None
@@ -311,7 +345,8 @@ async def main():
     out = await say('de2.example.com')
     ok('уже есть в задачах' in last(out), 'занятый домен отклонён')
     await say('nl7.example.com')
-    behaviour['198.51.100.3'] = 'unknown'
+    nxt = f"198.51.100.{max(astra.made) - 500 + 1}"
+    behaviour[nxt] = 'unknown'
     await tap('d:go')
     await runner.wait_all()
     j = store.jobs(1)[0]
@@ -319,12 +354,12 @@ async def main():
        f'незнакомый вопрос установщика останавливает задачу: {j["error"][:80]}')
     ok('Повторить' in buttons(), 'у упавшей задачи есть кнопка «Повторить»')
     bought = len(astra.made)
-    behaviour['198.51.100.3'] = 'ok'
+    behaviour[nxt] = 'ok'
     await tap(f'j:{j["id"]}:retry')
     await runner.wait_all()
     j = store.job(j['id'])
     ok(j['status'] == 'done' and len(astra.made) == bought, 'повтор доустановил ноду без новой покупки')
-    ok(len(world.nodes) == 3 and world.nodes[-1]['countryCode'] == 'NL', 'третья нода в панели')
+    ok(len(world.nodes) == 4 and world.nodes[-1]['countryCode'] == 'NL', 'ещё одна нода в панели')
 
     # ── перезапуск бота посреди задачи: продолжение
     jid = store.add_job('b', pid, 1, {**j['data'], 'domain': 'nl8.example.com', 'name': 'nl8', 'server_id': None,

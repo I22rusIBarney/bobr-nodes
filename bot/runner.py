@@ -25,8 +25,14 @@ class Fail(Exception):
     pass
 
 
-def bcloud_from(store: Store) -> Bcloud:
-    return Bcloud(store.get('bcloud_url'), store.get('bcloud_token'), int(store.get('bcloud_tg_id') or 0))
+def bcloud_from(store: Store, tg_id: int | str | None = None) -> Bcloud:
+    """Клиент bcloud от имени tg_id (владелец группы); по умолчанию — аккаунт из настроек."""
+    return Bcloud(store.get('bcloud_url'), store.get('bcloud_token'), int(tg_id or store.get('bcloud_tg_id') or 0))
+
+
+def buyer_of(store: Store, prof: dict) -> int:
+    """Чей баланс у группы: владелец группы или аккаунт из настроек."""
+    return int(prof.get('owner_tg_id') or store.get('bcloud_tg_id') or 0)
 
 
 def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
@@ -150,8 +156,8 @@ class Runner:
         try:
             prof = self.store.profile(job['profile_id'])
             if not prof:
-                raise Fail('профиль панели удалён')
-            bc = self.bcloud_factory(self.store)
+                raise Fail('группа удалена')
+            bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
 
             if not d.get('server_id'):
                 if job['status'] == 'buying':

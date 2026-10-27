@@ -73,13 +73,16 @@ function home() {
     h('div', { class: 'run' }, h('b', {}, String(j.active)), h('span', {}, 'в работе')),
     h('div', { class: 'ok' }, h('b', {}, String(j.done)), h('span', {}, 'готово')),
     h('div', { class: 'bad' }, h('b', {}, String(j.failed)), h('span', {}, 'с ошибкой'))))));
-  const go = h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => UI.nav.push(deployView) }, icon('plus'), 'Развернуть ноды');
+  const go = h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => { D = null; UI.nav.push(() => deployView()); } }, icon('plus'), 'Развернуть ноды');
   v.append(h('div', { class: 'pad' }, go));
   v.append(group(null, [row({ icon: 'stack', tile: '#0A84FF', title: 'Задачи', detail: j.active ? 'в работе: ' + j.active : '', onClick: () => UI.nav.push(jobsView) })]));
-  v.append(group('Профили панелей', [
-    ...ST.profiles.map(p => row({ icon: 'server', tile: '#5856D6', title: p.name, sub: p.panel_url.replace(/^https?:\/\//, '') + (p.base_domain ? ' · ' + p.base_domain : ''), onClick: () => openProfile(p.id) })),
-    row({ icon: 'plusCircle', tile: '#34C759', title: 'Новый профиль', cls: 'accent', onClick: () => openProfile(null) })],
-    'Профиль — панель Remnawave и всё для её нод: токен, cookie-защита, исходящие IP, домен для автоимён. Панелей может быть несколько.'));
+  v.append(group('Группы', [
+    ...ST.profiles.map(p => row({ icon: 'stack', tile: '#0A84FF', title: p.name,
+      sub: 'Серверов: ' + p.servers + (p.owner_label ? ' · ' + p.owner_label : ''),
+      right: p.active ? badge('в работе: ' + p.active, 'accent') : p.failed ? badge('ошибок: ' + p.failed, 'bad') : null,
+      onClick: () => UI.nav.push(() => groupView(p.id)) })),
+    row({ icon: 'plusCircle', tile: '#34C759', title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })],
+    'Группа — своя панель Remnawave, свой Cloudflare и свой клиент в bcloud: серверы группы покупаются от его имени, с его баланса и видны ему в bcloud.'));
   const ok = k => s[k] && s[k].set;
   v.append(group('Подключения', [
     row({ icon: 'store', tile: '#FF9500', title: 'bcloud', sub: 'покупка серверов', right: badge(ok('bcloud_url') && ok('bcloud_token') ? 'Подключён' : 'Не настроен', ok('bcloud_url') && ok('bcloud_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(bcloudView) }),
@@ -129,7 +132,33 @@ function otherView() {
     null, { fields: { ssh_pubkey: { area: true, ph: 'ssh-ed25519 AAAA… me@laptop' }, parallel: { inputmode: 'numeric' } } }));
 }
 
-// ───────── профиль ─────────
+// ───────── группа ─────────
+const GJ = {};
+function groupView(pid) {
+  const g = ST.profiles.find(p => p.id === pid);
+  if (!g) return h('div', {}, ...title('Группа'), h('div', { class: 'notice' }, 'Группа удалена'));
+  const reload = async () => { try { GJ[pid] = (await api('jobs?pid=' + pid)).jobs; } catch (e) { GJ[pid] = { error: e.message }; } UI.nav.refresh(); };
+  const jobs = GJ[pid];
+  if (jobs === undefined) reload();
+  else if (Array.isArray(jobs) && jobs.some(j => ['queued', 'buying', 'provisioning', 'deploying'].includes(j.status)))
+    poll(() => { if (document.querySelector('#root .group-page')) reload(); }, 4000);
+  const v = h('div', { class: 'group-page' }, ...title(g.name),
+    h('div', { class: 'subtitle' }, (g.owner_label ? 'Клиент bcloud: ' + g.owner_label : 'Покупки с вашего аккаунта') + ' · ' + g.panel_url.replace(/^https?:\/\//, '')));
+  v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'),
+    onclick: () => { D = null; UI.nav.push(() => deployView(pid)); } }, icon('plus'), 'Развернуть в группе')));
+  if (jobs === undefined) v.append(group('Серверы', [h('div', { class: 'skeleton' })]));
+  else if (jobs.error) v.append(h('div', { class: 'notice' }, jobs.error));
+  else if (!jobs.length) v.append(group('Серверы', [row({ cls: 'wrap', title: 'Пока нет серверов', sub: 'Нажмите «Развернуть в группе» — серверы появятся здесь и у клиента в bcloud.' })]));
+  else v.append(group('Серверы · ' + jobs.length, jobs.map(j => {
+    const [st, cls] = STATUS[j.status] || [j.status, ''];
+    return row({ title: j.domain, sub: j.status === 'failed' ? j.error.slice(0, 100) : `${j.flag} ${j.loc_name} · ${j.status === 'deploying' ? (STAGE[j.stage] || j.spec) : j.spec}`,
+      right: badge(st, cls), onClick: () => { delete JOB[j.id]; UI.nav.push(() => jobView(j.id)); } });
+  })));
+  v.append(group(null, [row({ icon: 'gear', tile: '#8E8E93', title: 'Настройки группы', sub: 'панель, клиент bcloud, Cloudflare, домены', onClick: () => openProfile(pid) })]));
+  return v;
+}
+
+// ───────── настройки группы ─────────
 async function openProfile(id) {
   if (!FIELDS) FIELDS = await UI.run(() => api('fields'));
   if (!FIELDS) return;
@@ -139,7 +168,7 @@ async function openProfile(id) {
 function profileView(p) {
   const F = FIELDS.profile, inputs = {};
   const ph = { panel_url: 'https://panel.example.com', panel_cookie: 'ссылка входа или ИМЯ=ЗНАЧЕНИЕ', outgoing_ips: '203.0.113.10', email: 'admin@example.com',
-    base_domain: 'example.com', name_pattern: '{cc}{n}', squads: 'UUID через запятую', node_port: '2222', name: 'Основная панель' };
+    base_domain: 'example.com', name_pattern: '{cc}{n}', squads: 'UUID через запятую', node_port: '2222', name: 'Мои ноды', owner: '@username или ID' };
   const field = k => {
     const f = F[k];
     const i = h('input', { type: f.secret ? 'password' : 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
@@ -159,14 +188,19 @@ function profileView(p) {
     if (!r) return;
     showStatus(status, r.check);
     await load();
-    if (!p.id) { p.id = r.id; UI.toast('Профиль создан'); }
+    if (!p.id) { p.id = r.id; UI.toast('Группа создана'); }
+    const fresh = await api('profiles/' + p.id); p.owner_label = fresh.owner_label; ownerNote.textContent = ownerText();
     Object.entries(inputs).forEach(([k, i]) => { if (F[k].secret && i.value) { i.value = ''; i.placeholder = 'сохранено'; } });
   });
   const test = h('button', { class: 'btn tinted', type: 'button' }, 'Проверить');
-  test.onclick = UI.busy(test, async () => { if (!p.id) return UI.alert('Сначала создайте профиль'); const r = await UI.run(() => api('profiles/' + p.id + '/check', 'POST')); if (r) showStatus(status, r); });
-  const out = [...title(p.id ? p.name : 'Новый профиль'),
+  test.onclick = UI.busy(test, async () => { if (!p.id) return UI.alert('Сначала создайте группу'); const r = await UI.run(() => api('profiles/' + p.id + '/check', 'POST')); if (r) showStatus(status, r); });
+  const ownerText = () => p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в bcloud.' : 'Пусто — серверы покупаются с вашего аккаунта bcloud.';
+  const ownerNote = h('div', { class: 'group-f' }, ownerText());
+  const out = [...title(p.id ? p.name : 'Новая группа'),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Группа'),
+      h('div', { class: 'list' }, ['name', 'owner'].map(field)), ownerNote),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Панель Remnawave'),
-      h('div', { class: 'list' }, ['name', 'panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'node_port'].map(field)),
+      h('div', { class: 'list' }, ['panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'node_port'].map(field)),
       h('div', { class: 'group-f' }, 'Токен: Панель → Настройки → API Tokens. Cookie-защита: вставьте секретную ссылку входа целиком — бот сам возьмёт пару ИМЯ=ЗНАЧЕНИЕ. Исходящие IP — только им будет открыт API ноды.'), status),
     h('div', { class: 'actions' }, test, save),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Ноды'),
@@ -174,28 +208,33 @@ function profileView(p) {
         row({ title: 'Traffic Control', sub: 'фильтрация сканеров на нодах', right: UI.toggle(tc, v => { tc = v; }, 'Traffic Control') })),
       h('div', { class: 'group-f' }, 'Домен для автоимён: например example.com → ноды de1.example.com, nl2.example.com. Пусто — домены только вручную. В шаблоне {cc} — код локации, {n} — номер; «vpn» в именах запрещено. Сквады — UUID внутренних сквадов, куда добавить inbound новых нод.')),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Cloudflare'),
-      h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, 'Нужен, только если домены этого профиля в другом аккаунте Cloudflare. Пусто — общий токен из «Подключений».')),
+      h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, 'Токен Cloudflare, где лежат домены нод этой группы. Пусто — общий токен из «Подключений».')),
     h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', onclick: () => save.click() }, p.id ? 'Сохранить' : 'Создать'))];
-  if (p.id) out.push(group(null, [row({ title: 'Удалить профиль', cls: 'destructive', onClick: async () => {
-    const ok = await UI.ask({ title: 'Удалить профиль?', message: 'Ноды и записи в панели останутся, удалятся только настройки в боте.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
-    if (ok && await UI.run(() => api('profiles/' + p.id, 'DELETE'), 'Профиль удалён') !== undefined) { await load(); UI.nav.back(); }
+  if (p.id) out.push(group(null, [row({ title: 'Удалить группу', cls: 'destructive', onClick: async () => {
+    const ok = await UI.ask({ title: 'Удалить группу?', message: 'Серверы, ноды и записи в панели останутся, удалятся только настройки в боте.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
+    if (ok && await UI.run(() => api('profiles/' + p.id, 'DELETE'), 'Группа удалена') !== undefined) { await load(); UI.nav.reset(); }
   } })]));
   return h('div', {}, ...out);
 }
 
 // ───────── развёртывание ─────────
 let D = null;
-function deployView() {
+function fetchCat() {
+  const d = D; d.cat = null; d.err = null; d.idx = null;
+  api('catalog?pid=' + d.pid).then(c => { if (D !== d) return; d.cat = c; if (!c.locations.some(l => l.code === d.loc)) d.loc = c.locations[0] && c.locations[0].code; UI.nav.refresh(); })
+    .catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
+}
+function deployView(pid) {
   if (!D) {
-    D = { pid: ST.profiles[0] && ST.profiles[0].id, loc: null, idx: null, period: '1m', count: 1, mode: null, manual: '', domains: [], cat: null, err: null };
-    api('catalog').then(c => { D.cat = c; D.loc = c.locations[0] && c.locations[0].code; UI.nav.refresh(); }).catch(e => { D.err = e.message; UI.nav.refresh(); });
+    D = { pid: pid || (ST.profiles[0] && ST.profiles[0].id), loc: null, idx: null, period: '1m', count: 1, mode: null, manual: '', domains: [], cat: null, err: null };
+    fetchCat();
   }
   const v = h('div', {}, ...title('Развернуть'));
-  if (D.err) { v.append(h('div', { class: 'notice' }, D.err)); return v; }
-  if (!D.cat) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
   const prof = ST.profiles.find(p => p.id === D.pid) || ST.profiles[0];
   const reset = () => { D.domains = []; };
-  if (ST.profiles.length > 1) v.append(UI.section('Панель', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; D.mode = null; reset(); UI.nav.refresh(); })));
+  if (ST.profiles.length > 1) v.append(UI.section('Группа', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; D.mode = null; reset(); fetchCat(); UI.nav.refresh(); })));
+  if (D.err) { v.append(h('div', { class: 'notice' }, D.err)); return v; }
+  if (!D.cat) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
   v.append(UI.section('Локация', UI.chips(D.cat.locations.map(l => ({ value: l.code, flag: l.flag, label: l.name })), D.loc, x => { D.loc = x; D.idx = null; reset(); UI.nav.refresh(); })));
   const loc = D.cat.locations.find(l => l.code === D.loc);
   if (!loc) return v;
@@ -247,16 +286,17 @@ function deployView() {
   const enough = bal === null || bal >= total;
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Итого'), h('div', { class: 'list' },
     h('div', { class: 'total' }, h('span', {}, `${rubK(one)} × ${D.count}`), h('b', {}, rubK(total))),
-    row({ title: 'Баланс bcloud', detail: bal === null ? '—' : rubK(bal), right: enough ? null : badge('Не хватает', 'bad') }),
+    row({ title: 'Платит', detail: D.cat.buyer }),
+    row({ title: 'Баланс', detail: bal === null ? '—' : rubK(bal), right: enough ? null : badge('Не хватает', 'bad') }),
     row({ title: 'Система', detail: D.cat.os_label }),
     row({ title: 'Traffic Control', detail: prof.traffic_control ? 'да' : 'нет' }))));
   const go = h('button', { class: 'btn', type: 'button', disabled: !enough || D.domains.length !== D.count }, icon('bolt'), 'Купить и установить');
   go.onclick = UI.busy(go, async () => {
-    const ok = await UI.ask({ title: 'Купить и установить?', message: `${D.count} × ${loc.name}, ${rubK(total)} спишется с баланса bcloud.`, buttons: [{ id: 'y', text: 'Купить' }] });
+    const ok = await UI.ask({ title: 'Купить и установить?', message: `${D.count} × ${loc.name}, ${rubK(total)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
     if (!ok) return;
     const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, location: D.loc, idx: D.idx, period: D.period, domains: D.domains }), 'Задачи запущены');
     if (!r) return;
-    D = null; await load(); UI.nav.reset(); UI.nav.push(jobsView);
+    const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });
   v.append(h('div', { class: 'pad' }, go,
     h('div', { class: 'group-f', style: 'margin:8px 0 0' }, D.domains.length === D.count ? 'Ход установки — в «Задачах» и сообщениями в чате с ботом.' : 'Подберите или проверьте домены, чтобы продолжить.')));
@@ -327,7 +367,7 @@ let lastDepth = 0;
 document.addEventListener('navchange', e => {
   const back = e.detail.depth === 0 && lastDepth > 0;
   lastDepth = e.detail.depth;
-  if (back) { JOBS = null; D = null; load(); }
+  if (back) { JOBS = null; D = null; for (const k in GJ) delete GJ[k]; load(); }
 });
 UI.nav.mount(document.getElementById('root'), home);
 load();
