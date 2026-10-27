@@ -482,10 +482,10 @@ async def main():
     out = next((o for o in cfg['outbounds'] if o['tag'] == 'psiphon-out'), None)
     ok(out == {'tag': 'psiphon-out', 'protocol': 'socks', 'settings': {'servers': [{'address': '172.17.0.1', 'port': 1080}]}},
        f'выход psiphon-out на SOCKS5 ноды: {out}')
-    last = cfg['routing']['rules'][-1]
-    ok(last == {'type': 'field', 'domain': ['domain:google.com', 'geosite:youtube'], 'network': 'tcp', 'outboundTag': 'psiphon-out'}
+    prule = cfg['routing']['rules'][-1]
+    ok(prule == {'type': 'field', 'domain': ['domain:google.com', 'geosite:youtube'], 'network': 'tcp', 'outboundTag': 'psiphon-out'}
        and any(r.get('outboundTag') == 'BLOCK' and 'geoip:private' in r.get('ip', []) for r in cfg['routing']['rules'][:-1]),
-       f'правило Psiphon — последним, после блокировок: {last}')
+       f'правило Psiphon — последним, после блокировок: {prule}')
     ok(all('Vision-NV' not in json.dumps(r) or 'Vision-NV-PS' in json.dumps(r) for r in cfg['routing']['rules']),
        'правила маршрутизации ссылаются на новый тег inbound')
     psn = [n for n in world.nodes if n['address'] in {j['data']['ip'] for j in pj}]
