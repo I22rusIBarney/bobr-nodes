@@ -21,7 +21,8 @@ from .runner import Runner, bcloud_from, buyer_of, stages_for
 from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
-STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript'}
+STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
+          'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2'}  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
 
 
 def validate_init_data(init_data: str, bot_token: str, max_age_s: int = 86400, now: float | None = None) -> dict | None:
@@ -159,7 +160,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         name = request.match_info['name']
         if name not in STATIC:
             raise web.HTTPNotFound()
-        return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': 'no-cache'})
+        cache = 'public, max-age=31536000, immutable' if name.endswith('.woff2') else 'no-cache'  # шрифты не меняются
+        return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
 
     @r.get('/health')
     async def health(_):

@@ -3,8 +3,8 @@
   const tg = (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData !== undefined) ? window.Telegram.WebApp : null;
   const at = v => { try { return !!tg && tg.isVersionAtLeast(v); } catch (e) { return false; } };
 
-  // ── Тема: единая тёмная дизайн-система BobrGO Cloud; Telegram красим в цвет фона ──
-  const BG = '#17191E';
+  // ── Тема: графитовая дизайн-система Bobr Nodes; Telegram красим в цвет фона ──
+  const BG = '#141619';
   function applyTheme() {
     const root = document.documentElement;
     root.dataset.scheme = 'dark';
@@ -97,27 +97,42 @@
       return UI.h('section', { class: 'section' + (cls ? ' ' + cls : '') }, label ? UI.h('div', { class: 'group-h' }, label) : null,
         body, footer ? UI.h('div', { class: 'group-f' }, footer) : null);
     },
-    /* Приглушённые цвета иконок: старые iOS-цвета → палитра дизайн-системы. */
-    TILE: { '#34C759': '#34D399', '#0A84FF': '#438CFF', '#007AFF': '#438CFF', '#5856D6': '#8B8CFF', '#FF9500': '#FBBF5B', '#FF3B30': '#FF6B6B',
-      '#FF2D55': '#FF7A9A', '#AF52DE': '#C084FC', '#30B0C7': '#4CC9E0', '#34AADC': '#5BB8F0', '#8E8E93': '#A3A8B4' },
 
     // ── строки списков ──
     group(header, rows, footer) {
       return UI.h('section', { class: 'group' }, header ? UI.h('div', { class: 'group-h' }, header) : null,
         UI.h('div', { class: 'list' }, rows), footer ? UI.h('div', { class: 'group-f' }, footer) : null);
     },
-    row({ title, sub, detail, icon, tile, flag, onClick, chevron, cls, right, label }) {
+    /* Строка списка. status: [текст, 'ok'|'bad'|'warn'|'run'] — точка и слово справа; mono — detail машинным шрифтом;
+       copy — значение, которое копируется кнопкой справа (IP, пароль, ключ). Иконки без цветных подложек. */
+    row({ title, sub, detail, icon, flag, onClick, chevron, cls, right, label, status, mono, copy, copyLabel }) {
       const tap = !!onClick;
-      const lead = icon ? UI.h('span', { class: 'icon-tile', style: '--tile:' + (UI.TILE[tile] || tile || 'var(--accent)') }, UI.icon(icon))
+      const lead = icon ? UI.h('span', { class: 'icon-tile' }, UI.icon(icon))
         : flag ? UI.h('span', { class: 'flag-tile', 'aria-hidden': 'true' }, flag) : null;
+      if (status) right = UI.h('span', { class: 'st ' + (status[1] || '') }, status[0]);
+      if (copy) right = UI.h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Скопировать ' + (copyLabel || title),
+        onclick: e => { e.stopPropagation(); UI.copy(copy, copyLabel || title); } }, UI.icon('copy'));
       const n = UI.h(tap ? 'button' : 'div', {
         class: 'row' + (tap ? ' tap' : '') + (lead ? ' has-icon' : '') + (cls ? ' ' + cls : ''), onclick: onClick, type: tap ? 'button' : undefined, 'aria-label': label,
       }, lead,
         UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), sub ? UI.h('div', { class: 's' }, sub) : null),
-        detail !== undefined && detail !== null ? UI.h('span', { class: 'd num' }, detail) : null,
+        detail !== undefined && detail !== null ? UI.h('span', { class: 'd' + (mono ? ' mono' : ' num') }, detail) : null,
         right || null,
         (chevron !== undefined ? chevron : tap && !/accent|destructive/.test(cls || '')) ? UI.icon('chevron', 'chev') : null);
       return n;
+    },
+    /* Раскрывающийся блок: заголовок, сводка текущего значения и содержимое по нажатию. key — запомнить состояние. */
+    fold({ title, summary, open, key, body }) {
+      const store = UI._folds || (UI._folds = {});
+      let isOpen = key && key in store ? store[key] : !!open;
+      const chev = UI.icon('chevron', 'chev');
+      const btn = UI.h('button', { class: 'fold', type: 'button', 'aria-expanded': String(isOpen) },
+        UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), summary ? UI.h('div', { class: 's' }, summary) : null), chev);
+      const box = UI.h('div', { class: 'fold-body', hidden: !isOpen });
+      const fill = () => { if (isOpen && !box.childElementCount) box.append(...[].concat(typeof body === 'function' ? body() : body).filter(Boolean)); };
+      btn.onclick = () => { isOpen = !isOpen; if (key) store[key] = isOpen; btn.setAttribute('aria-expanded', String(isOpen)); box.hidden = !isOpen; fill(); UI.haptic('select'); };
+      fill();
+      return [btn, box];
     },
     toggle(checked, onChange, label) {
       const i = UI.h('input', { type: 'checkbox', role: 'switch', 'aria-label': label });
@@ -282,6 +297,8 @@
     plusCircle: S('<circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/>'),
     wallet: S('<path d="M3 7a2 2 0 0 1 2-2h12v4"/><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M16.5 13.5h.01"/>'),
     gear: S('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+    search: S('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
+    grip: S('<path d="M5 9h14M5 15h14"/>'),
     copy: S('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>'),
     eye: S('<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
     eyeOff: S('<path d="M17.9 17.9A10.4 10.4 0 0 1 12 19c-6.4 0-10-7-10-7a18 18 0 0 1 4.1-5M9.9 5.2A9.6 9.6 0 0 1 12 5c6.4 0 10 7 10 7a18 18 0 0 1-2.2 3.2M3 3l18 18"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>'),
