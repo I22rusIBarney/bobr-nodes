@@ -41,7 +41,26 @@ def strip_ansi(s: str | None) -> str:
 
 # ─────────────────────────────── HTTP ────────────────────────────────
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Перенаправление не выполняем: для API это почти всегда заглушка прокси (не прошла cookie-защита)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _not_json(raw: bytes, headers=None) -> dict:
+    text = raw[:4000].decode('utf-8', 'replace')
+    m = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
+    out = {'raw': text[:500], 'not_json': True, 'title': (m.group(1).strip()[:80] if m else '')}
+    if headers is not None and headers.get('Location'):
+        out['location'] = headers.get('Location')
+    return out
+
+
 def http(method, url, headers=None, body=None, timeout=30):
+    """(код, JSON). Если ответ не JSON (HTML-заглушка, редирект) — словарь с not_json, raw, title, location."""
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     for k, v in (headers or {}).items():
@@ -49,15 +68,20 @@ def http(method, url, headers=None, body=None, timeout=30):
     if data is not None:
         req.add_header('Content-Type', 'application/json')
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _OPENER.open(req, timeout=timeout) as r:
             raw = r.read()
-            return r.status, (json.loads(raw) if raw else {})
+            try:
+                return r.status, (json.loads(raw) if raw else {})
+            except ValueError:
+                return r.status, _not_json(raw, r.headers)
     except urllib.error.HTTPError as e:
         raw = e.read()
         try:
             payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                payload = {'value': payload}
         except ValueError:
-            payload = {'raw': raw[:500].decode('utf-8', 'replace')}
+            payload = _not_json(raw, e.headers)
         return e.code, payload
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise StepError(f'{url.split("/")[2]} недоступен: {getattr(e, "reason", e)}') from e
@@ -165,13 +189,22 @@ class Panel:
 
     def call(self, method, path, body=None):
         code, data = http(method, self.url + path, self.h, body)
+        if data.get('not_json'):
+            what = f'страницу «{data["title"]}»' if data.get('title') else 'не JSON'
+            if data.get('location'):
+                what = f'перенаправление на {data["location"][:80]}'
+            hint = ('прокси не пропустил запрос: проверьте cookie-защиту (вставьте секретную ссылку входа целиком)'
+                    if 'Cookie' in self.h else 'похоже, панель закрыта cookie-защитой — заполните поле «Cookie-защита»')
+            raise StepError(f'панель вернула {what} (HTTP {code}) вместо API: {hint}. '
+                            f'Также проверьте адрес — нужен тот, по которому открывается панель')
         if code >= 300:
             hint = ''
-            if code in (403, 404, 444) or 'raw' in data:
+            if code in (403, 404, 444):
                 hint = ' (проверьте cookie-защиту и адрес панели)'
             if code == 401:
-                hint = ' (неверный API-токен)'
-            raise StepError(f'панель {method} {path}: HTTP {code}{hint}: {str(data)[:200]}')
+                hint = ' (неверный API-токен: Панель → Настройки → API Tokens)'
+            msg = data.get('message') or data.get('error') or str(data)
+            raise StepError(f'панель {method} {path}: HTTP {code}{hint}: {str(msg)[:200]}')
         return data.get('response', data)
 
     def secret_key(self) -> str:

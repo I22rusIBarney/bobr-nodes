@@ -23,6 +23,7 @@ class World:
         self.nodes: list[dict] = []
         self.hosts: list[dict] = []
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []}}
+        self.decoy = None  # без cookie: None — 404 JSON, 'html' — 200 со страницей-заглушкой, 'redirect' — 302
         self.lock = threading.Lock()
 
 
@@ -78,7 +79,14 @@ def make_server(world: World) -> ThreadingHTTPServer:
         # ── панель ──
         def guard(self):
             if W.cookie not in (self.headers.get('Cookie') or ''):
-                self.send(404, {'m': 'no cookie'})
+                if W.decoy == 'html':
+                    b = b'<html><head><title>Welcome to nginx!</title></head><body>hi</body></html>'
+                    self.send_response(200); self.send_header('Content-Type', 'text/html')
+                    self.send_header('Content-Length', str(len(b))); self.end_headers(); self.wfile.write(b)
+                elif W.decoy == 'redirect':
+                    self.send_response(302); self.send_header('Location', 'https://google.com/'); self.send_header('Content-Length', '0'); self.end_headers()
+                else:
+                    self.send(404, {'m': 'no cookie'})
                 return False
             if self.headers.get('Authorization') != f'Bearer {W.token}':
                 self.send(401, {})

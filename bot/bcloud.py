@@ -25,6 +25,12 @@ class Bcloud:
                 r = await c.request(method, self.base + path, headers=self.h, **kw)
         except httpx.HTTPError as e:
             raise BcloudError(f'bcloud недоступен: {e}') from e
+        try:
+            payload = r.json()
+        except ValueError:
+            payload = None
+        if r.status_code < 300 and payload is None:
+            raise BcloudError(f'bcloud ответил не JSON (HTTP {r.status_code}) — проверьте адрес bcloud')
         if r.status_code >= 300:
             try:
                 detail = r.json().get('detail')
@@ -33,7 +39,7 @@ class Bcloud:
             hint = {401: ' — неверный токен', 404: ' — API выключен или неверный адрес (bcloud api-token)',
                     403: ' — доступ запрещён'}.get(r.status_code, '')
             raise BcloudError(f'bcloud {r.status_code}{hint}: {detail}')
-        return r.json()
+        return payload
 
     async def resolve(self, q: str) -> dict:
         return await self._call('GET', '/users/resolve', params={'q': q})

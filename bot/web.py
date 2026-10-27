@@ -242,6 +242,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return {'ok': True, 'message': f'Панель отвечает: {info}'}
         except engine.StepError as e:
             return {'ok': False, 'message': str(e)}
+        except Exception as e:  # noqa: BLE001 — проверка не должна ронять сохранение
+            return {'ok': False, 'message': f'{type(e).__name__}: {e}'}
 
     @r.post('/api/profiles/{pid}/check')
     async def check_profile(request):

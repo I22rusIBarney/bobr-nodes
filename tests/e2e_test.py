@@ -249,6 +249,19 @@ async def main():
                'squads': '11111111-1111-1111-1111-111111111111', 'cf_token': '', 'traffic_control': True}
     st, js = await wapi('profiles', 'POST', prof_in)
     ok(st == 400 and 'vpn' in js['detail'], 'домен с «vpn» для автоимён запрещён')
+    # панель за cookie-защитой, которая без cookie отдаёт HTML-заглушку или редирект
+    for mode, word in (('html', 'Welcome to nginx'), ('redirect', 'перенаправление')):
+        world.decoy = mode
+        st, js = await wapi('profiles', 'POST', {**prof_in, 'base_domain': 'example.com', 'panel_cookie': ''})
+        ok(st == 200 and not js['check']['ok'] and word in js['check']['message'] and 'Cookie-защита' in js['check']['message'],
+           f'панель без cookie ({mode}) — понятная подсказка: {js.get("check", js)}')
+        await wapi(f'profiles/{js["id"]}', 'DELETE')
+    world.decoy = 'html'
+    st, js = await wapi('profiles', 'POST', {**prof_in, 'base_domain': 'example.com',
+                                             'panel_url': f'{base}/auth/login?secretcookie=abc', 'panel_cookie': ''})
+    ok(st == 200 and js['check']['ok'] and store.profile(js['id'])['panel_url'] == base
+       and store.profile(js['id'])['panel_cookie'] == 'secretcookie=abc', 'ссылка входа в поле адреса: адрес и cookie разобраны')
+    await wapi(f'profiles/{js["id"]}', 'DELETE')
     st, js = await wapi('profiles', 'POST', {**prof_in, 'base_domain': 'example.com'})
     ok(st == 200 and js['check']['ok'], f'профиль создан, панель отвечает через cookie: {js}')
     pid = js['id']

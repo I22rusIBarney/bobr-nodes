@@ -177,6 +177,13 @@ def clean_profile(data: dict, current: dict | None = None) -> dict:
     for k in order:
         if k in data and data[k] is not None:
             prof[k] = str(data[k]).strip().lower() if k == 'name_pattern' else naming.norm_domain(str(data[k]))
+    # адрес панели: только origin; секретная ссылка входа в поле адреса — берём из неё и cookie
+    url = str(data.get('panel_url') or '').strip()
+    if url.startswith('http'):
+        u = urllib.parse.urlparse(url)
+        if u.query and not str(data.get('panel_cookie') or '').strip() and not prof.get('panel_cookie'):
+            data = {**data, 'panel_cookie': url}
+        data = {**data, 'panel_url': f'{u.scheme}://{u.netloc}'}
     errors = []
     for k, (label, _, secret, check) in PFIELDS.items():
         if k not in data or data[k] is None:
