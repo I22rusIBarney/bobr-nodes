@@ -320,3 +320,12 @@ html.fx-on :is(.large-title, .subtitle, .group-h, .group-f, .empty, .nav) { text
 .tile .sw .plus { position: absolute; inset: 0; display: grid; place-items: center; color: var(--hint); }
 .tile .sw .plus svg { width: 22px; height: 22px; }
 .row .check { width: 18px; height: 18px; color: var(--accent-text); flex: none; }
+
+/* прозрачность списков поверх фона (настраивается в «Оформлении»): --glass — доля прозрачности 0–.8 */
+html.glass :is(.list, .card) {
+  background-color: color-mix(in srgb, var(--cell) calc((1 - var(--glass, 0)) * 100%), transparent);
+  -webkit-backdrop-filter: blur(var(--glass-blur, 14px)) saturate(1.2); backdrop-filter: blur(var(--glass-blur, 14px)) saturate(1.2);
+}
+.range-row { display: flex; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); }
+.range-row input { flex: 1; accent-color: var(--accent); }
+.range-row b { min-width: 40px; text-align: right; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--hint); }

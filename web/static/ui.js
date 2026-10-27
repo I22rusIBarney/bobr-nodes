@@ -30,6 +30,16 @@
         if (tg && at('8.0') && ['ios', 'android'].includes(tg.platform) && !tg.isFullscreen) tg.requestFullscreen();
         if (tg) tg.onEvent('fullscreenChanged', () => document.documentElement.classList.toggle('tg-fullscreen', !!tg.isFullscreen));
         if (tg && tg.isFullscreen) document.documentElement.classList.add('tg-fullscreen');
+        // отступы под кнопки Telegram: берём из WebApp сами — CSS-переменные приходят не во всех версиях клиента
+        const insets = () => {
+          const st = document.documentElement.style, sa = tg.safeAreaInset || {}, ca = tg.contentSafeAreaInset || {};
+          let top = ca.top || 0;
+          if (tg.isFullscreen && !top && ['ios', 'android'].includes(tg.platform)) top = 48;  // клиент не сообщил — высота строки «Закрыть»
+          if (sa.top) st.setProperty('--tg-safe-area-inset-top', sa.top + 'px');
+          if (sa.bottom) st.setProperty('--tg-safe-area-inset-bottom', sa.bottom + 'px');
+          st.setProperty('--tg-content-safe-area-inset-top', top + 'px');
+        };
+        if (tg) { insets(); ['safeAreaChanged', 'contentSafeAreaChanged', 'fullscreenChanged'].forEach(e => tg.onEvent(e, insets)); }
       } catch (e) {}
     },
     initData() { return tg ? tg.initData : ''; },

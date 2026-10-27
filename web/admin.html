@@ -90,7 +90,13 @@ async function load() {
 }
 // оформление: фон и эффект перезапускаются, только если что-то поменялось
 let themeKey = '';
+function applyGlass(g) {
+  const root = document.documentElement;
+  root.style.setProperty('--glass', String((g || 0) / 100));
+  root.classList.toggle('glass', g > 0);
+}
 function applyTheme(t) {
+  applyGlass(t.glass);
   const key = [t.bg, t.image, t.effect].join('|');
   if (key === themeKey || !window.FX) return;
   themeKey = key;
@@ -165,6 +171,16 @@ function themeView() {
     act('Заменить картинку', () => file.click()),
     act('Удалить картинку', async () => { const r = await UI.run(() => api('theme/background', 'DELETE'), 'Картинка удалена'); if (r) { ST.theme = r; applyTheme(r); UI.nav.refresh(); } }, 'destructive')],
     'JPG, PNG или WebP до 4 МБ. Поверх картинки — лёгкое затемнение, чтобы текст читался.'));
+  // прозрачность списков: двигается вживую, сохраняется, когда палец отпущен
+  const val = h('b', {}, (t.glass || 0) + '%');
+  const rng = h('input', { type: 'range', min: 0, max: 80, step: 5, value: t.glass || 0, 'aria-label': 'Прозрачность полей' });
+  rng.addEventListener('input', () => { val.textContent = rng.value + '%'; applyGlass(+rng.value); });
+  rng.addEventListener('change', async () => {
+    const g = +rng.value;
+    try { ST.theme = await api('theme', 'POST', { glass: g }); UI.haptic('select'); } catch (e) { UI.toast(e.message, true); applyGlass(t.glass); rng.value = t.glass; val.textContent = t.glass + '%'; }
+  });
+  v.append(group('Прозрачность полей', [h('div', { class: 'range-row' }, rng, val)],
+    'Насколько сквозь списки виден фон и эффекты; под прозрачными полями фон размывается, чтобы текст читался.'));
   const now = t.effect === 'auto' ? FX.seasonal(new Date()) : t.effect;
   v.append(group('Эффект', Object.keys(FX.EFFECT_NAMES).map(k => row({ title: FX.EFFECT_NAMES[k], cls: 'wrap', chevron: false,
     sub: k === 'auto' ? 'Новый год 15.12–14.01, Хэллоуин 24.10–01.11, 14 февраля, 8 марта, снег зимой, листопад осенью' : null,

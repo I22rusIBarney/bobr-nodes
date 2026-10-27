@@ -29,6 +29,7 @@ THEME_BGS = ('none', 'aurora', 'night', 'ocean', 'sunset', 'forest', 'image')
 THEME_EFFECTS = ('auto', 'none', 'snow', 'newyear', 'halloween', 'leaves', 'hearts', 'flowers', 'confetti')
 IMG_TYPES = {b'\xff\xd8\xff': ('jpg', 'image/jpeg'), b'\x89PNG\r\n\x1a\n': ('png', 'image/png'), b'RIFF': ('webp', 'image/webp')}
 BG_MAX = 4 * 1024 * 1024
+GLASS_MAX = 80  # прозрачность списков, %: дальше текст на ярком фоне читается плохо
 
 
 def validate_init_data(init_data: str, bot_token: str, max_age_s: int = 86400, now: float | None = None) -> dict | None:
@@ -187,8 +188,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     def theme() -> dict:
         bg, effect = store.get('theme_bg') or 'none', store.get('theme_effect') or 'auto'
+        try:
+            glass = max(0, min(GLASS_MAX, int(store.get('theme_glass') or 0)))
+        except ValueError:
+            glass = 0
         return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
-                'image': store.get('theme_bg_image') or ''}
+                'image': store.get('theme_bg_image') or '', 'glass': glass}
 
     @r.post('/api/theme')
     async def theme_save(request):
@@ -201,6 +206,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if data['effect'] not in THEME_EFFECTS:
                 raise ApiError('Такого эффекта нет')
             store.set('theme_effect', data['effect'])
+        if 'glass' in data:
+            g = data['glass']
+            if not isinstance(g, int) or isinstance(g, bool) or not 0 <= g <= GLASS_MAX:
+                raise ApiError(f'Прозрачность — от 0 до {GLASS_MAX}%')
+            store.set('theme_glass', str(g))
         return J(theme())
 
     @r.put('/api/theme/background')
