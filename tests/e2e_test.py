@@ -697,7 +697,8 @@ async def main():
        f'чужая нода: адрес и хост на новом IP: {store.job(js["id"])["error"]}')
 
     # сервер удалён в bcloud → нода и хосты из панели, A-запись из Cloudflare, сервер из списка бота; профиль остаётся
-    bal_hosts = {h['address']: h for h in world.hosts if h.get('xrayJsonTemplateUuid')}
+    btpl = {t['uuid'] for t in world.templates if engine.balancer_tag_of(t.get('templateJson'))}
+    bal_hosts = {h['address']: h for h in world.hosts if h.get('xrayJsonTemplateUuid') in btpl}
     gone = next(j for j in sorted(store.jobs(500), key=lambda x: x['id'])
                 if j['status'] == 'done' and j['data'].get('server_id') and j['data'].get('domain') in bal_hosts)
     gd = gone['data']
@@ -711,7 +712,7 @@ async def main():
     n0 = len(sess.sent)
     ok(await runner.sync_bcloud() == [gone['id']], 'сверка с bcloud: удалённый сервер найден')
     ok(all(n['uuid'] != gn['uuid'] for n in world.nodes) and ('nodes', gn['uuid']) in world.deleted, 'нода удалена из панели')
-    ok(not any(h['address'] == gd['domain'] and not h.get('xrayJsonTemplateUuid') for h in world.hosts), 'хосты ноды удалены')
+    ok(not any(h['address'] == gd['domain'] and h.get('xrayJsonTemplateUuid') not in btpl for h in world.hosts), 'хосты ноды удалены')
     ok(bal_hosts[gd['domain']]['uuid'] in {h['uuid'] for h in world.hosts}, 'общий хост-балансировщик страны остался')
     ok(len(world.profiles) == profs0, 'профили не тронуты')
     ok(not [r for r in world.records if r['name'] == gd['domain'] and r['type'] == 'A'], 'A-запись домена удалена')
