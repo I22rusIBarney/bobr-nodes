@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Bobr Nodes</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/static/ui.css">
+<style>
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .stats > div { padding: 12px 16px 13px; position: relative; }
+  .stats > div + div::before { content: ""; position: absolute; left: 0; top: 12px; bottom: 12px; width: .5px; background: var(--sep); }
+  .stats b { display: block; font-size: 22px; line-height: 28px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stats span { font-size: 13px; color: var(--hint); }
+  .stats .ok b { color: var(--ok); } .stats .bad b { color: var(--danger); } .stats .run b { color: var(--accent-text); }
+  .status-line { font-size: 13px; line-height: 18px; padding: 0 16px; margin: 7px 0 0; }
+  .status-line.ok { color: var(--ok); } .status-line.bad { color: var(--danger); }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; letter-spacing: 0; word-break: break-all; }
+  .actions { display: flex; gap: 10px; margin: 0 var(--gutter) 30px; }
+  .actions .btn { flex: 1; }
+  .pad { margin: 0 var(--gutter) 22px; }
+  .notice { margin: 0 var(--gutter) 18px; padding: 12px 14px; border-radius: 14px; background: var(--warn-soft); color: var(--warn); font-size: 14px; line-height: 19px; }
+  .notice b { color: var(--text); }
+  .log { margin: 0 var(--gutter) 30px; padding: 12px; border-radius: 14px; background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line);
+         font: 11.5px/1.45 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre-wrap; word-break: break-all; max-height: 55vh; overflow: auto; color: var(--hint); }
+  .stage { display: flex; align-items: center; gap: 10px; }
+  .stage i { width: 22px; height: 22px; border-radius: 11px; display: grid; place-items: center; font-style: normal; font-size: 12px; flex: none;
+             background: var(--surface-2); color: var(--hint); }
+  .stage i.done { background: var(--ok-soft); color: var(--ok); }
+  .stage i.now { background: var(--accent-soft); color: var(--accent-text); animation: pulse 1.2s infinite; }
+  .stage i.fail { background: var(--danger-soft); color: var(--danger); }
+  @keyframes pulse { 50% { opacity: .45; } }
+  .offer[aria-pressed="true"] .t { color: var(--accent-text); }
+  .offer .tick { width: 22px; height: 22px; color: var(--accent-text); }
+  .total { display: flex; justify-content: space-between; align-items: baseline; padding: 14px 16px; }
+  .total b { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .domains { padding: 10px 16px 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .domains span { font: 13px ui-monospace, "SF Mono", Menlo, monospace; padding: 4px 9px; border-radius: 8px; background: var(--surface-2); }
+  textarea.wide { width: 100%; min-height: 110px; box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/ui.js"></script>
+<script>
+UI.init();
+const { h, row, group, icon } = UI;
+const api = UI.api('/api/');
+let ST = null, FIELDS = null;
+const rubK = kop => UI.rub(Math.round((kop || 0) / 100));
+const STATUS = { queued: ['В очереди', ''], buying: ['Покупка', 'accent'], provisioning: ['Создание сервера', 'accent'],
+  deploying: ['Установка', 'accent'], done: ['Готово', 'ok'], failed: ['Ошибка', 'bad'] };
+const STAGE = { buy: 'Покупка', ip: 'Создание сервера', dns: 'DNS', ssh: 'SSH', install: 'Установка ноды', panel: 'Панель', check: 'Проверка' };
+const badge = (text, cls) => h('span', { class: 'badge ' + (cls || '') }, text);
+const statusLine = () => h('div', { class: 'status-line', role: 'status' });
+function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.message; UI.haptic(r.ok ? 'success' : 'error'); }
+const title = (t, back) => [UI.nav.backLink(back || 'Bobr Nodes'), h('h1', { class: 'large-title' }, t)];
+
+async function load() {
+  try { ST = await api('state'); } catch (e) { ST = { error: e.message }; }
+  UI.nav.refresh();
+}
+
+// ───────── главная ─────────
+function home() {
+  if (!ST) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]));
+  if (ST.error) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), h('div', { class: 'empty' }, icon('alert'), h('b', {}, 'Нет доступа'), ST.error));
+  const s = ST.settings, j = ST.jobs;
+  const v = h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'),
+    h('div', { class: 'subtitle' }, 'Покупка серверов в bcloud и установка нод Remnawave'));
+  if (ST.issues.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'Чтобы начать: '), ST.issues.join(', ') + '.'));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'list' }, h('div', { class: 'stats' },
+    h('div', { class: 'run' }, h('b', {}, String(j.active)), h('span', {}, 'в работе')),
+    h('div', { class: 'ok' }, h('b', {}, String(j.done)), h('span', {}, 'готово')),
+    h('div', { class: 'bad' }, h('b', {}, String(j.failed)), h('span', {}, 'с ошибкой'))))));
+  const go = h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => UI.nav.push(deployView) }, icon('plus'), 'Развернуть ноды');
+  v.append(h('div', { class: 'pad' }, go));
+  v.append(group(null, [row({ icon: 'stack', tile: '#0A84FF', title: 'Задачи', detail: j.active ? 'в работе: ' + j.active : '', onClick: () => UI.nav.push(jobsView) })]));
+  v.append(group('Профили панелей', [
+    ...ST.profiles.map(p => row({ icon: 'server', tile: '#5856D6', title: p.name, sub: p.panel_url.replace(/^https?:\/\//, '') + (p.base_domain ? ' · ' + p.base_domain : ''), onClick: () => openProfile(p.id) })),
+    row({ icon: 'plusCircle', tile: '#34C759', title: 'Новый профиль', cls: 'accent', onClick: () => openProfile(null) })],
+    'Профиль — панель Remnawave и всё для её нод: токен, cookie-защита, исходящие IP, домен для автоимён. Панелей может быть несколько.'));
+  const ok = k => s[k] && s[k].set;
+  v.append(group('Подключения', [
+    row({ icon: 'store', tile: '#FF9500', title: 'bcloud', sub: 'покупка серверов', right: badge(ok('bcloud_url') && ok('bcloud_token') ? 'Подключён' : 'Не настроен', ok('bcloud_url') && ok('bcloud_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(bcloudView) }),
+    row({ icon: 'globe', tile: '#FF9500', title: 'Cloudflare', sub: 'DNS-записи нод', right: badge(ok('cf_token') ? 'Подключён' : 'Не настроен', ok('cf_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(cfView) }),
+    row({ icon: 'key', tile: '#8E8E93', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })]));
+  return v;
+}
+
+// ───────── настройки ─────────
+function settingField(key, opts = {}) {
+  const st = ST.settings[key];
+  const i = opts.area ? h('textarea', { rows: 3, placeholder: opts.ph || '', spellcheck: false, style: 'text-align:left' })
+    : h('input', { type: st.secret ? 'password' : (opts.type || 'text'), inputmode: opts.inputmode, autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+      placeholder: st.secret && st.set ? 'оставить ' + st.hint : (opts.ph || '') });
+  i.value = st.secret ? '' : (st.value || '');
+  return [i, h('label', { class: 'field stack' }, h('label', {}, st.label), i)];
+}
+function settingsForm(header, keys, footer, check, opts = {}) {
+  const fields = keys.map(k => [k, ...settingField(k, (opts.fields || {})[k] || {})]);
+  const status = statusLine();
+  const save = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
+  save.onclick = UI.busy(save, async () => {
+    const values = Object.fromEntries(fields.map(([k, i]) => [k, i.value]));
+    const r = await UI.run(() => api('settings', 'POST', { values }));
+    if (!r) return;
+    ST.settings = r.settings; ST.issues = r.issues;
+    fields.forEach(([k, i]) => { if (ST.settings[k].secret) { i.value = ''; i.placeholder = 'оставить ' + ST.settings[k].hint; } });
+    if (check) showStatus(status, await api(check, 'POST')); else UI.toast('Сохранено');
+  });
+  const test = check ? h('button', { class: 'btn tinted', type: 'button' }, 'Проверить') : null;
+  if (test) test.onclick = UI.busy(test, async () => { const r = await UI.run(() => api(check, 'POST')); if (r) showStatus(status, r); });
+  return [h('section', { class: 'group' }, h('div', { class: 'group-h' }, header), h('div', { class: 'list' }, fields.map(f => f[2])),
+    footer ? h('div', { class: 'group-f' }, footer) : null, status), h('div', { class: 'actions' }, test, save)];
+}
+function bcloudView() {
+  return h('div', {}, ...title('bcloud'), ...settingsForm('Подключение', ['bcloud_url', 'bcloud_token', 'bcloud_tg_id'],
+    h('span', {}, 'Токен и адрес покажет команда ', h('span', { class: 'mono' }, 'bcloud api-token'), ' на сервере bcloud. Покупки идут с баланса указанного аккаунта — он должен быть в ADMIN_IDS bcloud.'),
+    'check/bcloud', { fields: { bcloud_url: { ph: 'https://bobr-cloud.online' }, bcloud_tg_id: { inputmode: 'numeric' } } }));
+}
+function cfView() {
+  return h('div', {}, ...title('Cloudflare'), ...settingsForm('API-токен', ['cf_token'],
+    'Cloudflare → My Profile → API Tokens → Create Token. Права: Zone → DNS → Edit и Zone → Zone → Read, для зон с доменами нод. Если зоны профиля в другом аккаунте — задайте токен в самом профиле.', 'check/cloudflare'));
+}
+function otherView() {
+  return h('div', {}, ...title('SSH-ключ и очередь'), ...settingsForm('Доступ и скорость', ['ssh_pubkey', 'parallel'],
+    'Публичный ключ (содержимое .pub) добавляется на каждый новый сервер — входить можно будет без пароля. Пусто или «-» — не добавлять. Параллельно ставится не больше указанного числа нод, остальные ждут в очереди.',
+    null, { fields: { ssh_pubkey: { area: true, ph: 'ssh-ed25519 AAAA… me@laptop' }, parallel: { inputmode: 'numeric' } } }));
+}
+
+// ───────── профиль ─────────
+async function openProfile(id) {
+  if (!FIELDS) FIELDS = await UI.run(() => api('fields'));
+  if (!FIELDS) return;
+  const p = id ? await UI.run(() => api('profiles/' + id)) : { traffic_control: true, hints: {}, node_port: 2222, name_pattern: '{cc}{n}' };
+  if (p) UI.nav.push(() => profileView(p));
+}
+function profileView(p) {
+  const F = FIELDS.profile, inputs = {};
+  const ph = { panel_url: 'https://panel.example.com', panel_cookie: 'ссылка входа или ИМЯ=ЗНАЧЕНИЕ', outgoing_ips: '203.0.113.10', email: 'admin@example.com',
+    base_domain: 'example.com', name_pattern: '{cc}{n}', squads: 'UUID через запятую', node_port: '2222', name: 'Основная панель' };
+  const field = k => {
+    const f = F[k];
+    const i = h('input', { type: f.secret ? 'password' : 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: false,
+      inputmode: k === 'node_port' ? 'numeric' : undefined,
+      placeholder: f.secret && p.hints[k] ? 'оставить ' + p.hints[k] : (ph[k] || '') });
+    i.value = f.secret ? '' : (p[k] === undefined || p[k] === null ? '' : String(p[k]));
+    inputs[k] = i;
+    return h('label', { class: 'field stack' }, h('label', {}, f.label + (FIELDS.required.includes(k) ? '' : ' · необязательно')), i);
+  };
+  let tc = !!p.traffic_control;
+  const status = statusLine();
+  const save = h('button', { class: 'btn', type: 'button' }, p.id ? 'Сохранить' : 'Создать');
+  save.onclick = UI.busy(save, async () => {
+    const data = Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]));
+    data.traffic_control = tc;
+    const r = await UI.run(() => p.id ? api('profiles/' + p.id, 'PUT', data) : api('profiles', 'POST', data));
+    if (!r) return;
+    showStatus(status, r.check);
+    await load();
+    if (!p.id) { p.id = r.id; UI.toast('Профиль создан'); }
+    Object.entries(inputs).forEach(([k, i]) => { if (F[k].secret && i.value) { i.value = ''; i.placeholder = 'сохранено'; } });
+  });
+  const test = h('button', { class: 'btn tinted', type: 'button' }, 'Проверить');
+  test.onclick = UI.busy(test, async () => { if (!p.id) return UI.alert('Сначала создайте профиль'); const r = await UI.run(() => api('profiles/' + p.id + '/check', 'POST')); if (r) showStatus(status, r); });
+  const out = [...title(p.id ? p.name : 'Новый профиль'),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Панель Remnawave'),
+      h('div', { class: 'list' }, ['name', 'panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'node_port'].map(field)),
+      h('div', { class: 'group-f' }, 'Токен: Панель → Настройки → API Tokens. Cookie-защита: вставьте секретную ссылку входа целиком — бот сам возьмёт пару ИМЯ=ЗНАЧЕНИЕ. Исходящие IP — только им будет открыт API ноды.'), status),
+    h('div', { class: 'actions' }, test, save),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Ноды'),
+      h('div', { class: 'list' }, ['email', 'base_domain', 'name_pattern', 'squads'].map(field),
+        row({ title: 'Traffic Control', sub: 'фильтрация сканеров на нодах', right: UI.toggle(tc, v => { tc = v; }, 'Traffic Control') })),
+      h('div', { class: 'group-f' }, 'Домен для автоимён: например example.com → ноды de1.example.com, nl2.example.com. Пусто — домены только вручную. В шаблоне {cc} — код локации, {n} — номер; «vpn» в именах запрещено. Сквады — UUID внутренних сквадов, куда добавить inbound новых нод.')),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Cloudflare'),
+      h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, 'Нужен, только если домены этого профиля в другом аккаунте Cloudflare. Пусто — общий токен из «Подключений».')),
+    h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', onclick: () => save.click() }, p.id ? 'Сохранить' : 'Создать'))];
+  if (p.id) out.push(group(null, [row({ title: 'Удалить профиль', cls: 'destructive', onClick: async () => {
+    const ok = await UI.ask({ title: 'Удалить профиль?', message: 'Ноды и записи в панели останутся, удалятся только настройки в боте.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
+    if (ok && await UI.run(() => api('profiles/' + p.id, 'DELETE'), 'Профиль удалён') !== undefined) { await load(); UI.nav.back(); }
+  } })]));
+  return h('div', {}, ...out);
+}
+
+// ───────── развёртывание ─────────
+let D = null;
+function deployView() {
+  if (!D) {
+    D = { pid: ST.profiles[0] && ST.profiles[0].id, loc: null, idx: null, period: '1m', count: 1, mode: null, manual: '', domains: [], cat: null, err: null };
+    api('catalog').then(c => { D.cat = c; D.loc = c.locations[0] && c.locations[0].code; UI.nav.refresh(); }).catch(e => { D.err = e.message; UI.nav.refresh(); });
+  }
+  const v = h('div', {}, ...title('Развернуть'));
+  if (D.err) { v.append(h('div', { class: 'notice' }, D.err)); return v; }
+  if (!D.cat) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+  const prof = ST.profiles.find(p => p.id === D.pid) || ST.profiles[0];
+  const reset = () => { D.domains = []; };
+  if (ST.profiles.length > 1) v.append(UI.section('Панель', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; D.mode = null; reset(); UI.nav.refresh(); })));
+  v.append(UI.section('Локация', UI.chips(D.cat.locations.map(l => ({ value: l.code, flag: l.flag, label: l.name })), D.loc, x => { D.loc = x; D.idx = null; reset(); UI.nav.refresh(); })));
+  const loc = D.cat.locations.find(l => l.code === D.loc);
+  if (!loc) return v;
+  v.append(group('Конфигурация', loc.offers.map(o => {
+    const on = o.idx === D.idx;
+    const r = row({ title: `${o.cpu} vCPU · ${o.ram} ГБ · ${o.disk} ГБ`, sub: o.speed || '', detail: rubK(o.price_kop) + '/мес', cls: 'offer', chevron: false,
+      right: on ? icon('check', 'tick') : null, onClick: () => { D.idx = o.idx; UI.nav.refresh(); } });
+    r.setAttribute('aria-pressed', String(on));
+    return r;
+  })));
+  if (D.idx === null) return v;
+  if (D.cat.periods.length > 1) v.append(UI.section('Срок аренды', h('div', { style: 'padding:0 var(--gutter)' },
+    UI.segmented(D.cat.periods.map(p => ({ value: p.code, label: ({ '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год' })[p.code] + (p.pct ? ' −' + p.pct + '%' : '') })), D.period, x => { D.period = x; UI.nav.refresh(); }))));
+  const cnt = h('input', { type: 'number', inputmode: 'numeric', min: 1, max: 50, 'aria-label': 'Количество' }); cnt.value = D.count;
+  cnt.addEventListener('change', () => { D.count = Math.max(1, Math.min(50, Math.round(+cnt.value || 1))); reset(); UI.nav.refresh(); });
+  v.append(group('Сколько нод', [h('label', { class: 'field' }, h('span', {}, 'Количество'), cnt, h('span', { class: 'unit' }, 'шт.'))]));
+  // домены
+  const modes = [{ value: 'auto', label: 'Автоматически' }, { value: 'manual', label: 'Вручную' }].filter(m => m.value === 'manual' || prof.base_domain);
+  if (!D.mode) D.mode = modes[0].value;
+  const domBox = h('div');
+  const status = statusLine();
+  if (D.mode === 'auto') {
+    const pick = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, D.domains.length ? 'Подобрать заново' : 'Подобрать имена');
+    pick.onclick = UI.busy(pick, async () => {
+      const r = await UI.run(() => api('domains/auto', 'POST', { pid: prof.id, location: D.loc, count: D.count }));
+      if (r) { D.domains = r.domains; UI.nav.refresh(); }
+    });
+    domBox.append(D.domains.length ? h('div', { class: 'domains' }, D.domains.map(d => h('span', {}, d))) : null, pick);
+  } else {
+    const ta = h('textarea', { class: 'wide', rows: 4, placeholder: 'по одному домену в строке', spellcheck: false, autocapitalize: 'off', style: 'text-align:left' });
+    ta.value = D.manual;
+    ta.addEventListener('input', () => { D.manual = ta.value; D.domains = []; });
+    const chk = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, 'Проверить домены');
+    chk.onclick = UI.busy(chk, async () => {
+      try { const r = await api('domains/check', 'POST', { pid: prof.id, domains: D.manual, count: D.count }); D.domains = r.domains; showStatus(status, { ok: true, message: 'Домены в порядке' }); UI.nav.refresh(); }
+      catch (e) { showStatus(status, { ok: false, message: e.message }); }
+    });
+    domBox.append(h('label', { class: 'field stack' }, ta), chk, status);
+  }
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Домены'),
+    h('div', { style: 'padding:0 0 10px' }, modes.length > 1 ? h('div', { style: 'padding:10px 12px 0' }, UI.segmented(modes, D.mode, x => { D.mode = x; reset(); UI.nav.refresh(); })) : null),
+    h('div', { class: 'list' }, domBox),
+    h('div', { class: 'group-f' }, D.mode === 'auto' ? `Шаблон профиля, например ${(prof.base_domain ? 'de1.' + prof.base_domain : '')}. Занятые имена пропускаются.` : (prof.base_domain ? '' : 'Для автоимён задайте «Домен для автоимён» в профиле. ') + 'Зоны доменов должны быть в Cloudflare.')));
+  // итог
+  const per = D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 };
+  const offer = loc.offers.find(o => o.idx === D.idx);
+  const one = per.months <= 1 ? offer.price_kop : Math.ceil(offer.price_kop * per.months * (100 - per.pct) / 100 / 100) * 100;
+  const total = one * D.count, bal = D.cat.balance_kop;
+  const enough = bal === null || bal >= total;
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Итого'), h('div', { class: 'list' },
+    h('div', { class: 'total' }, h('span', {}, `${rubK(one)} × ${D.count}`), h('b', {}, rubK(total))),
+    row({ title: 'Баланс bcloud', detail: bal === null ? '—' : rubK(bal), right: enough ? null : badge('Не хватает', 'bad') }),
+    row({ title: 'Система', detail: D.cat.os_label }),
+    row({ title: 'Traffic Control', detail: prof.traffic_control ? 'да' : 'нет' }))));
+  const go = h('button', { class: 'btn', type: 'button', disabled: !enough || D.domains.length !== D.count }, icon('bolt'), 'Купить и установить');
+  go.onclick = UI.busy(go, async () => {
+    const ok = await UI.ask({ title: 'Купить и установить?', message: `${D.count} × ${loc.name}, ${rubK(total)} спишется с баланса bcloud.`, buttons: [{ id: 'y', text: 'Купить' }] });
+    if (!ok) return;
+    const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, location: D.loc, idx: D.idx, period: D.period, domains: D.domains }), 'Задачи запущены');
+    if (!r) return;
+    D = null; await load(); UI.nav.reset(); UI.nav.push(jobsView);
+  });
+  v.append(h('div', { class: 'pad' }, go,
+    h('div', { class: 'group-f', style: 'margin:8px 0 0' }, D.domains.length === D.count ? 'Ход установки — в «Задачах» и сообщениями в чате с ботом.' : 'Подберите или проверьте домены, чтобы продолжить.')));
+  return v;
+}
+
+// ───────── задачи ─────────
+let JOBS = null, jobTimer = null;
+function poll(fn, ms) { clearTimeout(jobTimer); jobTimer = setTimeout(fn, ms); }
+async function loadJobs() { try { JOBS = (await api('jobs')).jobs; } catch (e) { JOBS = { error: e.message }; } }
+function jobsView() {
+  if (JOBS === null) { loadJobs().then(() => UI.nav.refresh()); return h('div', {}, ...title('Задачи'), group(null, [h('div', { class: 'skeleton' })])); }
+  if (JOBS.error) return h('div', {}, ...title('Задачи'), h('div', { class: 'notice' }, JOBS.error));
+  if (JOBS.some(j => ['queued', 'buying', 'provisioning', 'deploying'].includes(j.status)))
+    poll(async () => { if (!document.querySelector('#root .jobs-page')) return; await loadJobs(); UI.nav.refresh(); }, 4000);
+  const v = h('div', { class: 'jobs-page' }, ...title('Задачи'));
+  if (!JOBS.length) { v.append(h('div', { class: 'empty' }, icon('stack'), h('b', {}, 'Пока пусто'), 'Задачи появятся после первого развёртывания.')); return v; }
+  v.append(group(null, JOBS.map(j => {
+    const [st, cls] = STATUS[j.status] || [j.status, ''];
+    const sub = j.status === 'failed' ? j.error : `${j.flag} ${j.loc_name} · ${j.status === 'deploying' ? (STAGE[j.stage] || j.spec) : j.spec}`;
+    return row({ title: j.domain, sub: sub.slice(0, 110), right: badge(st, cls), onClick: () => { delete JOB[j.id]; UI.nav.push(() => jobView(j.id)); } });
+  })));
+  return v;
+}
+const JOB = {};
+function jobView(id) {
+  const j = JOB[id];
+  const reload = async () => { try { JOB[id] = await api('jobs/' + id); } catch (e) { JOB[id] = { error: e.message }; } UI.nav.refresh(); };
+  if (!j) { reload(); return h('div', {}, ...title('Задача', 'Задачи'), group(null, [h('div', { class: 'skeleton' })])); }
+  if (j.error && !j.id) return h('div', {}, ...title('Задача', 'Задачи'), h('div', { class: 'notice' }, j.error));
+  const active = ['queued', 'buying', 'provisioning', 'deploying'].includes(j.status);
+  if (active) poll(() => { if (document.querySelector('#root .job-page')) reload(); }, 3000);
+  const cur = j.stages.findIndex(s => s.code === j.stage);
+  const v = h('div', { class: 'job-page' }, ...title(j.domain, 'Задачи'),
+    h('div', { class: 'subtitle' }, `${j.flag} ${j.loc_name} · ${j.spec} · ${j.profile}`));
+  v.append(group('Этапы', j.stages.map((s, i) => {
+    const done = j.status === 'done' || i < cur, now = i === cur && !done;
+    const mark = done ? h('i', { class: 'done' }, '✓') : now ? h('i', { class: j.status === 'failed' ? 'fail' : 'now' }, j.status === 'failed' ? '!' : '•') : h('i', {}, String(i + 1));
+    return h('div', { class: 'row' }, h('div', { class: 'grow stage' }, mark, h('div', { class: 't' }, s.label)),
+      s.code === 'ip' && j.ip && (done || j.status === 'done') ? h('span', { class: 'd mono' }, j.ip) : null);
+  }), active && j.last ? j.last : null));
+  if (j.status === 'failed') v.append(h('div', { class: 'notice', style: 'background:var(--danger-soft);color:var(--danger)' }, j.error));
+  if (j.status === 'done') v.append(group('Доступ к серверу', [
+    row({ title: 'IP', right: h('button', { class: 'btn plain small', type: 'button', onclick: () => UI.copy(j.ip, 'IP') }, h('span', { class: 'mono' }, j.ip)) }),
+    row({ title: 'Пароль root', right: h('button', { class: 'btn plain small', type: 'button', onclick: () => UI.copy(j.password, 'Пароль') }, 'Скопировать') })]));
+  const acts = [];
+  if (j.status === 'failed') {
+    const retry = h('button', { class: 'btn', type: 'button' }, icon('renew'), 'Повторить');
+    retry.onclick = UI.busy(retry, async () => {
+      if (!j.server_id && !(await UI.ask({ title: 'Повторить?', message: 'Сервер ещё не был куплен — повтор купит новый.', buttons: [{ id: 'y', text: 'Повторить' }] }))) return;
+      if (await UI.run(() => api('jobs/' + id + '/retry', 'POST'), 'Запущено снова')) reload();
+    });
+    acts.push(retry);
+  }
+  if (!active) {
+    const hide = h('button', { class: 'btn tinted', type: 'button' }, 'Скрыть');
+    hide.onclick = UI.busy(hide, async () => { if (await UI.run(() => api('jobs/' + id + '/hide', 'POST'))) { JOBS = null; UI.nav.back(); } });
+    acts.push(hide);
+  }
+  if (acts.length) v.append(h('div', { class: 'actions' }, acts));
+  v.append(h('div', { class: 'group-h', style: 'margin:0 var(--gutter) 6px' }, 'Журнал'),
+    j.log ? h('pre', { class: 'log' }, j.log.slice(-20000)) : h('div', { class: 'group-f', style: 'margin:0 var(--gutter) 30px' }, 'Журнал появится, когда начнётся установка.'));
+  const pre = v.querySelector('.log'); if (pre) requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; });
+  return v;
+}
+
+let lastDepth = 0;
+document.addEventListener('navchange', e => {
+  const back = e.detail.depth === 0 && lastDepth > 0;
+  lastDepth = e.detail.depth;
+  if (back) { JOBS = null; D = null; load(); }
+});
+UI.nav.mount(document.getElementById('root'), home);
+load();
+</script>
+</body>
+</html>

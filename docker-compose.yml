@@ -1,0 +1,30 @@
+services:
+  nodes:
+    build: .
+    # готовый образ из GitHub (bnodes update скачивает его), без него — сборка на сервере
+    image: ${BNODES_IMAGE:-bobr-nodes:local}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /srv/data
+    volumes:
+      - ./data:/srv/data
+    expose:
+      - "8080"
+
+  # свой HTTPS (Let's Encrypt), если на сервере нет bcloud. Включается COMPOSE_PROFILES=caddy в .env
+  caddy:
+    image: caddy:2
+    profiles: [caddy]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      - nodes
+
+volumes:
+  caddy_data:

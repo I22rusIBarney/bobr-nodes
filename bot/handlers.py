@@ -1,0 +1,380 @@
+"""Telegram-чат: меню с кнопкой веб-админки, быстрый мастер развёртывания, задачи и их ход.
+Настройки и профили панелей — в веб-админке (bot/web.py)."""
+from __future__ import annotations
+
+import html
+
+from aiogram import BaseMiddleware, F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
+
+from . import services as svc
+from .bcloud import BcloudError
+from .runner import STATUS_ICON, Runner, job_text
+from .store import ACTIVE, Store
+
+router = Router()
+
+
+# ───────────────────────── доступ ─────────────────────────
+
+class AdminOnly(BaseMiddleware):
+    def __init__(self, admins: set[int]):
+        self.admins = admins
+
+    async def __call__(self, handler, event, data):
+        user = data.get('event_from_user')
+        if user is None or user.id not in self.admins:
+            if isinstance(event, Message):
+                await event.answer('Этот бот только для администраторов.')
+            elif isinstance(event, CallbackQuery):
+                await event.answer('Нет доступа', show_alert=True)
+            return None
+        return await handler(event, data)
+
+
+# ───────────────────────── помощники ─────────────────────────
+
+def kb(*rows) -> InlineKeyboardMarkup:
+    out = []
+    for row in rows:
+        if not row:
+            continue
+        line = []
+        for item in row:
+            if isinstance(item, InlineKeyboardButton):
+                line.append(item)
+            else:
+                line.append(InlineKeyboardButton(text=item[0], callback_data=item[1]))
+        out.append(line)
+    return InlineKeyboardMarkup(inline_keyboard=out)
+
+
+BACK = [('« Меню', 'm:main')]
+
+
+def admin_button(public_url: str, text: str = '⚙️ Панель управления', path: str = '/admin'):
+    if not public_url.startswith('https://'):
+        return None
+    return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=public_url.rstrip('/') + path))
+
+
+def job_kb(job: dict) -> InlineKeyboardMarkup:
+    row = [('📄 Журнал', f'j:{job["id"]}:log')]
+    if job['status'] == 'failed':
+        row.append(('🔁 Повторить', f'j:{job["id"]}:retry'))
+    if job['status'] in ('done', 'failed'):
+        row.append(('🙈 Скрыть', f'j:{job["id"]}:hide'))
+    return kb(row)
+
+
+def rub(kop: int) -> str:
+    return f'{kop / 100:,.0f}'.replace(',', ' ') + ' ₽'
+
+
+async def show(target: Message | CallbackQuery, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    """В колбэке — правим текущее сообщение, на сообщение пользователя — отвечаем новым."""
+    if isinstance(target, CallbackQuery):
+        try:
+            await target.message.edit_text(text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
+        except Exception:
+            await target.message.answer(text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
+        await target.answer()
+    else:
+        await target.answer(text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
+
+
+async def delete_quietly(m: Message) -> None:
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+
+class Deploy(StatesGroup):
+    count = State()
+    domains = State()
+
+
+# ───────────────────────── меню ─────────────────────────
+
+def ready_issues(store: Store) -> list[str]:
+    out = []
+    if not all(store.get(k) for k in ('bcloud_url', 'bcloud_token', 'bcloud_tg_id')):
+        out.append('подключите bcloud')
+    if not store.get('cf_token') and not any(p.get('cf_token') for p in store.profiles()):
+        out.append('добавьте токен Cloudflare')
+    if not store.profiles():
+        out.append('создайте профиль панели')
+    return out
+
+
+def main_text(store: Store) -> str:
+    issues = ready_issues(store)
+    lines = ['<b>🦫 Bobr Nodes</b>', 'Покупка серверов в bcloud и установка нод Remnawave.', '']
+    if issues:
+        lines.append('Чтобы начать, в панели управления: ' + ', '.join(issues) + '.')
+    else:
+        lines.append(f'Профилей панелей: {len(store.profiles())}')
+    active = len(store.active_jobs())
+    if active:
+        lines.append(f'В работе задач: {active}')
+    return '\n'.join(lines)
+
+
+def main_kb(store: Store, public_url: str) -> InlineKeyboardMarkup:
+    adm = admin_button(public_url)
+    return kb([('🚀 Развернуть ноды', 'm:deploy')], [('📋 Задачи', 'm:jobs')], [adm] if adm else None)
+
+
+@router.message(CommandStart())
+@router.message(Command('menu'))
+async def start(m: Message, state: FSMContext, store: Store, public_url: str):
+    await state.clear()
+    await show(m, main_text(store), main_kb(store, public_url))
+
+
+@router.callback_query(F.data == 'm:main')
+async def main_cb(c: CallbackQuery, state: FSMContext, store: Store, public_url: str):
+    await state.clear()
+    await show(c, main_text(store), main_kb(store, public_url))
+
+
+@router.message(Command('cancel'))
+async def cancel(m: Message, state: FSMContext, store: Store, public_url: str):
+    await state.clear()
+    await show(m, 'Отменено.\n\n' + main_text(store), main_kb(store, public_url))
+
+
+# ───────────────────────── развёртывание ─────────────────────────
+
+async def wizard(state: FSMContext) -> dict:
+    return (await state.get_data()).get('w') or {}
+
+
+@router.callback_query(F.data == 'm:deploy')
+async def deploy_start(c: CallbackQuery, state: FSMContext, store: Store, public_url: str):
+    await state.clear()
+    issues = ready_issues(store)
+    if issues:
+        adm = admin_button(public_url)
+        return await show(c, 'Сначала в панели управления: ' + ', '.join(issues) + '.', kb([adm] if adm else None, BACK))
+    ps = store.profiles()
+    if len(ps) == 1:
+        return await deploy_profile(c, state, store, ps[0]['id'])
+    await show(c, '<b>🚀 Куда ставим ноды?</b>\n\nВыберите профиль панели:',
+               kb(*[[(f'🗂 {p["name"]}', f'd:p:{p["id"]}')] for p in ps], BACK))
+
+
+@router.callback_query(F.data.startswith('d:p:'))
+async def deploy_profile_cb(c: CallbackQuery, state: FSMContext, store: Store):
+    await deploy_profile(c, state, store, int(c.data[4:]))
+
+
+async def deploy_profile(c: CallbackQuery, state: FSMContext, store: Store, pid: int):
+    try:
+        cat = await svc.load_catalog(store)
+    except BcloudError as e:
+        return await show(c, f'❌ {html.escape(str(e))}', kb(BACK))
+    await state.update_data(w={'pid': pid, 'cat': cat})
+    btns = []
+    for loc in cat['locations']:
+        cheapest = min(o['price_kop'] for o in loc['offers'])
+        btns.append([(f'{loc["flag"]} {loc["name"]} · от {rub(cheapest)}', f'd:l:{loc["code"]}')])
+    p = store.profile(pid)
+    await show(c, f'<b>🚀 {html.escape(p["name"])}</b>\n\nЛокация:', kb(*btns, [('« Отмена', 'm:main')]))
+
+
+@router.callback_query(F.data.startswith('d:l:'))
+async def deploy_loc(c: CallbackQuery, state: FSMContext):
+    w = await wizard(state)
+    if not w:
+        return await c.answer('Мастер устарел — начните заново', show_alert=True)
+    loc = next(x for x in w['cat']['locations'] if x['code'] == c.data[4:])
+    w['loc'] = loc['code']
+    await state.update_data(w=w)
+    btns = [[(f'{svc.spec_text(o)} — {rub(o["price_kop"])}/мес', f'd:o:{o["idx"]}')] for o in loc['offers']]
+    await show(c, f'{loc["flag"]} <b>{html.escape(loc["name"])}</b>\n\nКонфигурация сервера:',
+               kb(*btns, [('« Локации', f'd:p:{w["pid"]}')]))
+
+
+@router.callback_query(F.data.startswith('d:o:'))
+async def deploy_offer(c: CallbackQuery, state: FSMContext):
+    w = await wizard(state)
+    w['idx'] = int(c.data[4:])
+    await state.update_data(w=w)
+    periods = w['cat']['periods']
+    if len(periods) <= 1:
+        return await deploy_period(c, state, '1m')
+    btns = [(svc.PERIOD_LABEL.get(p['code'], p['code']) + (f' −{p["pct"]}%' if p['pct'] else ''), f'd:t:{p["code"]}')
+            for p in periods]
+    await show(c, 'Срок аренды:', kb(btns, [('« Назад', f'd:l:{w["loc"]}')]))
+
+
+@router.callback_query(F.data.startswith('d:t:'))
+async def deploy_period_cb(c: CallbackQuery, state: FSMContext):
+    await deploy_period(c, state, c.data[4:])
+
+
+async def deploy_period(c: CallbackQuery, state: FSMContext, period: str):
+    w = await wizard(state)
+    w['period'] = period
+    await state.update_data(w=w)
+    await show(c, 'Сколько нод поставить?',
+               kb([(str(n), f'd:c:{n}') for n in (1, 2, 3, 5, 10)], [('Другое число', 'd:c:?')],
+                  [('« Назад', f'd:l:{w["loc"]}')]))
+
+
+@router.callback_query(F.data.startswith('d:c:'))
+async def deploy_count_cb(c: CallbackQuery, state: FSMContext, store: Store):
+    if c.data == 'd:c:?':
+        await state.set_state(Deploy.count)
+        return await show(c, 'Пришлите число от 1 до 50. /cancel — отмена')
+    await deploy_count(c, state, store, int(c.data[4:]))
+
+
+@router.message(Deploy.count)
+async def deploy_count_msg(m: Message, state: FSMContext, store: Store):
+    t = (m.text or '').strip()
+    if not t.isdigit() or not 1 <= int(t) <= 50:
+        return await m.answer('Нужно число от 1 до 50')
+    await state.set_state(None)
+    await deploy_count(m, state, store, int(t))
+
+
+async def deploy_count(target, state: FSMContext, store: Store, n: int):
+    from . import naming
+    w = await wizard(state)
+    w['count'] = n
+    await state.update_data(w=w)
+    p = store.profile(w['pid'])
+    rows = []
+    if p.get('base_domain'):
+        sample = f'{naming.render(p.get("name_pattern") or naming.DEFAULT_PATTERN, naming.cc_of(w["loc"]), 1)}.{p["base_domain"]}'
+        rows.append([(f'🤖 Автоматически ({sample}…)', 'd:dom:auto')])
+    rows.append([('✍️ Ввести вручную', 'd:dom:manual')])
+    hint = '' if p.get('base_domain') else '\n\nДля автоимён задайте «Домен для автоимён» в профиле (панель управления).'
+    await show(target, f'Домены для {n} нод:{hint}', kb(*rows, [('« Отмена', 'm:main')]))
+
+
+@router.callback_query(F.data == 'd:dom:auto')
+async def deploy_auto(c: CallbackQuery, state: FSMContext, store: Store):
+    w = await wizard(state)
+    await c.answer('Подбираю свободные имена…')
+    try:
+        w['domains'] = await svc.auto_domains(store, store.profile(w['pid']), w['loc'], w['count'])
+    except ValueError as e:
+        return await show(c, f'❌ {html.escape(str(e))}', kb([('✍️ Ввести вручную', 'd:dom:manual')], BACK))
+    await state.update_data(w=w)
+    await confirm(c, state, store)
+
+
+@router.callback_query(F.data == 'd:dom:manual')
+async def deploy_manual(c: CallbackQuery, state: FSMContext):
+    w = await wizard(state)
+    await state.set_state(Deploy.domains)
+    await show(c, f'Пришлите {w["count"]} домен(а/ов), по одному в строке. Зоны должны быть в Cloudflare.\n\n/cancel — отмена')
+
+
+@router.message(Deploy.domains)
+async def deploy_manual_msg(m: Message, state: FSMContext, store: Store):
+    w = await wizard(state)
+    try:
+        w['domains'] = await svc.check_domains(store, store.profile(w['pid']), m.text or '', w['count'])
+    except ValueError as e:
+        return await m.answer('❌ ' + html.escape(str(e)) + '\nПришлите список ещё раз или /cancel', parse_mode='HTML')
+    await state.update_data(w=w)
+    await state.set_state(None)
+    await confirm(m, state, store)
+
+
+async def confirm(target, state: FSMContext, store: Store):
+    from .runner import bcloud_from
+    w = await wizard(state)
+    p = store.profile(w['pid'])
+    q = svc.quote(w['cat'], w['loc'], w['idx'], w['period'], w['count'])
+    try:
+        bal = await bcloud_from(store).balance()
+        bal_line = f'Баланс bcloud: {rub(bal)}' + ('' if bal >= q['total_kop'] else ' — ⚠️ <b>не хватает</b>')
+    except BcloudError as e:
+        bal, bal_line = None, f'Баланс bcloud: ❓ {html.escape(str(e))}'
+    loc, offer = q['loc'], q['offer']
+    lines = ['<b>Проверьте заказ</b>', '',
+             f'🗂 {html.escape(p["name"])}',
+             f'{loc["flag"]} {html.escape(loc["name"])} · {svc.spec_text(offer)}',
+             f'💿 {html.escape(w["cat"]["os_label"])} · {svc.PERIOD_LABEL.get(w["period"], w["period"])}',
+             f'🛡 Traffic Control: {"да" if p.get("traffic_control", True) else "нет"}', '',
+             *[f'• <code>{html.escape(d)}</code>' for d in w['domains']], '',
+             f'Итого: {rub(q["one_kop"])} × {w["count"]} = <b>{rub(q["total_kop"])}</b>', bal_line]
+    rows = [[('🚀 Купить и установить', 'd:go')]] if bal is None or bal >= q['total_kop'] else []
+    await show(target, '\n'.join(lines), kb(*rows, [('« Отмена', 'm:main')]))
+
+
+@router.callback_query(F.data == 'd:go')
+async def deploy_go(c: CallbackQuery, state: FSMContext, store: Store, runner: Runner):
+    w = await wizard(state)
+    if not w.get('domains'):
+        return await c.answer('Мастер устарел — начните заново', show_alert=True)
+    await state.clear()
+    await c.message.edit_text(f'🚀 Запускаю {len(w["domains"])} задач(и). Ход каждой — отдельным сообщением ниже, '
+                              f'все задачи — в «📋 Задачи».', reply_markup=kb(BACK))
+    await c.answer()
+    await svc.create_jobs(store, runner, c.message.chat.id, w['pid'], w['cat'], w['loc'], w['idx'], w['period'],
+                          w['domains'])
+
+
+# ───────────────────────── задачи ─────────────────────────
+
+@router.callback_query(F.data == 'm:jobs')
+async def jobs(c: CallbackQuery, state: FSMContext, store: Store):
+    await state.clear()
+    js = store.jobs(15)
+    if not js:
+        return await show(c, '<b>📋 Задачи</b>\n\nПока пусто.', kb(BACK))
+    btns = [[(f'{STATUS_ICON.get(j["status"], "•")} #{j["id"]} {j["data"]["domain"]}', f'j:{j["id"]}')] for j in js]
+    active = sum(1 for j in js if j['status'] in ACTIVE)
+    await show(c, f'<b>📋 Задачи</b>\n\nПоследние {len(js)}' + (f', в работе: {active}' if active else ''),
+               kb(*btns, [('🔄 Обновить', 'm:jobs')], BACK))
+
+
+@router.callback_query(F.data.regexp(r'^j:\d+$'))
+async def job_view(c: CallbackQuery, store: Store, runner: Runner):
+    j = store.job(int(c.data[2:]))
+    if not j:
+        return await c.answer('Задача не найдена', show_alert=True)
+    p = store.profile(j['profile_id']) or {}
+    m = await c.message.answer(job_text(j, p.get('name', ''), runner.last.get(j['id'], '')),
+                               reply_markup=job_kb(j), parse_mode='HTML')
+    store.update_job(j['id'], msg_id=m.message_id, chat_id=m.chat.id)  # дальше обновляется это сообщение
+    await c.answer()
+
+
+@router.callback_query(F.data.regexp(r'^j:\d+:log$'))
+async def job_log(c: CallbackQuery, runner: Runner):
+    jid = int(c.data.split(':')[1])
+    path = runner.log_path(jid)
+    if not path.exists() or path.stat().st_size == 0:
+        return await c.answer('Журнала пока нет — установка ещё не начиналась', show_alert=True)
+    await c.message.answer_document(FSInputFile(path, filename=f'job-{jid}.log'))
+    await c.answer()
+
+
+@router.callback_query(F.data.regexp(r'^j:\d+:retry$'))
+async def job_retry(c: CallbackQuery, store: Store, runner: Runner):
+    jid = int(c.data.split(':')[1])
+    j = store.job(jid)
+    if not j or j['status'] != 'failed':
+        return await c.answer('Повторить можно только задачу с ошибкой', show_alert=True)
+    store.update_job(jid, status='queued', error='')
+    runner.start(jid)
+    await c.answer('Запущено снова' + ('' if j['data'].get('server_id') else ' — будет новая покупка'))
+
+
+@router.callback_query(F.data.regexp(r'^j:\d+:hide$'))
+async def job_hide(c: CallbackQuery, store: Store):
+    jid = int(c.data.split(':')[1])
+    store.update_job(jid, hidden=1)
+    await delete_quietly(c.message)
+    await c.answer('Скрыто из списка')

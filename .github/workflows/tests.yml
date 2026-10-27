@@ -1,0 +1,93 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # для сквозного сценария: bcloud со служебным API и исходники установщика Nuvrion
+      - uses: actions/checkout@v4
+        with:
+          repository: I22rusIBarney/bobr-cloud
+          path: _deps/bobr-cloud
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: nuvrion-kvn/Nuvrion-Vision-Installer
+          path: _deps/nuvrion
+      - name: bcloud со служебным API
+        run: |
+          cd _deps/bobr-cloud
+          if [ ! -f app/web/service_api.py ]; then
+            echo "В main bcloud ещё нет /api/svc — беру ветку feat/service-api"
+            git checkout -q origin/feat/service-api
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt -r _deps/bobr-cloud/requirements.txt
+      - name: Синтаксис админки и установщика
+        run: |
+          python - <<'PY'
+          import re, pathlib
+          s = pathlib.Path("web/admin.html").read_text()
+          pathlib.Path("/tmp/admin.js").write_text(max(re.findall(r"<script>(.*?)</script>", s, re.S), key=len))
+          PY
+          node --check /tmp/admin.js
+          node --check web/static/ui.js
+          bash -n install.sh
+          shellcheck -S error install.sh tests/mock_installer.sh
+      - name: Тесты
+        env:
+          BCLOUD_DIR: ${{ github.workspace }}/_deps/bobr-cloud
+          NV_SRC: ${{ github.workspace }}/_deps/nuvrion/src
+        run: pytest -q
+
+  # Готовый образ для серверов: только с main и только если тесты прошли.
+  # bnodes update скачивает ghcr.io/<владелец>/<репозиторий>:sha-<коммит> вместо сборки на VPS.
+  image:
+    needs: tests
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Имя образа
+        run: echo "IMG=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMG }}:latest
+            ${{ env.IMG }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Образ доступен серверам без логина
+        run: |
+          tok=$(curl -fsS "https://ghcr.io/token?scope=repository:${IMG#ghcr.io/}:pull" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("token",""))' || true)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/${IMG#ghcr.io/}/manifests/sha-${GITHUB_SHA}")
+          if [ "$code" = 200 ]; then echo "Образ публичный — bnodes update скачает его"; else
+            echo "::warning::Пакет ${IMG} приватный (HTTP $code): серверы не смогут его скачать и будут собирать сами. Откройте Packages → bobr-nodes → Package settings → Change visibility → Public."
+          fi
