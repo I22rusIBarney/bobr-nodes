@@ -756,30 +756,30 @@ async def main():
     b2['hosts'][0]['remark'] = 'Обход белых списков 5'
     b2['hosts'][0]['address'] = '188.72.110.51'
     b2['hosts'][0]['sni'] = '188.72.110.51'
-    st, res = await wapi('hosts/import', 'POST', {'pid': rid, 'bundle': b2, 'squads': ['11111111-1111-1111-1111-111111111111']})
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': b2, 'squads': ['11111111-1111-1111-1111-111111111111']})
     nh = world.hosts[h0:]
     ok(st == 200 and res['created'] == 1 and len(nh) == 1 and nh[0]['address'] == '188.72.110.51'
        and nh[0]['xrayJsonTemplateUuid'] == bh['xrayJsonTemplateUuid'] and nh[0]['tags'] == bh['tags']
        and len(world.profiles) == p0 and len(world.templates) == t0, f'импорт: новый хост на том же профиле и шаблоне: {res}')
     ok(any(i['uuid'] == nh[0]['inbound']['configProfileInboundUuid'] for i in world.squads['11111111-1111-1111-1111-111111111111']['inbounds']),
        'inbound хоста в выбранном скваде')
-    st, res = await wapi('hosts/import', 'POST', {'pid': rid, 'bundle': b2})
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': b2})
     ok(res['created'] == 0 and res['updated'] == 1 and len(world.hosts) == h0 + 1, 'повторный импорт обновляет хост, а не дублирует')
     b3 = json.loads(json.dumps(b2))
     b3['profiles'][0]['config']['log'] = {'loglevel': 'debug'}
     b3['templates'][0]['templateJson'] = {**(b3['templates'][0]['templateJson'] or {}), 'routing': {'rules': [{'outboundTag': 'proxy'}]}}
     b3['hosts'][0]['remark'] = 'Обход 6'
-    st, res = await wapi('hosts/import', 'POST', {'pid': rid, 'bundle': b3})
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': b3})
     newp = world.profiles[-1]
     ok(st == 200 and res['profiles'] == 1 and res['templates'] == 1 and len(world.profiles) == p0 + 1
        and newp['inbounds'][0]['tag'] != b3['hosts'][0]['inbound'] and newp['inbounds'][0]['tag'].startswith(b3['hosts'][0]['inbound']),
        f'другой конфиг профиля — копия с новым тегом, другой шаблон — копия: {res["log"]}')
     tname = bundle['templates'][0]['name']
-    st, res = await wapi('hosts/import', 'POST', {'pid': rid, 'template_name': tname, 'template_mode': 'update',
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'template_name': tname, 'template_mode': 'update',
                                                   'template_json': {'routing': {'rules': [{'outboundTag': 'direct'}]}}})
     ok(st == 200 and next(t for t in world.templates if t['name'] == tname)['templateJson'] == {'routing': {'rules': [{'outboundTag': 'direct'}]}},
        'присланный Xray JSON обновил шаблон по имени')
-    st, res = await wapi('hosts/import', 'POST', {'pid': rid, 'bundle': {'hosts': []}})
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': {'hosts': []}})
     ok(st == 400 and 'набор' in res['detail'], 'чужой JSON — понятная ошибка')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
