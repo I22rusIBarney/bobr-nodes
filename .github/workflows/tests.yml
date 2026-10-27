@@ -51,7 +51,7 @@ jobs:
         run: |
           set -o pipefail
           pytest -q -rA 2>&1 | tee /tmp/pytest.out || {
-            grep -E '^(FAIL |FAILED |E  |ERROR )|Traceback|Error:' /tmp/pytest.out | head -40 | cut -c1-900 | sed 's/^/::error::/'
+            grep -E '^(FAIL |FAILED |E  |ERROR )|Traceback|Error:' /tmp/pytest.out | tail -45 | cut -c1-900 | sed 's/^/::error::/'
             exit 1; }
 
   # Готовый образ для серверов: только с main и только если тесты прошли.
