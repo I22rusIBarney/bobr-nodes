@@ -52,8 +52,41 @@ def hint(v: str) -> str:
     return f'••••{v[-4:]}' if v else ''
 
 
+# заголовки безопасности: страница открывается только внутри Telegram, скрипты — свои и telegram.org
+SEC_HEADERS = {
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+    'Strict-Transport-Security': 'max-age=31536000',
+    'Content-Security-Policy': ("default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; "
+                                "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; "
+                                "object-src 'none'; base-uri 'none'; form-action 'none'; "
+                                "frame-ancestors https://web.telegram.org https://*.telegram.org"),
+}
+FAIL_LIMIT, FAIL_WINDOW = 20, 600   # 20 запросов без доступа за 10 минут с одного IP — пауза
+
+
+def client_ip(request) -> str:
+    # бот доступен только через свой Caddy или Caddy bcloud (порт не опубликован) — им можно верить
+    xff = request.headers.get('X-Forwarded-For', '')
+    return (xff.split(',')[0].strip() if xff else '') or (request.remote or '?')
+
+
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
-              bot_username: str = '') -> web.Application:
+              bot_username: str = '', security=None) -> web.Application:
+    fails: dict[str, list[float]] = {}
+
+    @web.middleware
+    async def headers(request: web.Request, handler):
+        try:
+            resp = await handler(request)
+        except web.HTTPException as e:
+            resp = e
+        for k, v in SEC_HEADERS.items():
+            resp.headers.setdefault(k, v)
+        if isinstance(resp, web.HTTPException) and resp.status >= 300:
+            raise resp
+        return resp
 
     @web.middleware
     async def guard(request: web.Request, handler):
@@ -61,6 +94,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return await handler(request)
         user = validate_init_data(request.headers.get('X-Init-Data', ''), bot_token)
         if not user or int(user.get('id', 0)) not in admins:
+            ip, now = client_ip(request), time.time()
+            recent = [t for t in fails.get(ip, []) if t > now - FAIL_WINDOW]
+            if len(recent) >= FAIL_LIMIT:
+                fails[ip] = recent
+                return web.json_response({'detail': 'Слишком много запросов без доступа — подождите 10 минут.'}, status=429)
+            fails[ip] = recent + [now]
+            if len(fails) > 5000:  # не копим память на сканерах
+                for k in [k for k, v in fails.items() if not v or v[-1] < now - FAIL_WINDOW]:
+                    fails.pop(k, None)
             return web.json_response({'detail': 'Нет доступа. Откройте панель из Telegram-бота.'}, status=403)
         request['user'] = user
         try:
@@ -70,7 +112,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (ValueError, BcloudError, engine.StepError, sc.ScriptError) as e:
             return web.json_response({'detail': str(e)}, status=400)
 
-    app = web.Application(middlewares=[guard], client_max_size=256 * 1024)
+    app = web.Application(middlewares=[headers, guard], client_max_size=256 * 1024)
     r = web.RouteTableDef()
     J = web.json_response
 
@@ -140,6 +182,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         jobs = store.jobs(1000)
         return J({'settings': settings_view(), 'profiles': [profile_summary(p, jobs) for p in store.profiles()],
                   'issues': issues(), 'bot_username': bot_username,
+                  'security': security.info() if security else None,
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
@@ -405,7 +448,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         ip = str(b.get('ip') or '')
         result = {'ok': True, 'message': 'Сохранено'}
         if ip:
-            node = {'ip': ip, 'ssh_user': user, 'ssh_port': port}
+            node = {'ip': ip, 'ssh_user': user, 'ssh_port': port, 'known_hosts': runner.known_hosts()}
             if mode == 'key':
                 node['ssh_key'] = runner.bot_key()[0]
             else:
@@ -425,6 +468,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 result = {'ok': False, 'message': f'SSH: {type(e).__name__}: {e}'}
         store.set(f'node_ssh:{p["id"]}:{uuid}', json.dumps(new))
         return J(result)
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/forget-hostkey')
+    async def panel_node_forget(request):
+        """Забыть ключ SSH сервера — после переустановки системы на ноде."""
+        profile_or_404(request.match_info['pid'])
+        ip = str((await body(request)).get('ip') or '')
+        if not re.fullmatch(r'[0-9a-fA-F:.]{3,45}', ip):
+            raise ApiError('Неверный адрес')
+        engine.forget_host(runner.known_hosts(), ip)
+        return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
     async def panel_node_apply(request):

@@ -185,7 +185,9 @@ async def main():
     # веб-админка
     from aiohttp.test_utils import TestClient, TestServer
     from bot.web import build_web
-    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot')
+    from bot.security import Watch
+    watch = Watch(store, bot, {1}, TMP, every=0)
+    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
@@ -201,6 +203,42 @@ async def main():
     async def wapi(path, method='GET', body=None, headers=H):
         r = await web.request(method, '/api/' + path, json=body, headers=headers)
         return r.status, await r.json()
+
+    # безопасность веб-админки: заголовки, ограничение запросов без доступа
+    rr = await web.get('/admin')
+    ok(rr.status == 200 and rr.headers.get('X-Content-Type-Options') == 'nosniff'
+       and 'frame-ancestors https://web.telegram.org' in rr.headers.get('Content-Security-Policy', ''), 'заголовки безопасности на странице')
+    bad_h = {'X-Init-Data': 'user=%7B%22id%22%3A1%7D&hash=00', 'X-Forwarded-For': '203.0.113.99'}
+    codes = [(await web.get('/api/state', headers=bad_h)).status for _ in range(21)]
+    ok(codes[:20] == [403] * 20 and codes[20] == 429, f'после 20 запросов без доступа — пауза для IP: {codes[-2:]}')
+    st, _ = await wapi('state', headers={**H, 'X-Forwarded-For': '203.0.113.99'})
+    ok(st == 200, 'админа с того же IP пауза не задевает')
+    ok((await web.get('/api/state', headers={**bad_h, 'X-Forwarded-For': '198.51.100.77'})).status == 403, 'другие IP — как обычно')
+    # события сервера: вход по SSH и блокировки fail2ban → сообщения админам
+    st, js = await wapi('state')
+    ok(js['security'] == {'hardened': None, 'bans_24h': 0, 'logins': []}, 'безопасность: сервер ещё не защищён')
+    import time as _t
+    (TMP / '.hardened').write_text(json.dumps({'ts': int(_t.time()), 'ssh_port': 22, 'password_login': False}))
+    with open(TMP / 'host-events.jsonl', 'w') as f:
+        f.write(json.dumps({'type': 'login', 'user': 'root', 'ip': '203.0.113.5', 'ts': _t.time()}) + '\n')
+        f.write('мусор\n')
+        for i in range(20):
+            f.write(json.dumps({'type': 'ban', 'ip': f'192.0.2.{i}', 'jail': 'sshd', 'ts': _t.time()}) + '\n')
+    n0 = len(sess.sent)
+    await watch.tick()
+    msgs = [m.text for name, m in sess.sent[n0:] if name == 'SendMessage']
+    ok(len(msgs) == 2 and 'Вход по SSH' in msgs[0] and 'новый IP' in msgs[0] and '203.0.113.5' in msgs[0]
+       and 'Подбор паролей' in msgs[1], f'админам: вход с нового IP и подбор паролей: {[m[:40] for m in msgs]}')
+    ok((TMP / 'host-events.jsonl').read_text() == '', 'файл событий прочитан и очищен')
+    with open(TMP / 'host-events.jsonl', 'w') as f:
+        f.write(json.dumps({'type': 'login', 'user': 'root', 'ip': '203.0.113.5', 'ts': _t.time()}) + '\n')
+    n0 = len(sess.sent)
+    await watch.tick()
+    msgs = [m.text for name, m in sess.sent[n0:] if name == 'SendMessage']
+    ok(len(msgs) == 1 and 'новый IP' not in msgs[0], 'знакомый IP — без тревоги, повторной сводки об атаке нет')
+    st, js = await wapi('state')
+    ok(js['security']['hardened']['password_login'] is False and js['security']['bans_24h'] == 20
+       and [x['new'] for x in js['security']['logins']] == [False, True], f'в админке: защита, блокировки, входы: {js["security"]}')
 
     async def say(text):
         n = len(sess.sent)

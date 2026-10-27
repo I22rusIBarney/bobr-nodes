@@ -10,7 +10,14 @@ services:
     volumes:
       - ./data:/srv/data
     expose:
-      - "8080"
+      - "8080"          # наружу не публикуется: доступ только через HTTPS (свой Caddy или Caddy bcloud)
+    # без лишних прав: боту нужны только сеть, ssh и своя папка data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    logging: &logs
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
 
   # свой HTTPS (Let's Encrypt), если на сервере нет bcloud. Включается COMPOSE_PROFILES=caddy в .env
   caddy:
@@ -25,6 +32,10 @@ services:
       - caddy_data:/data
     depends_on:
       - nodes
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    logging: *logs
 
 volumes:
   caddy_data:

@@ -12,6 +12,7 @@ from aiohttp import web
 
 from bot.handlers import AdminOnly, router
 from bot.runner import Runner
+from bot.security import Watch
 from bot.store import Store
 from bot.web import build_web
 
@@ -67,7 +68,9 @@ async def main():
         except Exception as e:  # кнопка меню — удобство, не обязательна
             logging.warning('menu button: %s', e)
 
-    app = build_web(store, runner, token, admins, public_url, me.username)
+    watch = Watch(store, bot, admins, data_dir)
+    watch_task = asyncio.create_task(watch.run())  # входы по SSH и блокировки fail2ban на сервере бота
+    app = build_web(store, runner, token, admins, public_url, me.username, security=watch)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
@@ -76,7 +79,10 @@ async def main():
     resumed = await runner.resume_all()
     if resumed:
         logging.info('продолжаю незавершённые задачи: %s', resumed)
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        watch_task.cancel()
 
 
 if __name__ == '__main__':

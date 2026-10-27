@@ -118,6 +118,10 @@ class Runner:
         from . import sshkey
         return sshkey.ensure(self.keydir)
 
+    def known_hosts(self) -> str:
+        self.keydir.mkdir(parents=True, exist_ok=True)
+        return str(self.keydir / 'known_hosts')
+
     def pubkeys(self) -> str:
         """Ключи для authorized_keys новой ноды: ваш (из настроек) и ключ бота."""
         return '\n'.join(x for x in (self.store.get('ssh_pubkey'), self.bot_key()[1]) if x and x != '-')
@@ -193,7 +197,8 @@ class Runner:
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
                 'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
                 'port': d.get('port'), 'final_mask': d.get('final_mask'),
-                'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22)}
+                'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22),
+                'known_hosts': self.known_hosts()}
         if ssh.get('mode') == 'key':
             node['ssh_key'] = self.bot_key()[0]
         else:
@@ -248,6 +253,8 @@ class Runner:
             while True:
                 srv = await bc.server(d['server_id'])
                 if srv['status'] == 'active' and srv.get('ip'):
+                    if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
+                        engine.forget_host(self.known_hosts(), srv['ip'])
                     d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
                     break
                 if srv['status'] in ('deleted', 'failed', 'error'):
@@ -268,7 +275,7 @@ class Runner:
                         'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
                         'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
-                        'traffic_control': prof.get('traffic_control', True)}
+                        'traffic_control': prof.get('traffic_control', True), 'known_hosts': self.known_hosts()}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
                          'ssh_pubkey': self.pubkeys()}
                 fn = self.deploy

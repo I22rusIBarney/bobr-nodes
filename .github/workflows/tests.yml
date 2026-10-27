@@ -76,6 +76,38 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # сначала собираем локально и проверяем с теми же ограничениями, что в docker-compose.yml
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: bobr-nodes:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Образ работает без привилегий (cap_drop ALL, no-new-privileges)
+        run: |
+          mkdir smoke && sudo chown 0:0 smoke && sudo chmod 700 smoke   # как data на сервере: root, 700
+          docker run -i --rm --cap-drop ALL --security-opt no-new-privileges:true -v "$PWD/smoke:/srv/data" bobr-nodes:smoke python - <<'PY'
+          import pexpect, subprocess
+          from bot import sshkey, engine, web, security, runner  # noqa: F401 — все модули импортируются
+          path, pub = sshkey.ensure('/srv/data/ssh')
+          assert pub.startswith('ssh-ed25519 '), pub
+          kh = '/srv/data/ssh/known_hosts'
+          open(kh, 'a').close()
+          engine.forget_host(kh, '192.0.2.1')
+          c = pexpect.spawn('ssh', ['-V'], encoding='utf-8'); c.expect(pexpect.EOF); print('ssh:', c.before.strip())
+          r = engine.Remote({'ip': '127.0.0.1', 'ssh_port': 1, 'known_hosts': kh, 'ssh_key': path}, None)
+          rc, out = r.run('true', 20)
+          assert rc != 0 and 'Connection refused' in out, (rc, out)
+          print('ok: ключ, known_hosts, pexpect и ssh работают без привилегий')
+          PY
+          printf ':80 {\n\trespond "ok"\n}\n' > Caddyfile.smoke
+          docker run -d --name caddy-smoke --cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true \
+            -p 18080:80 -v "$PWD/Caddyfile.smoke:/etc/caddy/Caddyfile:ro" caddy:2
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18080 && break; sleep 1; done | grep -qx ok \
+            || { docker logs caddy-smoke; exit 1; }
+          echo "ok: Caddy слушает 80 с cap_drop ALL + NET_BIND_SERVICE"
       - uses: docker/build-push-action@v6
         with:
           context: .

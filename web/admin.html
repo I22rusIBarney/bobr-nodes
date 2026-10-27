@@ -84,6 +84,10 @@ function home() {
     row({ icon: 'plusCircle', tile: '#34C759', title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })],
     'Группа — своя панель Remnawave, свой Cloudflare и свой клиент в bcloud: серверы группы покупаются от его имени, с его баланса и видны ему в bcloud.'));
   v.append(group(null, [row({ icon: 'terminal', tile: '#5856D6', title: 'Мои скрипты', sub: 'свои скрипты установки нод с GitHub', onClick: () => { SCR = null; UI.nav.push(scriptsView); } })]));
+  const sec = ST.security || {}, hd = sec.hardened;
+  v.append(group(null, [row({ icon: 'shield', tile: hd ? '#34C759' : '#FF9500', title: 'Безопасность сервера',
+    sub: hd ? `за сутки заблокировано IP: ${sec.bans_24h || 0} · вход по паролю ${hd.password_login ? 'разрешён' : 'выключен'}` : 'не настроена — bnodes harden на сервере',
+    right: badge(hd ? 'Защищён' : 'Не защищён', hd ? 'ok' : 'bad'), onClick: () => UI.nav.push(securityView) })]));
   const ok = k => s[k] && s[k].set;
   v.append(group('Подключения', [
     row({ icon: 'store', tile: '#FF9500', title: 'bcloud', sub: 'покупка серверов', right: badge(ok('bcloud_url') && ok('bcloud_token') ? 'Подключён' : 'Не настроен', ok('bcloud_url') && ok('bcloud_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(bcloudView) }),
@@ -281,6 +285,29 @@ function groupView(pid) {
   return v;
 }
 
+// ───────── безопасность ─────────
+function securityView() {
+  const sec = ST.security || {}, hd = sec.hardened;
+  const v = h('div', {}, ...title('Безопасность'));
+  const fmt = ts => new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  v.append(group('Сервер бота', hd ? [
+    row({ title: 'Файрвол и fail2ban', right: badge('Включены', 'ok') }),
+    row({ title: 'SSH-порт', detail: String(hd.ssh_port) }),
+    row({ title: 'Вход по паролю', right: badge(hd.password_login ? 'Разрешён' : 'Выключен', hd.password_login ? 'bad' : 'ok') }),
+    row({ title: 'Защищён', detail: fmt(hd.ts) }),
+    row({ title: 'Заблокировано IP за сутки', detail: String(sec.bans_24h || 0) })]
+    : [row({ cls: 'wrap', title: 'Защита не настроена', sub: h('span', {}, 'Выполните на сервере ', h('span', { class: 'mono' }, 'bnodes harden'), ': файрвол, fail2ban, усиленный SSH, автообновления и сообщения сюда о входах по SSH.') })],
+    hd && hd.password_login ? 'Главная защита — вход только по SSH-ключу: настройте ключ и запустите bnodes harden ещё раз.' : 'В базе бота — root-пароли нод, токены панелей и Cloudflare: доступ к серверу бота = доступ ко всем нодам.'));
+  const L = sec.logins || [];
+  v.append(group('Входы по SSH', L.length ? L.map(x => row({ title: x.ip, sub: `${x.user} · ${fmt(x.ts)}`, right: x.new ? badge('Новый IP', 'bad') : null }))
+    : [row({ title: hd ? 'Входов пока не было' : 'Появятся после bnodes harden' })], 'О каждом входе бот сразу пишет админам; о новом IP — с предупреждением.'));
+  v.append(group('Сам бот', [
+    row({ cls: 'wrap', title: 'Веб-админка', sub: 'только из Telegram: подпись initData, только ваши ID; после 20 попыток без доступа IP ждёт 10 минут' }),
+    row({ cls: 'wrap', title: 'SSH к нодам', sub: 'ключ сервера запоминается при первом входе — если он сменится, бот остановится и пароль не отправит' }),
+    row({ cls: 'wrap', title: 'Контейнер', sub: 'без привилегий (cap_drop ALL, no-new-privileges), порт наружу не открыт — только через HTTPS' })]));
+  return v;
+}
+
 // ───────── ноды панели ─────────
 const NODES = {}, NODE = {};
 const FEAT = { psiphon: 'Psiphon', warp: 'WARP' };
@@ -334,7 +361,13 @@ function nodeView(pid, uuid) {
     try { const r = await api(`profiles/${pid}/nodes/${uuid}/ssh`, 'POST', { ...F, ip: n.address }); n.ssh = { ...n.ssh, mode: F.mode, has_password: n.ssh.has_password || !!F.password, source: 'saved' }; showStatus(sshSt, r); }
     catch (e) { showStatus(sshSt, { ok: false, message: e.message }); }
   });
-  srows.push(save, sshSt);
+  const forget = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:0 16px 12px' }, 'Забыть ключ SSH сервера');
+  forget.onclick = UI.busy(forget, async () => {
+    const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на ноде переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
+    if (!yes) return;
+    try { showStatus(sshSt, await api(`profiles/${pid}/nodes/${uuid}/forget-hostkey`, 'POST', { ip: n.address })); } catch (e) { showStatus(sshSt, { ok: false, message: e.message }); }
+  });
+  srows.push(save, forget, sshSt);
   const sshNote = n.ssh.source === 'bot' ? 'Нода куплена ботом — root-пароль уже известен, вводить ничего не нужно.'
     : n.ssh.source === 'saved' ? 'Доступ сохранён в боте.' : 'Нужен для Psiphon, WARP и смены порта. Для Final Mask не нужен.';
   v.append(group('Доступ по SSH', srows, sshNote + (F.mode === 'key' ? ' Добавьте ключ бота в /root/.ssh/authorized_keys на ноде. На ноды, купленные ботом, он добавляется сам.' : '')));

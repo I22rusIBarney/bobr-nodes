@@ -96,6 +96,172 @@ wait_ready() {
   return 1
 }
 
+# ───────── защита сервера (как bcloud harden; если bcloud на этом же сервере — дополняем, не перетираем) ─────────
+ssh_port() { sshd -T 2>/dev/null | awk '/^port /{print $2; exit}'; }
+
+harden() {
+  command -v apt-get >/dev/null || die "Поддерживаются Ubuntu и Debian"
+  local port dir keys pw_off="no" a
+  port="$(ssh_port)"; port="${port:-22}"
+  dir="$(pwd)"
+  keys=0; [[ -s /root/.ssh/authorized_keys ]] && keys=$(grep -cE '^(ssh-|ecdsa-|sk-)' /root/.ssh/authorized_keys || true)
+  cat <<EOF
+${C_B}Защита сервера Bobr Nodes${C_0}
+  • Файрвол UFW: входящие закрыты, кроме SSH (порт ${port}), 80 и 443
+  • fail2ban: блокировка IP после 5 неудачных входов по SSH (на час, повторно — дольше)
+  • SSH: не больше 3 попыток за подключение, без пустых паролей и X11
+  • Автоматические обновления безопасности
+  • Защита сетевого стека (sysctl) и сообщения в бота о входах по SSH и подборе паролей
+В базе бота — root-пароли нод и токены панелей, поэтому защита сервера особенно важна.
+Текущую SSH-сессию не закрывайте, пока не проверите вход в новом окне.
+EOF
+  read -r -p "Продолжить? [y/N] " a </dev/tty || a=""; [[ "$a" =~ ^[yYдД] ]] || { say "Отменено"; return; }
+  if (( keys > 0 )); then
+    say; say "Найдено SSH-ключей у root: ${keys}. Можно запретить вход по паролю — это главная защита от взлома."
+    say "Перед этим убедитесь, что входите именно по ключу, иначе потеряете доступ."
+    read -r -p "Запретить вход по паролю? [y/N] " a </dev/tty || a=""; [[ "$a" =~ ^[yYдД] ]] && pw_off="yes"
+  else
+    warn "SSH-ключей у root нет — вход по паролю оставляю. Настройте ключ и запустите bnodes harden ещё раз."
+  fi
+
+  say "Устанавливаю пакеты…"
+  apt-get update -qq >/dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ufw fail2ban unattended-upgrades >/dev/null || die "Не удалось установить пакеты"
+
+  # 1. файрвол: существующие правила не сбрасываем, только добавляем нужные
+  ufw default deny incoming >/dev/null
+  ufw default allow outgoing >/dev/null
+  ufw allow "${port}/tcp" comment 'SSH' >/dev/null
+  local ports="$port" p
+  for p in $(ss -tlnpH 2>/dev/null | awk '/sshd/{n=split($4,a,":"); print a[n]}' | sort -u); do
+    if [[ "$p" =~ ^[0-9]+$ && "$p" != "$port" ]]; then ufw allow "${p}/tcp" comment 'SSH' >/dev/null; ports="${ports},${p}"; fi
+  done
+  ufw allow 80/tcp comment 'HTTP (Caddy)' >/dev/null
+  ufw allow 443/tcp comment 'HTTPS (Caddy)' >/dev/null
+  ufw --force enable >/dev/null
+  ok "Файрвол включён: открыты ${ports} (SSH), 80, 443. Порт бота 8080 наружу не опубликован"
+
+  # 2. хук событий: входы по SSH и блокировки → data/host-events.jsonl → бот
+  mkdir -p data && chmod 700 data
+  cat > /usr/local/sbin/bnodes-event <<EOF
+#!/bin/sh
+# Bobr Nodes: события сервера для бота (создано bnodes harden)
+F="${dir}/data/host-events.jsonl"
+clean() { printf '%s' "\$1" | tr -cd 'A-Za-z0-9._:@-' | cut -c1-64; }
+case "\$1" in
+  login) [ "\$PAM_TYPE" = "open_session" ] || exit 0
+         printf '{"type":"login","user":"%s","ip":"%s","ts":%s}\n' "\$(clean "\$PAM_USER")" "\$(clean "\$PAM_RHOST")" "\$(date +%s)" >> "\$F" ;;
+  ban)   printf '{"type":"ban","ip":"%s","jail":"%s","ts":%s}\n' "\$(clean "\$2")" "\$(clean "\$3")" "\$(date +%s)" >> "\$F" ;;
+esac
+exit 0
+EOF
+  chmod 755 /usr/local/sbin/bnodes-event
+  grep -qs bnodes-event /etc/pam.d/sshd || echo "session optional pam_exec.so quiet /usr/local/sbin/bnodes-event login" >> /etc/pam.d/sshd
+
+  # 3. fail2ban. Файл 00-… читается раньше bcloud.conf: если bcloud тоже защищает сервер, его [sshd] главнее,
+  #    а наш отдельный jail только сообщает боту о блокировках (без второй блокировки)
+  mkdir -p /etc/fail2ban/action.d /etc/fail2ban/jail.d
+  cat > /etc/fail2ban/action.d/bnodes-notify.conf <<'EOF'
+[Definition]
+actionban = /usr/local/sbin/bnodes-event ban <ip> <name>
+actionunban =
+EOF
+  cat > /etc/fail2ban/jail.d/00-bnodes.conf <<EOF
+# Bobr Nodes (bnodes harden)
+[DEFAULT]
+bantime = 1h
+bantime.increment = true
+bantime.maxtime = 1w
+findtime = 10m
+maxretry = 5
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+port = ${ports}
+backend = systemd
+
+[bnodes-notify]
+enabled = true
+filter = sshd
+port = ${ports}
+backend = systemd
+action = bnodes-notify
+EOF
+  systemctl enable fail2ban >/dev/null 2>&1 || true
+  systemctl restart fail2ban || die "fail2ban не запустился: journalctl -u fail2ban"
+  ok "fail2ban следит за SSH"
+
+  # 4. SSH: отдельный файл; в sshd_config.d действует первое значение (00-bcloud раньше 00-bnodes — не спорят)
+  mkdir -p /etc/ssh/sshd_config.d
+  {
+    echo "# Bobr Nodes (bnodes harden). Удалите файл, чтобы вернуть прежние настройки."
+    echo "MaxAuthTries 3"
+    echo "LoginGraceTime 30"
+    echo "PermitEmptyPasswords no"
+    echo "X11Forwarding no"
+    echo "ClientAliveInterval 300"
+    echo "ClientAliveCountMax 2"
+    if [[ "$pw_off" == "yes" ]]; then
+      echo "PasswordAuthentication no"
+      echo "KbdInteractiveAuthentication no"
+      echo "PermitRootLogin prohibit-password"
+    fi
+  } > /etc/ssh/sshd_config.d/00-bnodes.conf
+  if sshd -t 2>/dev/null; then
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    ok "SSH усилен"; [[ "$pw_off" == "yes" ]] && ok "Вход по паролю отключён — только по ключу"
+  else
+    rm -f /etc/ssh/sshd_config.d/00-bnodes.conf
+    warn "Проверка конфигурации SSH не прошла — SSH оставлен как был"
+  fi
+  local pw_now; pw_now="$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')"
+
+  # 5. автообновления безопасности и сетевой стек (rp_filter не трогаем, если тут стоит vps-warp: ему нужен loose)
+  printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
+  {
+    echo "# Bobr Nodes (bnodes harden)"
+    echo "net.ipv4.tcp_syncookies = 1"
+    if [[ ! -f /etc/sysctl.d/99-vps-warp.conf ]]; then
+      echo "net.ipv4.conf.all.rp_filter = 1"
+      echo "net.ipv4.conf.default.rp_filter = 1"
+    fi
+    echo "net.ipv4.conf.all.accept_redirects = 0"
+    echo "net.ipv4.conf.default.accept_redirects = 0"
+    echo "net.ipv6.conf.all.accept_redirects = 0"
+    echo "net.ipv4.conf.all.send_redirects = 0"
+    echo "net.ipv4.conf.all.accept_source_route = 0"
+    echo "net.ipv4.icmp_echo_ignore_broadcasts = 1"
+  } > /etc/sysctl.d/90-bnodes.conf
+  sysctl --system >/dev/null 2>&1 || true
+  ok "Автообновления безопасности включены"
+
+  # 6. права на секреты
+  chmod 600 .env 2>/dev/null || true
+  chmod -R go-rwx data 2>/dev/null || true
+  [[ -d /root/bnodes-backups ]] && chmod 700 /root/bnodes-backups
+
+  printf '{"ts":%s,"ssh_port":%s,"password_login":%s}\n' "$(date +%s)" "$port" "$([[ "$pw_now" == no ]] && echo false || echo true)" > data/.hardened
+  say
+  ok "Готово. О входах по SSH и атаках бот напишет админам."
+  warn "Не закрывайте эту сессию: откройте новое окно и проверьте, что входите на сервер."
+}
+
+security_status() {
+  say "${C_B}Файрвол${C_0}"; ufw status 2>/dev/null | sed -n '1,12p' || warn "UFW не установлен — bnodes harden"
+  say; say "${C_B}fail2ban (SSH)${C_0}"
+  if command -v fail2ban-client >/dev/null; then fail2ban-client status sshd 2>/dev/null | grep -E 'Currently|Total' || warn "fail2ban не запущен"; else warn "fail2ban не установлен — bnodes harden"; fi
+  say; say "${C_B}SSH${C_0}"
+  sshd -T 2>/dev/null | grep -E '^(port|passwordauthentication|permitrootlogin|maxauthtries) ' || true
+  [[ "$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')" == "yes" ]] && warn "Вход по паролю разрешён: настройте SSH-ключ и запустите bnodes harden"
+  say; say "${C_B}Обновления безопасности${C_0}"
+  grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null && ok "Автообновления включены" || warn "Автообновления выключены"
+  say; say "${C_B}Бот${C_0}"
+  docker ps --format '{{.Names}} {{.Ports}}' 2>/dev/null | grep -E '8080' | grep -q '0.0.0.0:8080' && warn "Порт 8080 бота опубликован наружу!" || ok "Порт бота наружу не открыт"
+  [[ "$(stat -c %a .env 2>/dev/null)" == 600 ]] && ok ".env доступен только root" || warn ".env доступен не только root: chmod 600 .env"
+  [[ "$(stat -c %a data 2>/dev/null)" == 700 ]] && ok "data/ доступна только root" || warn "data/ доступна не только root: chmod 700 data"
+}
+
 usage() {
   cat <<EOF
 ${C_B}bnodes${C_0} — управление Bobr Nodes
@@ -106,6 +272,8 @@ ${C_B}bnodes${C_0} — управление Bobr Nodes
   bnodes status    состояние и версия
   bnodes backup    резервная копия базы и настроек в /root/bnodes-backups
   bnodes setup     повторная настройка (токен, админы, домен, bcloud)
+  bnodes harden    защитить сервер: файрвол, fail2ban, SSH, автообновления
+  bnodes security  состояние защиты: файрвол, блокировки, вход по паролю
   bnodes help      эта справка
 
 Подключения, профили панелей и развёртывание — в веб-админке (кнопка «Панель» в боте).
@@ -132,12 +300,14 @@ case "${1:-install}" in
     say "Панель: $(env_get PUBLIC_URL)/admin"
     exit 0 ;;
   backup)
-    mkdir -p /root/bnodes-backups
+    mkdir -p /root/bnodes-backups && chmod 700 /root/bnodes-backups
     f="/root/bnodes-backups/bnodes-$(date +%Y%m%d-%H%M%S).tar.gz"
     tar -czf "$f" data .env 2>/dev/null || die "Не удалось создать копию"
     chmod 600 "$f"
     ls -1t /root/bnodes-backups/bnodes-*.tar.gz | tail -n +11 | xargs -r rm -f
     ok "Копия: $f"; exit 0 ;;
+  harden)   harden; exit 0 ;;
+  security) security_status; exit 0 ;;
   help|-h|--help) usage; exit 0 ;;
   setup|install) ;;
   *) usage; die "Неизвестная команда: $1" ;;
@@ -273,7 +443,7 @@ COMPOSE_PROFILES='$([[ "$MODE" == caddy ]] && echo caddy)'
 BNODES_IMAGE='${V[BNODES_IMAGE]:-}'
 EOF
 chmod 600 .env
-mkdir -p data
+mkdir -p data && chmod 700 data
 if [[ "$MODE" == bcloud ]]; then
   cat > docker-compose.override.yml <<EOF
 # создано установщиком: бот в сети bcloud — Caddy bcloud проксирует панель, бот обращается к bcloud напрямую
@@ -313,3 +483,8 @@ else
 fi
 say "  Сертификат HTTPS выпускается в первую минуту — если панель не открылась сразу, подождите."
 say "  Управление: bnodes help"
+if [[ ! -f data/.hardened ]]; then
+  say
+  warn "Сервер ещё не защищён, а в базе бота будут root-пароли нод и токены панелей."
+  if yesno "Защитить сервер сейчас (файрвол, fail2ban, SSH, автообновления)?"; then harden; else say "Позже: bnodes harden"; fi
+fi

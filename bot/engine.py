@@ -14,6 +14,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -734,6 +735,18 @@ class Panel:
 
 # ─────────────────────────────── SSH ─────────────────────────────────
 
+HOSTKEY_CHANGED = ('ключ SSH сервера изменился с прошлого входа — возможна подмена сервера, пароль не отправлен. '
+                   'Если сервер переустанавливали, нажмите «Забыть ключ SSH» на странице ноды и повторите')
+
+
+def forget_host(known_hosts: str, host: str) -> None:
+    """Забыть ключ сервера (новый сервер на старом IP или переустановка)."""
+    try:
+        subprocess.run(['ssh-keygen', '-R', host, '-f', known_hosts], capture_output=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 class Remote:
     def __init__(self, node: dict, logfile):
         self.n = node
@@ -741,8 +754,11 @@ class Remote:
 
     def argv(self, cmd, tty):
         n = self.n
-        a = ['-tt' if tty else '-T',
-             '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-o', 'LogLevel=ERROR',
+        kh = n.get('known_hosts')
+        # ключ сервера запоминается при первом входе (как в обычном ssh); если он сменился — останавливаемся
+        hk = ['-o', 'StrictHostKeyChecking=accept-new', '-o', f'UserKnownHostsFile={kh}'] if kh else \
+            ['-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null']
+        a = ['-tt' if tty else '-T', *hk, '-o', 'LogLevel=ERROR',
              '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20',
              '-p', str(n.get('ssh_port') or 22)]
         if n.get('ssh_key'):
@@ -777,7 +793,10 @@ class Remote:
                 raise StepError(f'таймаут команды: {cmd[:60]}')
             break
         child.close()
-        return child.exitstatus, ''.join(out)
+        text = ''.join(out)
+        if 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text or 'Host key verification failed' in text:
+            raise StepError(HOSTKEY_CHANGED)
+        return child.exitstatus, text
 
 
 def wait_ssh(r: Remote, log, timeout=600):
@@ -794,8 +813,8 @@ def wait_ssh(r: Remote, log, timeout=600):
                 break
         except StepError as e:
             last = str(e)
-            if 'не принял пароль' in last:
-                break
+            if 'не принял пароль' in last or last == HOSTKEY_CHANGED:
+                raise StepError(last if last == HOSTKEY_CHANGED else f'не удалось войти по SSH под root: {last}') from None
         time.sleep(15)
     raise StepError(f'не удалось войти по SSH под root: {last}')
 
