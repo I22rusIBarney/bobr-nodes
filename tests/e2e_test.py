@@ -758,7 +758,7 @@ async def main():
     b2['hosts'][0]['sni'] = '188.72.110.51'
     st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': b2, 'squads': ['11111111-1111-1111-1111-111111111111']})
     nh = world.hosts[h0:]
-    ok(st == 200 and res['created'] == 1 and len(nh) == 1 and nh[0]['address'] == '188.72.110.51'
+    ok(st == 200 and res['ok'] and res['created'] == 1 and len(nh) == 1 and nh[0]['address'] == '188.72.110.51'
        and nh[0]['xrayJsonTemplateUuid'] == bh['xrayJsonTemplateUuid'] and nh[0]['tags'] == bh['tags']
        and len(world.profiles) == p0 and len(world.templates) == t0, f'импорт: новый хост на том же профиле и шаблоне: {res}')
     ok(any(i['uuid'] == nh[0]['inbound']['configProfileInboundUuid'] for i in world.squads['11111111-1111-1111-1111-111111111111']['inbounds']),
@@ -780,7 +780,12 @@ async def main():
     ok(st == 200 and next(t for t in world.templates if t['name'] == tname)['templateJson'] == {'routing': {'rules': [{'outboundTag': 'direct'}]}},
        'присланный Xray JSON обновил шаблон по имени')
     st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': {'hosts': []}})
-    ok(st == 400 and 'набор' in res['detail'], 'чужой JSON — понятная ошибка')
+    ok(st == 200 and res['ok'] is False and 'набор' in res['error'] and res['log'] == [], 'чужой JSON — понятная ошибка, ничего не сделано')
+    bad = json.loads(json.dumps(b2))
+    bad['templates'][0]['templateJson'] = None
+    h1 = len(world.hosts)
+    st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': bad})
+    ok(res['ok'] is False and res['log'] == [] and len(world.hosts) == h1, 'набор проверяется целиком до изменений в панели')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')

@@ -167,8 +167,12 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 return self.send(200, {'response': {'total': len(W.squads), 'internalSquads': [
                     dict(uuid=u, name=v['name'], info={'membersCount': 0, 'inboundsCount': len(v['inbounds'])}, inbounds=v['inbounds'])
                     for u, v in W.squads.items()]}})
-            if p == '/api/subscription-templates':
-                return self.send(200, {'response': {'total': len(W.templates), 'templates': W.templates}})
+            if p == '/api/subscription-templates':  # как в панели: список — без содержимого шаблонов
+                return self.send(200, {'response': {'total': len(W.templates), 'templates': [
+                    {**t, 'templateJson': None, 'encodedTemplateYaml': None} for t in W.templates]}})
+            if p.startswith('/api/subscription-templates/'):
+                t = next((x for x in W.templates if x['uuid'] == p.rsplit('/', 1)[1]), None)
+                return self.send(200 if t else 404, {'response': t} if t else {'message': 'not found'})
             if p.startswith('/api/internal-squads/'):
                 u = p.rsplit('/', 1)[1]
                 return self.send(200, {'response': dict(uuid=u, **W.squads[u])})

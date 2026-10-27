@@ -365,14 +365,23 @@ function transferView() {
       if (!TX.hosts.size) return UI.toast('Выберите хосты', true);
       body.from_pid = TX.src; body.hosts = [...TX.hosts];
     }
-    const r = await UI.run(() => api('hosts/import', 'POST', body), 'Готово');
-    if (r) { TX.result = r; TX.dstMeta = null; TX.dstMetaPid = null; UI.nav.refresh(); }
+    const r = await UI.run(() => api('hosts/import', 'POST', body));
+    if (!r) return;
+    TX.result = r; TX.dstMeta = null; TX.dstMetaPid = null;
+    UI.haptic(r.ok ? 'success' : 'error'); UI.nav.refresh();
+    requestAnimationFrame(() => { const el = document.getElementById('tx-result'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); });
   });
   v.append(h('div', { class: 'pad' }, go));
   if (TX.result) {
-    const r = TX.result;
-    v.append(group(`Сделано: хостов создано ${r.created}, обновлено ${r.updated}; профилей ${r.profiles}, шаблонов ${r.templates}`,
-      r.log.map(x => row({ cls: 'wrap', title: x }))));
+    const r = TX.result, dst = (ST.profiles.find(p => p.id === TX.dst) || {}).name || '';
+    const head = r.ok
+      ? h('div', { class: 'notice', style: 'background:var(--ok-soft);color:var(--ok)' }, h('b', {}, '✅ Перенесено в «' + dst + '». '),
+          `Хостов создано: ${r.created}, обновлено: ${r.updated}. Профилей создано: ${r.profiles}, шаблонов: ${r.templates}.`)
+      : h('div', { class: 'notice', style: 'background:var(--danger-soft);color:var(--danger)' }, h('b', {}, '❌ Не перенесено. '), r.error,
+          r.log.length ? ' Ниже — что успело выполниться до ошибки.' : ' В панели ничего не изменилось.');
+    const box = h('div', { id: 'tx-result' }, head);
+    if (r.log.length) box.append(group(r.ok ? 'Что сделано' : 'Успело выполниться', r.log.map(x => row({ cls: 'wrap', title: x }))));
+    v.append(box);
   }
   return v;
 }

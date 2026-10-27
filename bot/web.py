@@ -671,9 +671,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 return engine.import_bundle(panel_of(p), bundle, squads, mode, lines.append)
         try:
             res = await asyncio.to_thread(run)
-        except engine.StepError as e:
-            raise ApiError(f'{e}' + (' — сделано до ошибки: ' + '; '.join(lines) if lines else '')) from None
-        return J({**res, 'log': lines})
+        except (engine.StepError, ApiError) as e:  # итог — на странице: что не так и что уже успели сделать
+            return J({'ok': False, 'error': str(e), 'log': lines})
+        return J({'ok': True, **res, 'log': lines})
 
     # ── развёртывание ──
     @r.get('/api/catalog')

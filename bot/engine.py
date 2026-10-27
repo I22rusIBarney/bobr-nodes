@@ -487,7 +487,7 @@ class Panel:
         """Сквады и Xray-шаблоны панели (для выбора при установке)."""
         squads = [{'uuid': x['uuid'], 'name': x['name']} for x in self.call('GET', '/api/internal-squads')['internalSquads']]
         tpls = []
-        for t in self.call('GET', '/api/subscription-templates')['templates']:
+        for t in self.templates():
             if t.get('templateType') == 'XRAY_JSON':
                 tpls.append({'uuid': t['uuid'], 'name': t['name'], 'balancer_tag': balancer_tag_of(t.get('templateJson'))})
         profiles = [{'uuid': p['uuid'], 'name': p['name'],
@@ -537,9 +537,18 @@ class Panel:
         prev = rest[idx]['remark'] if idx >= 0 else None
         log('панель: хосты поставлены ' + (f'после «{prev}»' if prev else 'в начало списка'))
 
+    def templates(self) -> list[dict]:
+        """Шаблоны подписки с содержимым. Список панели отдаёт их без templateJson — Xray JSON дочитываем по одному."""
+        out = []
+        for t in self.call('GET', '/api/subscription-templates')['templates']:
+            if t.get('templateType') == 'XRAY_JSON' and t.get('templateJson') is None:
+                t = {**t, **(self.call('GET', f'/api/subscription-templates/{t["uuid"]}') or {})}
+            out.append(t)
+        return out
+
     def balancer_templates(self) -> set[str]:
         """UUID Xray-шаблонов с балансировкой (injectHosts по тегу). Просто шаблон у хоста — ещё не балансировщик."""
-        return {t['uuid'] for t in self.call('GET', '/api/subscription-templates')['templates']
+        return {t['uuid'] for t in self.templates()
                 if t.get('templateType') == 'XRAY_JSON' and balancer_tag_of(t.get('templateJson'))}
 
     def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof: dict, inbound: dict,
@@ -548,7 +557,7 @@ class Panel:
         Возвращает UUID хоста-балансировщика, если он создан сейчас.
         Если они уже есть — ничего не меняем: новые скрытые хосты с тегом подхватятся сами."""
         tag = tag.upper()
-        tpls = self.call('GET', '/api/subscription-templates')['templates']
+        tpls = self.templates()
         xray = [t for t in tpls if t.get('templateType') == 'XRAY_JSON']
         tpl = next((t for t in xray if balancer_tag_of(t.get('templateJson')) == tag), None)
         if tpl:
@@ -1527,7 +1536,7 @@ def export_hosts(panel: 'Panel', uuids: list[str]) -> dict:
     Ссылки внутри — по именам и тегам, а не UUID: в другой панели UUID свои."""
     hosts = {h['uuid']: h for h in panel.call('GET', '/api/hosts')}
     profiles = {p['uuid']: p for p in panel.call('GET', '/api/config-profiles')['configProfiles']}
-    tpls = {t['uuid']: t for t in panel.call('GET', '/api/subscription-templates')['templates']}
+    tpls = {t['uuid']: t for t in panel.templates()}
     out = {'kind': BUNDLE_KIND, 'version': 1, 'profiles': [], 'templates': [], 'hosts': []}
     seen_p, seen_t = set(), set()
     for u in uuids:
@@ -1570,9 +1579,19 @@ def check_bundle(b) -> dict:
         raise StepError('в наборе нет хостов и шаблонов (или их слишком много)')
     pnames = {p.get('name') for p in profiles if isinstance(p, dict)}
     tnames = {t.get('name') for t in tpls if isinstance(t, dict)}
+    for t in tpls:  # всё проверяем до того, как что-то менять в панели
+        if not isinstance(t, dict) or not t.get('name') or (t.get('templateType') or 'XRAY_JSON') != 'XRAY_JSON' \
+                or not isinstance(t.get('templateJson'), dict):
+            raise StepError(f'шаблон «{(t or {}).get("name", "?")}»: нужен Xray JSON-шаблон с содержимым')
+    for p in profiles:
+        if not isinstance(p, dict) or not p.get('name') or not isinstance(p.get('config'), dict):
+            raise StepError('в наборе профиль без имени или конфига')
     for h in hosts:
         if not isinstance(h, dict) or h.get('profile') not in pnames or not h.get('inbound') or not h.get('remark'):
             raise StepError('в наборе хост без профиля, inbound или названия')
+        prof = next(p for p in profiles if p['name'] == h['profile'])
+        if h['inbound'] not in [i.get('tag') for i in prof['config'].get('inbounds', [])]:
+            raise StepError(f'хост «{h["remark"]}»: в профиле «{prof["name"]}» нет inbound {h["inbound"]}')
         if h.get('template') and h['template'] not in tnames:
             raise StepError(f'шаблона «{h["template"]}» нет в наборе')
     return b
@@ -1619,7 +1638,7 @@ def import_bundle(panel: 'Panel', bundle, squads: list[str], template_mode: str,
         res['profiles'] += 1
         log(f'профиль «{name}» создан' + (f' (теги: {", ".join(f"{a}→{c}" for a, c in tmap.items() if a != c)})'
                                           if any(a != c for a, c in tmap.items()) else ''))
-    tpls = panel.call('GET', '/api/subscription-templates')['templates']
+    tpls = panel.templates()
     tmap_t: dict[str, str] = {}
     for t in b.get('templates') or []:
         if (t.get('templateType') or 'XRAY_JSON') != 'XRAY_JSON' or not isinstance(t.get('templateJson'), dict):
