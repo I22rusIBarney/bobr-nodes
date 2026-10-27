@@ -350,6 +350,30 @@ function nodeView(pid, uuid) {
     row({ title: 'Профиль', detail: n.profile || '—' }),
     row({ title: 'Дополнения', detail: n.features.map(f => FEAT[f] || f).join(', ') || 'нет' })]));
 
+  // IP-адрес: перепривязка, если адрес попал в бан
+  const ipSt = statusLine(), irows = [row({ title: 'IP', detail: n.ip || '—' }), row({ title: 'Домен', detail: n.domain || '—' }),
+    row({ title: 'Адрес в панели', detail: n.address })];
+  const startReip = async (mode, body, ask) => {
+    if (ask && !(await UI.ask(ask))) return;
+    const r = await UI.run(() => api(`profiles/${pid}/nodes/${uuid}/ip`, 'POST', { mode, ...body }), 'Задача запущена');
+    if (r) { delete GJ[pid]; delete NODES[pid]; delete NODE[uuid]; UI.nav.push(() => jobView(r.id)); }
+  };
+  const ibtn = (text, fn, tinted) => { const b = h('button', { class: 'btn' + (tinted ? ' tinted' : '') + ' small', type: 'button', style: 'margin:10px 16px 0' }, text); b.onclick = UI.busy(b, fn); return b; };
+  if (n.bcloud) {
+    const price = n.bcloud.price_kop != null ? rubK(n.bcloud.price_kop) : '';
+    irows.push(ibtn('Сменить IP через bcloud' + (price ? ' · ' + price : ''), () => startReip('bcloud', {}, { title: 'Сменить IP?', message: `bcloud сменит IP сервера${price ? ' за ' + price : ''} с баланса владельца. Бот сам обновит DNS и панель.`, buttons: [{ id: 'y', text: 'Сменить' }] })),
+      ibtn('IP уже сменили в bcloud — подтянуть', () => startReip('sync', {}), true));
+  }
+  if (!n.ip_new) n.ip_new = '';
+  irows.push(h('label', { class: 'field stack', style: 'margin-top:10px' }, h('label', {}, n.bcloud ? 'Или новый IP вручную' : 'Новый IP'), textIn(n.ip_new, '203.0.113.10', x => { n.ip_new = x.trim(); }, true)),
+    ibtn('Перепривязать на этот IP', () => n.ip_new ? startReip('manual', { ip: n.ip_new }) : showStatus(ipSt, { ok: false, message: 'Введите новый IP' }), true));
+  if (n.address_is_ip && n.domain) irows.push(ibtn('Писать в панели домен вместо IP', async () => {
+    try { const r = await api(`profiles/${pid}/nodes/${uuid}/address-domain`, 'POST', {}); showStatus(ipSt, r); n.address = n.domain; n.address_is_ip = false; UI.nav.refresh(); }
+    catch (e) { showStatus(ipSt, { ok: false, message: e.message }); }
+  }, true));
+  irows.push(h('div', { style: 'height:12px' }), ipSt);
+  v.append(group('IP-адрес', irows, 'Если IP попал в бан: бот поменяет A-записи доменов ноды в Cloudflare, проверит вход по SSH на новом IP и обновит адрес ноды в панели (лучше домен — тогда при следующей смене хватит DNS). ' + (n.bcloud ? 'Сервер куплен через бота — новый IP бот узнает в bcloud сам.' : '')));
+
   // SSH
   const F = n.sshForm, sshSt = statusLine();
   const srows = [h('div', { style: 'padding:12px 12px 4px' }, UI.segmented([{ value: 'password', label: 'Пароль' }, { value: 'key', label: 'Ключ бота' }], F.mode, x => { F.mode = x; UI.nav.refresh(); })),

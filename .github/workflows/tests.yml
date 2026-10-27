@@ -23,9 +23,9 @@ jobs:
       - name: bcloud со служебным API
         run: |
           cd _deps/bobr-cloud
-          if [ ! -f app/web/service_api.py ]; then
-            echo "В main bcloud ещё нет /api/svc — беру ветку feat/service-api"
-            git checkout -q origin/feat/service-api
+          if ! grep -q 'change-ip' app/web/service_api.py 2>/dev/null; then
+            echo "В main bcloud ещё нет смены IP через /api/svc — беру ветку feat/svc-change-ip"
+            git checkout -q origin/feat/svc-change-ip
           fi
       - uses: actions/setup-python@v5
         with:

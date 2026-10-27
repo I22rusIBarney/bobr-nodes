@@ -8,6 +8,7 @@ import hmac
 import json
 import logging
 import re
+import socket
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -175,7 +176,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'script_profile': ((((store.script(p['script_id']) or {}).get('recipe') or {}).get('profile') or {}).get('mode')
                                    if p.get('script_id') else None),
                 'panel_profile_uuid': p.get('panel_profile_uuid') or '',
-                'servers': sum(1 for j in mine if j['status'] == 'done' and j['data'].get('kind') != 'node'),
+                'servers': sum(1 for j in mine if j['status'] == 'done' and j['data'].get('kind') not in ('node', 'reip')),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
 
@@ -356,12 +357,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', ''))
 
     def bot_jobs_by_ip(pid: int) -> dict[str, dict]:
-        """IP → данные последней удачной задачи покупки (домен, пароль root) этой группы."""
+        """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер bcloud) этой группы.
+        Ноды регистрируются по домену, старые — по IP, поэтому ключи — оба."""
         out = {}
         for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
             d = j['data']
-            if j['profile_id'] == pid and d.get('ip') and d.get('kind') != 'node' and j['status'] == 'done':
+            if j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done':
+                d = {**d, '_job': j['id']}
                 out[d['ip']] = d
+                if d.get('domain'):
+                    out[d['domain']] = d
         return out
 
     def ssh_view(pid: int, uuid: str, ip: str) -> dict:
@@ -417,12 +422,22 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 raise ApiError('Ноды нет в панели', 404)
             pr = next((x for x in pl.call('GET', '/api/config-profiles')['configProfiles']
                        if x['uuid'] == (n.get('configProfile') or {}).get('activeConfigProfileUuid')), {}) or {}
-            dom = (bot_jobs_by_ip(p['id']).get(n['address']) or {}).get('domain')
-            return n, pr, pl.node_hosts(n, {dom} if dom else set())
+            bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+            ip = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else resolve(n['address']))
+            dom = bd.get('domain') or ('' if engine.is_ip(n['address']) else n['address'])
+            return n, pr, pl.node_hosts(n, {dom} if dom else set(), {ip} if ip else set()), bd, ip, dom
         try:
-            n, pr, hosts = await asyncio.to_thread(load)
+            n, pr, hosts, bd, ip, dom = await asyncio.to_thread(load)
         except engine.StepError as e:
             raise ApiError(f'Панель: {e}') from None
+        bc = None
+        if bd.get('server_id'):
+            bc = {'server_id': bd['server_id'], 'price_kop': None}
+            try:
+                srv = await bcloud_from(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))
+                bc['price_kop'] = srv.get('change_ip_price_kop')
+            except BcloudError as e:
+                bc['error'] = str(e)
         return J({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                   'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                   'inbound_port': next((i.get('port') for i in pr.get('inbounds', [])
@@ -431,6 +446,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'hosts': [{'uuid': h['uuid'], 'remark': h.get('remark', ''), 'address': h.get('address', ''),
                              'port': h.get('port'), 'final_mask': bool(h.get('finalMask')), 'hidden': bool(h.get('isHidden'))}
                             for h in hosts],
+                  'ip': ip, 'domain': dom, 'address_is_ip': engine.is_ip(n['address']), 'bcloud': bc,
                   'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1]})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/ssh')
@@ -477,6 +493,77 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.set(f'node_ssh:{p["id"]}:{uuid}', json.dumps(new))
         return J(result)
 
+    def resolve(host: str) -> str:
+        try:
+            return socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+        except (OSError, UnicodeError, IndexError):
+            return ''
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/ip')
+    async def panel_node_ip(request):
+        """Перепривязка IP: mode bcloud — сменить в bcloud (платно, с баланса владельца), sync — взять уже сменённый
+        из bcloud, manual — новый IP вручную. Дальше задача: Cloudflare, SSH, адрес в панели."""
+        p = profile_or_404(request.match_info['pid'])
+        uuid, b = request.match_info['uuid'], await body(request)
+        mode = b.get('mode')
+        if mode not in ('bcloud', 'sync', 'manual'):
+            raise ApiError('Неизвестный способ')
+        nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        old = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else await asyncio.to_thread(resolve, n['address']))
+        if not old:
+            raise ApiError('Не знаю текущий IP ноды')
+        new = ''
+        if mode == 'manual':
+            new = str(b.get('ip') or '').strip()
+            if not engine.is_ip(new) or ':' in new:
+                raise ApiError('Новый IP: адрес IPv4, например 203.0.113.10')
+            if new == old:
+                raise ApiError('Это текущий IP ноды')
+        elif not bd.get('server_id'):
+            raise ApiError('Нода куплена не через бота — укажите новый IP вручную')
+        ssh = node_ssh(p['id'], uuid, n['address'])
+        if not ssh:
+            raise ApiError('Укажите доступ по SSH к ноде — после смены IP бот проверяет вход')
+        if any(j['status'] in ACTIVE and j['data'].get('kind') == 'reip' and j['data'].get('node_uuid') == uuid
+               for j in store.jobs(200)):
+            raise ApiError('Смена IP этой ноды уже идёт')
+        doms = [bd['domain']] if bd.get('domain') else []
+        if not engine.is_ip(n['address']) and n['address'] not in doms:
+            doms.append(n['address'])
+        data = {'kind': 'reip', 'mode': mode, 'node_uuid': uuid, 'name': n['name'], 'ip': old, 'old_ip': old, 'new_ip': new,
+                'domain': (doms[0] if doms else n['name']), 'domains': doms, 'flag': '🔁', 'loc_name': n['name'],
+                'spec': 'смена IP', 'ssh': ssh, 'server_id': bd.get('server_id'), 'buyer': bd.get('buyer'),
+                'deploy_job': bd.get('_job')}
+        jid = store.add_job('reip-' + uuid[:8], p['id'], int(request['user']['id']), data)
+        await runner.render(jid, force=True)
+        runner.start(jid)
+        return J({'id': jid})
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/address-domain')
+    async def panel_node_address(request):
+        """Адрес ноды в панели: IP → домен (тогда при смене IP хватит A-записи)."""
+        p = profile_or_404(request.match_info['pid'])
+        uuid = request.match_info['uuid']
+
+        def run():
+            pl = panel_of(p)
+            n = next((x for x in pl.call('GET', '/api/nodes') if x['uuid'] == uuid), None)
+            if not n:
+                raise ApiError('Ноды нет в панели', 404)
+            dom = (bot_jobs_by_ip(p['id']).get(n['address']) or {}).get('domain')
+            if not dom:
+                raise ApiError('Домен ноды боту неизвестен')
+            if resolve(dom) != n['address'] and engine.is_ip(n['address']):
+                raise ApiError(f'{dom} сейчас указывает не на {n["address"]} — сначала исправьте DNS')
+            pl.call('PATCH', '/api/nodes', {'uuid': uuid, 'address': dom})
+            return dom
+        dom = await asyncio.to_thread(run)
+        return J({'ok': True, 'message': f'Адрес ноды в панели — {dom}'})
+
     @r.post('/api/profiles/{pid}/nodes/{uuid}/forget-hostkey')
     async def panel_node_forget(request):
         """Забыть ключ SSH сервера — после переустановки системы на ноде."""
@@ -510,7 +597,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if (extras or port != '') and not ssh:
             raise ApiError('Укажите доступ по SSH к ноде — без него Psiphon, WARP и порт не поставить')
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
-        data = {'kind': 'node', 'node_uuid': uuid, 'name': n['name'], 'ip': n['address'],
+        data = {'kind': 'node', 'node_uuid': uuid, 'name': n['name'], 'ip': bd.get('ip') or n['address'],
                 'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
                 'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
                 'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'port': port, 'final_mask': fm}
@@ -832,7 +919,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Повторить можно только задачу с ошибкой')
         store.update_job(j['id'], status='queued', error='')
         runner.start(j['id'])
-        return J({'ok': True, 'rebuy': not j['data'].get('server_id') and j['data'].get('kind') != 'node'})
+        return J({'ok': True, 'rebuy': not j['data'].get('server_id') and j['data'].get('kind') not in ('node', 'reip')})
 
     @r.post('/api/jobs/{jid}/hide')
     async def hide(request):

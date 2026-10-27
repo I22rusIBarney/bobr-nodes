@@ -580,7 +580,7 @@ class Panel:
             raise StepError(f'в профиле нет inbound {tag}')
         self.attach(node, prof, [inbound], squads, node_port, log, tls=True)
 
-    def node_hosts(self, pnode: dict, domains: set[str]) -> list[dict]:
+    def node_hosts(self, pnode: dict, domains: set[str], ips: set[str] = frozenset()) -> list[dict]:
         """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP."""
         active = set(active_inbounds(pnode))
         names = {pnode['address']} | set(domains)
@@ -591,8 +591,8 @@ class Panel:
             mine = pnode['uuid'] in (h.get('nodes') or []) or h.get('address') in names
             if not mine and h.get('address'):
                 try:
-                    mine = pnode['address'] in {a[4][0] for a in socket.getaddrinfo(h['address'], None, socket.AF_INET)}
-                except OSError:
+                    mine = bool(({pnode['address']} | set(ips)) & {a[4][0] for a in socket.getaddrinfo(h['address'], None, socket.AF_INET)})
+                except (OSError, UnicodeError):
                     mine = False
             if mine:
                 out.append(h)
@@ -658,8 +658,12 @@ class Panel:
             raise StepError(f'в профиле «{prof["name"]}» нет inbound')
         return prof, inbounds
 
-    def node_state(self, ip: str) -> dict | None:
-        return next((n for n in self.call('GET', '/api/nodes') if n['address'] == ip), None)
+    def node_state(self, ip: str, domain: str = '', uuid: str = '') -> dict | None:
+        """Нода по UUID, либо по адресу — IP или домену (новые ноды регистрируются по домену)."""
+        nodes = self.call('GET', '/api/nodes')
+        if uuid:
+            return next((n for n in nodes if n['uuid'] == uuid), None)
+        return next((n for n in nodes if n['address'] in {ip, domain} - {''}), None)
 
     @staticmethod
     def host_body(prof: dict, inbound: dict, node: dict, tls: bool) -> dict:
@@ -689,7 +693,8 @@ class Panel:
             log(f'панель: нода «{existing["name"]}» уже была, профиль назначен')
         else:
             cc = (node.get('country') or '').upper()
-            body = {'name': node['name'][:30], 'address': node['ip'], 'port': node_port,
+            # адрес ноды — домен: при смене IP (бан адреса) достаточно поменять A-запись
+            body = {'name': node['name'][:30], 'address': node.get('domain') or node['ip'], 'port': node_port,
                     'countryCode': cc if re.fullmatch(r'[A-Z]{2}', cc) else 'XX', 'configProfile': cp}
             self.call('POST', '/api/nodes', body)
             log(f'панель: нода «{node["name"]}» создана')
@@ -1162,7 +1167,7 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
     add_keys(r, prof.get('ssh_pubkey') or '', log)
 
     stage('install')
-    existing = panel.node_state(node['ip'])
+    existing = panel.node_state(node['ip'], node.get('domain', ''))
     if existing and existing.get('isConnected'):
         log('нода уже подключена к панели — установку пропускаю')
     else:
@@ -1223,7 +1228,7 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
         if rc != 0:
             raise StepError(f'проверка из рецепта не прошла (код {rc}): {strip_ansi(out).strip()[-200:]}')
     for attempt in range(check_tries):
-        st = panel.node_state(node['ip']) or {}
+        st = panel.node_state(node['ip'], node.get('domain', '')) or {}
         if st.get('isConnected'):
             log('нода подключилась к панели ✓')
             return 'готово'
@@ -1245,7 +1250,7 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
     pnode = next((n for n in panel.call('GET', '/api/nodes') if n['uuid'] == node['node_uuid']), None)
     if not pnode:
         raise StepError('ноды больше нет в панели')
-    node = {**node, 'ip': pnode['address']}
+    node = {**node, 'ip': node.get('ip') or pnode['address']}
     want_port = node.get('port')
     need_ssh = bool(node.get('psiphon') or node.get('warp') or want_port)
     extras, r = {}, None
@@ -1259,7 +1264,7 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
 
     stage('panel')
     with PANEL_LOCK:
-        hosts = panel.node_hosts(pnode, set(node.get('domains') or []))
+        hosts = panel.node_hosts(pnode, set(node.get('domains') or []), {node['ip']} if is_ip(node.get('ip') or '') else set())
         log(f'панель: хостов у ноды — {len(hosts)}' + (': ' + ', '.join(h['remark'] for h in hosts) if hosts else ''))
         profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
         cur = next((p for p in profiles if p['uuid'] == (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
@@ -1288,10 +1293,92 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
         stage('check')
         for attempt in range(check_tries):
             time.sleep(check_every)
-            st = panel.node_state(node['ip']) or {}
+            st = panel.node_state('', uuid=node['node_uuid']) or {}
             if st.get('isConnected'):
                 log('нода на связи с панелью ✓')
                 return 'готово'
             log(f'жду, пока нода перезапустит Xray ({attempt + 1}/{check_tries})')
         raise StepError('после смены профиля нода не вышла на связь с панелью — посмотрите её в панели')
     return 'готово'
+
+
+# ─────────────────────────────── Перепривязка IP (адрес в бане) ──
+
+def is_ip(x: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_address(x)
+        return True
+    except ValueError:
+        return False
+
+
+def reip(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
+         check_tries: int = 30, check_every: int = 10, dns_timeout: int = 600) -> str:
+    """Нода переехала на новый IP: A-записи её доменов в Cloudflare → новый IP, вход по SSH на новом IP,
+    адрес ноды в панели — домен (или новый IP, если домена нет), хосты, где был старый IP, — на новый.
+    node: node_uuid, old_ip, new_ip, domains, ssh_*. Старый IP в DNS меняем только там, где он и был."""
+    old, new = node['old_ip'], node['new_ip']
+    domains = [d for d in dict.fromkeys(node.get('domains') or []) if d and not is_ip(d)]
+    panel = Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
+    pnode = panel.node_state('', uuid=node['node_uuid'])
+    if not pnode:
+        raise StepError('ноды больше нет в панели')
+    with PANEL_LOCK:  # домены хостов ноды: кроме известных боту — те, что сейчас указывают на старый IP
+        for h in panel.node_hosts(pnode, set(domains) | {old}, {old}):
+            a = h.get('address') or ''
+            if a and not is_ip(a) and a not in domains:
+                domains.append(a)
+    if not is_ip(pnode['address']) and pnode['address'] not in domains:
+        domains.insert(0, pnode['address'])
+
+    stage('dns')
+    changed = []
+    if domains:
+        cf = Cloudflare(prof['cf_token'])
+        for d in domains:
+            try:
+                recs = [r for r in cf.records(d) if r['type'] == 'A']
+            except StepError as e:
+                log(f'{d}: пропускаю — {e}')
+                continue
+            if recs and all(r['content'] == new for r in recs):
+                log(f'{d}: уже {new}')
+                changed.append(d)
+                continue
+            if recs and not any(r['content'] == old for r in recs) and d not in (node.get('domains') or []):
+                log(f'{d}: указывает на {", ".join(r["content"] for r in recs)}, не на {old} — не трогаю')
+                continue
+            cf.upsert_a(d, new, log)
+            changed.append(d)
+        for d in changed:
+            wait_dns(d, new, log, timeout=dns_timeout)
+    if not changed:
+        log('доменов этой ноды в Cloudflare не нашёл — адрес ноды в панели будет новым IP')
+
+    stage('ssh')
+    r = Remote({**node, 'ip': new}, logfile)
+    wait_ssh(r, log, timeout=900)
+
+    stage('panel')
+    addr = pnode['address'] if (not is_ip(pnode['address']) and pnode['address'] in changed) else (changed[0] if changed else new)
+    with PANEL_LOCK:
+        if pnode['address'] != addr:
+            panel.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'], 'address': addr})
+            log(f'панель: адрес ноды {pnode["address"]} → {addr}')
+        else:
+            log(f'панель: адрес ноды — {addr}, менять не нужно')
+        for h in panel.call('GET', '/api/hosts'):
+            if h.get('address') == old:
+                panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'address': addr})
+                log(f'панель: хост «{h.get("remark", "")}» {old} → {addr}')
+
+    stage('check')
+    for attempt in range(check_tries):
+        st = panel.node_state('', uuid=pnode['uuid']) or {}
+        if st.get('isConnected'):
+            log('нода на связи с панелью ✓')
+            return 'готово'
+        log(f'жду подключения ноды ({attempt + 1}/{check_tries})')
+        time.sleep(check_every)
+    raise StepError('нода не вышла на связь с панелью на новом IP — проверьте её в панели')

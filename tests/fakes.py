@@ -244,6 +244,8 @@ def make_server(world: World) -> ThreadingHTTPServer:
                         pr = next(x for x in W.profiles if x['uuid'] == b['configProfile']['activeConfigProfileUuid'])
                         assert set(b['configProfile']['activeInbounds']) <= {i['uuid'] for i in pr['inbounds']}
                         n['configProfile'] = b['configProfile']
+                    if n and 'address' in b:
+                        n['address'] = b['address']
                     return self.send(200, {'response': n or {}})
                 if p == '/api/hosts':
                     h = next(x for x in W.hosts if x['uuid'] == b['uuid'])

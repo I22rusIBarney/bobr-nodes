@@ -54,8 +54,14 @@ class Bcloud:
         return await self._call('POST', '/servers', json={'tg_id': self.tg_id, 'location': location, 'os': os_,
                                                            'idx': idx, 'period': period, 'password': password})
 
-    async def server(self, sid: int) -> dict:
-        return await self._call('GET', f'/servers/{sid}', params={'tg_id': self.tg_id})
+    async def server(self, sid: int, sync: bool = False) -> dict:
+        """sync — сначала обновить данные у провайдера (новый IP после смены в кабинете bcloud)."""
+        params = {'tg_id': self.tg_id, **({'sync': 1} if sync else {})}
+        return await self._call('GET', f'/servers/{sid}', params=params)
+
+    async def change_ip(self, sid: int) -> dict:
+        """Смена IP у провайдера с баланса владельца сервера. pending — итог придёт позже (проверять server(sync))."""
+        return await self._call('POST', f'/servers/{sid}/change-ip', json={'tg_id': self.tg_id})
 
     async def rename(self, sid: int, name: str) -> None:
         await self._call('POST', f'/servers/{sid}/rename', json={'tg_id': self.tg_id, 'name': name})

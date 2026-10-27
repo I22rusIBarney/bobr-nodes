@@ -98,9 +98,11 @@ class FakeAstra:
     async def servers(s): return []
 
     async def server(s, sid):
-        return {'id': sid, 'status': 'active', 'ip': f'198.51.100.{sid - 500}', 'root_password': s.made[sid]['password']}
+        return {'id': sid, 'status': 'active', 'ip': s.made[sid].get('ip') or f'198.51.100.{sid - 500}', 'root_password': s.made[sid]['password']}
 
     async def action(s, sid, a, body=None):
+        if a == 'change-ip':
+            s.made[sid]['ip'] = f'203.0.113.{sid - 500}'
         if a == 'rename':
             s.made[sid]['renamed'] = body['name']
         return {'ok': True}
@@ -347,6 +349,7 @@ async def main():
     ok(all(j['chat_id'] == 1 and j['msg_id'] for j in jobs), 'ход задач из админки приходит в чат админа')
     ok({r['name'] for r in world.records if r['type'] == 'A' and r['content'].startswith('198.51')} == {'de2.example.com', 'de3.example.com'}
        and all(not r['proxied'] for r in world.records if r['name'] != 'de1.example.com'), 'A-записи созданы, без проксирования')
+    ok({n['address'] for n in world.nodes} == {'de2.example.com', 'de3.example.com'}, 'ноды в панели — по домену, не по IP')
     ok({n['name'] for n in world.nodes} == {'de2', 'de3'} and all(n['countryCode'] == 'DE' for n in world.nodes),
        'ноды в панели: имена и страна')
     ok(len(world.hosts) == 2 and {h['address'] for h in world.hosts} == {'de2.example.com', 'de3.example.com'}, 'хосты созданы')
@@ -534,7 +537,7 @@ async def main():
        f'правило Psiphon — последним, после блокировок: {prule}')
     ok(all('Vision-NV' not in json.dumps(r) or 'Vision-NV-PS' in json.dumps(r) for r in cfg['routing']['rules']),
        'правила маршрутизации ссылаются на новый тег inbound')
-    psn = [n for n in world.nodes if n['address'] in {j['data']['ip'] for j in pj}]
+    psn = [n for n in world.nodes if n['address'] in {j['data']['domain'] for j in pj}]
     ok(len(psn) == 2 and all(n['configProfile']['activeConfigProfileUuid'] == psp[0]['uuid'] for n in psn),
        'ноды с Psiphon — в профиле «NV Vision Psiphon»')
     st, jv = await wapi(f'jobs/{pj[0]["id"]}')
@@ -584,10 +587,10 @@ async def main():
 
     # дополнения на уже работающих нодах панели
     st, nl = await wapi(f'profiles/{pid}/nodes')
-    plain = next(n for n in nl['nodes'] if n['address'] == mj[0]['data']['ip'])
+    plain = next(n for n in nl['nodes'] if n['address'] == mj[0]['data']['domain'])
     ok(st == 200 and plain['bot'] and plain['profile'] == 'NV Vision' and plain['features'] == [] and nl['bot_key'].startswith('ssh-ed25519 '),
        f'список нод панели: профиль, дополнения, ключ бота: {plain}')
-    ok(next(n for n in nl['nodes'] if n['address'] == wj['data']['ip'])['features'] == ['psiphon', 'warp'], 'у ноды с дополнениями они видны')
+    ok(next(n for n in nl['nodes'] if n['address'] == wj['data']['domain'])['features'] == ['psiphon', 'warp'], 'у ноды с дополнениями они видны')
     ok(plain['country'] == 'DE' and plain['online'] == 3, f'флаг страны и онлайн в списке: {plain["country"]}, {plain["online"]}')
     st, nd = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}')
     ok(st == 200 and nd.get('online') == 3 and nd.get('inbound_port') is None,
@@ -612,7 +615,7 @@ async def main():
     hh = next(h for h in world.hosts if h['address'] == mj[0]['data']['domain'])
     ok(hh['inbound']['configProfileInboundUuid'] == vw['inbounds'][0]['uuid'] and hh['port'] == 9443 and hh['finalMask'] == engine.FINAL_MASK,
        f'хост ноды: на inbound копии, порт 9443, Final Mask: {hh["port"]}')
-    ok(fakes_remote.warp_calls[w0:] == [pn['address']] and fakes_remote.ports[p0:] == [(pn['address'], 9443, 443)],
+    ok(fakes_remote.warp_calls[w0:] == [mj[0]['data']['ip']] and fakes_remote.ports[p0:] == [(mj[0]['data']['ip'], 9443, 443)],
        'на ноду по SSH поставлен WARP и переадресация 9443 → 443')
     nv_in = next(x for x in world.profiles if x['name'] == 'NV Vision')['inbounds'][0]['uuid']
     sq_old = {u for u, x in world.squads.items() if any(i['uuid'] == nv_in for i in x['inbounds'])}
@@ -648,6 +651,42 @@ async def main():
        f'чужая нода: копия «Manual nodes Psiphon», вход по сохранённому паролю: {mj2["error"]}')
     ok(next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['inbound']['configProfileUuid'] == mp['uuid'],
        'её хост найден по IP и переведён на копию профиля')
+
+    # смена IP: нода, купленная ботом, — через bcloud (с баланса владельца), DNS и панель — сами
+    from bot.runner import bcloud_from as _bcf
+    tj = store.job(mj[1]['id'])
+    dom, old = tj['data']['domain'], tj['data']['ip']
+    tn = next(n for n in world.nodes if n['address'] == dom)
+    st, nd = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}')
+    ok(st == 200 and nd['ip'] == old and nd['domain'] == dom and not nd['address_is_ip'] and nd['bcloud']
+       and nd['bcloud']['price_kop'] == 15000, f'страница ноды: IP, домен, смена IP в bcloud с ценой: {nd.get("bcloud")}')
+    bal0 = await _bcf(store, 1).balance()
+    st, js = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}/ip', 'POST', {'mode': 'bcloud'})
+    ok(st == 200, f'смена IP через bcloud запущена: {js}')
+    await runner.wait_all()
+    rjb = store.job(js['id'])
+    new = rjb['data'].get('new_ip', '')
+    ok(rjb['status'] == 'done' and new.startswith('203.0.113.'), f'новый IP получен из bcloud: {new} {rjb["error"]}')
+    ok([r['content'] for r in world.records if r['name'] == dom and r['type'] == 'A'] == [new], 'A-запись домена → новый IP')
+    ok(next(n for n in world.nodes if n['uuid'] == tn['uuid'])['address'] == dom, 'адрес ноды в панели — домен, менять не пришлось')
+    ok(store.job(mj[1]['id'])['data']['ip'] == new, 'бот запомнил новый IP сервера')
+    ok(await _bcf(store, 1).balance() == bal0 - 15000, 'смена IP списана с баланса владельца сервера')
+    st, jv = await wapi(f'jobs/{rjb["id"]}')
+    ok([x['code'] for x in jv['stages']] == ['ip', 'dns', 'ssh', 'panel', 'check'] and jv['stages'][0]['label'] == 'Смена IP в bcloud',
+       'этапы смены IP')
+    st, js = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}/ip', 'POST', {'mode': 'sync'})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'failed' and 'прежний IP' in store.job(js['id'])['error'], '«подтянуть», когда IP не менялся, — понятная ошибка')
+    # чужая нода: новый IP вручную; адрес ноды и хост были по IP — переезжают на новый
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/ip', 'POST', {'mode': 'manual', 'ip': 'not-an-ip'})
+    ok(st == 400, 'неверный IP отклонён')
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/ip', 'POST', {'mode': 'bcloud'})
+    ok(st == 400 and 'вручную' in js['detail'], 'чужую ноду через bcloud не сменить')
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/ip', 'POST', {'mode': 'manual', 'ip': '198.51.100.251'})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'done' and next(n for n in world.nodes if n['uuid'] == mu)['address'] == '198.51.100.251'
+       and next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['address'] == '198.51.100.251',
+       f'чужая нода: адрес и хост на новом IP: {store.job(js["id"])["error"]}')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')
@@ -722,7 +761,7 @@ async def main():
     ok(f'key={secret}' in got and 'port=2222' in got and 'xray=yes' in got, 'скрипт получил SECRET_KEY, порт и --xray по рецепту')
     ok(fakes_remote.post and fakes_remote.post[-1] == (rj['data']['ip'], 'ufw allow from 203.0.113.10 to any port 2222 proto tcp'),
        f'команда после установки выполнена: {fakes_remote.post[-1:]}')
-    node = next(n for n in world.nodes if n['address'] == rj['data']['ip'])
+    node = next(n for n in world.nodes if n['address'] == rj['data']['domain'])
     h = world.hosts[hb:]
     ok(node['configProfile'] == {'activeConfigProfileUuid': '77777777-7777-7777-7777-777777777777',
                                  'activeInbounds': ['88888888-8888-8888-8888-888888888888']}

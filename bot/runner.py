@@ -27,8 +27,14 @@ def extras_label(d: dict) -> str:
     return ', '.join(parts)
 
 
+REIP_IP = {'bcloud': 'Смена IP в bcloud', 'sync': 'Новый IP из bcloud', 'manual': 'Новый IP'}
+
+
 def stages_for(d: dict) -> list[tuple[str, str]]:
     """Этапы задачи с подписями. Дополнения — только если они есть; у задач по готовой ноде — без покупки и установки."""
+    if d.get('kind') == 'reip':
+        return [('ip', REIP_IP.get(d.get('mode'), 'Новый IP')), ('dns', 'DNS в Cloudflare'), ('ssh', 'Вход по SSH на новом IP'),
+                ('panel', 'Адрес в панели'), ('check', 'Нода на связи')]
     extra = extras_label(d)
     if d.get('kind') == 'node':
         out = ([('ssh', 'Вход по SSH'), ('extras', 'Установка: ' + extra)] if extra else []) + \
@@ -80,14 +86,14 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
         lines += ['', f'<b>Ошибка:</b> {html.escape(job["error"][:600])}']
     elif job['status'] in ('provisioning', 'deploying', 'buying') and last:
         lines += ['', f'<i>{html.escape(last[:160])}</i>']
-    elif job['status'] == 'done' and d.get('kind') != 'node':
+    elif job['status'] == 'done' and d.get('kind') not in ('node', 'reip'):
         lines += ['', f'Root-пароль: <tg-spoiler><code>{html.escape(d.get("password", ""))}</code></tg-spoiler>']
     return '\n'.join(lines)
 
 
 class Runner:
     def __init__(self, store: Store, bot, logdir: str | Path = 'data/logs', *, deploy=engine.deploy,
-                 deploy_recipe=engine.deploy_recipe, update_node=engine.update_node,
+                 deploy_recipe=engine.deploy_recipe, update_node=engine.update_node, reip=engine.reip,
                  bcloud_factory=bcloud_from, poll_every: float = 10, ip_timeout: float = 20 * 60, edit_every: float = 3):
         self.store = store
         self.bot = bot
@@ -96,6 +102,8 @@ class Runner:
         self.deploy = deploy
         self.deploy_recipe = deploy_recipe
         self.update_node = update_node
+        self.reip = reip
+        self.reip_timeout = 15 * 60
         self.keydir = self.logdir.parent / 'ssh'
         self.bcloud_factory = bcloud_factory
         self.poll_every = poll_every
@@ -190,6 +198,64 @@ class Runner:
             saved = {}
         return saved
 
+    def _node_ssh(self, d: dict, prof: dict) -> dict:
+        ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
+        out = {'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22), 'known_hosts': self.known_hosts()}
+        if ssh.get('mode') == 'key':
+            out['ssh_key'] = self.bot_key()[0]
+        else:
+            out['ssh_password'] = ssh.get('password', '')
+        return out
+
+    async def _run_reip(self, jid: int, d: dict, prof: dict) -> None:
+        """Новый IP ноды: сменить в bcloud (или взять уже сменённый), затем DNS, SSH и адрес в панели."""
+        loop = asyncio.get_running_loop()
+        await self._set(jid, status='deploying', stage='ip', error='')
+        if not d.get('new_ip'):
+            bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
+            if d['mode'] == 'bcloud' and not d.get('change_sent'):
+                # отмечаем до запроса: повтор задачи не должен списать деньги второй раз
+                d = self.store.patch_job_data(jid, change_sent=True)
+                try:
+                    r = await bc.change_ip(d['server_id'])
+                except BcloudError:
+                    self.store.patch_job_data(jid, change_sent=False)
+                    raise
+                self.last[jid] = r.get('message') or 'bcloud меняет IP'
+            end = time.monotonic() + self.reip_timeout
+            while True:
+                srv = await bc.server(d['server_id'], sync=True)
+                if srv.get('ip') and srv['ip'] != d['old_ip']:
+                    d = self.store.patch_job_data(jid, new_ip=srv['ip'])
+                    break
+                if d['mode'] == 'sync':
+                    raise Fail(f'в bcloud у сервера прежний IP {d["old_ip"]} — сначала смените его в bcloud или выберите «Сменить IP через bcloud»')
+                if time.monotonic() > end:
+                    raise Fail('bcloud так и не сообщил новый IP — проверьте сервер в bcloud и нажмите «Повторить»')
+                self.last[jid] = 'ждём новый IP от bcloud'
+                await self.render(jid)
+                await asyncio.sleep(self.poll_every * 3)
+        self.last[jid] = f'новый IP: {d["new_ip"]}'
+        node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'old_ip': d['old_ip'], 'new_ip': d['new_ip'],
+                'domains': d.get('domains') or [], **self._node_ssh(d, prof)}
+        pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+        async with self.sem():
+            def on_log(text: str) -> None:
+                self.last[jid] = text
+                lf.write(f'\n### {time.strftime("%H:%M:%S")} {text}\n')
+                lf.flush()
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            def on_stage(name: str) -> None:
+                self.store.update_job(jid, stage=name)
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            with open(self.log_path(jid), 'a', encoding='utf-8') as lf:
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} смена IP #{jid}: {d.get("name")} {d["old_ip"]} → {d["new_ip"]}\n')
+                await asyncio.to_thread(self.reip, node, pconf, lf, on_log, on_stage)
+        if d.get('deploy_job'):  # задача покупки помнит IP сервера — для SSH и поиска ноды дальше
+            self.store.patch_job_data(int(d['deploy_job']), ip=d['new_ip'])
+
     async def _run_node(self, jid: int, d: dict, prof: dict) -> None:
         """Дополнения на уже работающей ноде панели (без покупки и установки)."""
         loop = asyncio.get_running_loop()
@@ -233,6 +299,10 @@ class Runner:
             prof = self.store.profile(job['profile_id'])
             if not prof:
                 raise Fail('группа удалена')
+            if d.get('kind') == 'reip':
+                await self._run_reip(jid, d, prof)
+                await self._set(jid, status='done', error='')
+                return
             if d.get('kind') == 'node':
                 await self._run_node(jid, d, prof)
                 await self._set(jid, status='done', error='')
