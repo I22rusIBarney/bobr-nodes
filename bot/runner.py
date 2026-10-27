@@ -36,6 +36,8 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
         return [('ip', REIP_IP.get(d.get('mode'), 'Новый IP')), ('dns', 'DNS в Cloudflare'), ('ssh', 'Вход по SSH на новом IP'),
                 ('panel', 'Адрес в панели'), ('check', 'Нода на связи')]
     extra = extras_label(d)
+    if d.get('kind') == 'node' and d.get('rollback'):
+        return [('panel', 'Исходный профиль в панели'), ('check', 'Нода на связи')]
     if d.get('kind') == 'node':
         out = ([('ssh', 'Вход по SSH'), ('extras', 'Установка: ' + extra)] if extra else []) + \
             [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') else [])
@@ -313,7 +315,7 @@ class Runner:
         ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
                 'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
-                'port': d.get('port'), 'final_mask': d.get('final_mask'),
+                'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'),
                 'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22),
                 'known_hosts': self.known_hosts()}
         if ssh.get('mode') == 'key':

@@ -400,7 +400,18 @@ function nodeView(pid, uuid) {
   v.append(group('Доступ по SSH', srows, sshNote + (F.mode === 'key' ? ' Добавьте ключ бота в /root/.ssh/authorized_keys на ноде. На ноды, купленные ботом, он добавляется сам.' : '')));
 
   // дополнения
-  v.append(group('Дополнения', extrasRows(n.E, n.features), EXTRAS_NOTE + ` Нода перейдёт в копию своего профиля с этими выходами («${n.profile} …»), её хосты и сквады — вместе с ней; остальные ноды профиля «${n.profile}» не меняются.`));
+  const drows = extrasRows(n.E, n.features);
+  if (n.features.length) {
+    const rb = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, 'Убрать дополнения — вернуть исходный профиль');
+    rb.onclick = UI.busy(rb, async () => {
+      const yes = await UI.ask({ title: 'Убрать дополнения?', message: `Нода и её хосты вернутся в профиль без ${n.features.map(f => FEAT[f] || f).join(' и ')}. Если после дополнений к ноде не подключиться — это вернёт её как было.`, buttons: [{ id: 'y', text: 'Вернуть' }] });
+      if (!yes) return;
+      const r = await UI.run(() => api(`profiles/${pid}/nodes/${uuid}/rollback`, 'POST', {}), 'Задача запущена');
+      if (r) { delete GJ[pid]; delete NODES[pid]; delete NODE[uuid]; UI.nav.push(() => jobView(r.id)); }
+    });
+    drows.push(rb);
+  }
+  v.append(group('Дополнения', drows, EXTRAS_NOTE + ` Нода перейдёт в копию своего профиля с этими выходами («${n.profile} …»), её хосты и сквады — вместе с ней; остальные ноды профиля «${n.profile}» не меняются.`));
 
   // хосты: порт и Final Mask
   const hrows = n.hosts.length ? n.hosts.map(x => row({ title: x.remark, sub: `${x.address}:${x.port}` + (x.hidden ? ' · скрытый' : ''), right: x.final_mask ? badge('Final Mask', 'ok') : null }))

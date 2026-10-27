@@ -641,6 +641,13 @@ class Panel:
                 cfg = retag(cfg, old, new)
             prof = self.call('POST', '/api/config-profiles', {'name': vname, 'config': apply_extras(cfg, extras)})
             log(f'панель: профиль «{vname}» создан из «{cur["name"]}»')
+        self.move_node(pnode, cur, prof, tmap, hosts, log)
+        return prof
+
+    def move_node(self, pnode: dict, cur: dict, prof: dict, tmap: dict[str, str], hosts: list[dict], log,
+                  squads: bool = True) -> None:
+        """Нода, её хосты и (если squads) сквады — с inbound'ов cur на inbound'ы prof по карте тегов tmap."""
+        vname = prof['name']
         by_tag = {i['tag']: i['uuid'] for i in prof['inbounds']}
         old_tag = {i['uuid']: i['tag'] for i in cur['inbounds']}
         umap = {u: by_tag[tmap[t]] for u, t in old_tag.items() if tmap.get(t) in by_tag}
@@ -649,6 +656,7 @@ class Panel:
             raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
         self.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'],
                                           'configProfile': {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': active}})
+        pnode['configProfile'] = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': active}
         log(f'панель: нода «{pnode["name"]}» переведена в «{vname}»')
         for h in hosts:
             u = h['inbound']['configProfileInboundUuid']
@@ -657,13 +665,30 @@ class Panel:
                     'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}})
                 h['inbound'] = {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}
         log(f'панель: хосты ноды ({len(hosts)}) — на inbound «{vname}»')
+        if not squads:
+            return
         for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
             ids = [i['uuid'] for i in sq.get('inbounds', [])]
             add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
             if add:
                 self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
                 log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
-        return prof
+
+    def downgrade_node(self, pnode: dict, hosts: list[dict], log) -> dict:
+        """Обратно: нода и её хосты — в исходный профиль (без Psiphon/WARP). Профиль-копия остаётся для других нод."""
+        profiles = self.call('GET', '/api/config-profiles')['configProfiles']
+        cur = next((p for p in profiles if p['uuid'] == (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
+        if not cur:
+            raise StepError('у ноды в панели нет профиля')
+        tags = [i['tag'] for i in cur['inbounds']]
+        base_name, base_tags = _strip_extras(cur['name'], tags)
+        if base_name == cur['name'] and base_tags == tags:
+            raise StepError(f'«{cur["name"]}» — не профиль с дополнениями, возвращать некуда')
+        base = next((p for p in profiles if p['name'] == base_name), None)
+        if not base:
+            raise StepError(f'исходного профиля «{base_name}» в панели нет')
+        self.move_node(pnode, cur, base, dict(zip(tags, base_tags)), hosts, log, squads=False)
+        return base
 
     def existing_profile(self, uuid: str, inbound_uuids: list[str]) -> tuple[dict, list[dict]]:
         """Профиль, уже настроенный в панели (для скриптов, которые сами профиль не пишут)."""
@@ -1259,6 +1284,25 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
 
 # ─────────────────────────────── Дополнения на уже работающей ноде ──
 
+def xray_problem(r: 'Remote', port: int, log, tries: int = 12, every: float = 10) -> str:
+    """После смены профиля панель перезапускает Xray на ноде. Ждём, пока он снова слушает порт inbound, и смотрим
+    его ошибки в логах контейнера. '' — всё хорошо, иначе — что не так (строки ошибок уходят в журнал)."""
+    errs: list[str] = []
+    for attempt in range(max(tries, 2)):
+        time.sleep(every if attempt else max(every, 1) * 2)  # сначала даём панели перезапустить Xray
+        _, out = r.run(f'ss -ltnH "sport = :{port}" 2>/dev/null | head -3; echo "@@@"; '
+                       '(docker logs --since 3m remnanode 2>&1 || true) | grep -iE "failed|error|panic|invalid|unknown" | tail -8', 60)
+        listen, _, logs = strip_ansi(out).partition('@@@')
+        errs = [x.strip()[:300] for x in logs.splitlines() if x.strip()]
+        if listen.strip() and attempt:
+            log(f'Xray слушает порт {port} ✓')
+            return ''
+        log(f'жду Xray на порту {port} ({attempt + 1}/{max(tries, 2)})')
+    for e in errs:
+        log('xray: ' + e)
+    return f'Xray на ноде не слушает порт {port} после смены профиля'
+
+
 def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
                 check_tries: int = 12, check_every: int = 10) -> str:
     """Нода из панели: ставит Psiphon/WARP по SSH и переводит ноду в вариант её профиля с этими выходами;
@@ -1270,6 +1314,18 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
     if not pnode:
         raise StepError('ноды больше нет в панели')
     node = {**node, 'ip': node.get('ip') or pnode['address']}
+    if node.get('rollback'):  # убрать дополнения: нода и хосты — обратно в исходный профиль
+        stage('panel')
+        with PANEL_LOCK:
+            hosts = panel.node_hosts(pnode, set(node.get('domains') or []), {node['ip']} if is_ip(node['ip']) else set())
+            base = panel.downgrade_node(pnode, hosts, log)
+        stage('check')
+        for attempt in range(check_tries):
+            time.sleep(check_every)
+            if (panel.node_state('', uuid=pnode['uuid']) or {}).get('isConnected'):
+                log(f'нода снова в «{base["name"]}» и на связи ✓')
+                return 'готово'
+        raise StepError('после возврата профиля нода не вышла на связь — посмотрите её в панели')
     want_port = node.get('port')
     need_ssh = bool(node.get('psiphon') or node.get('warp') or want_port)
     extras, r = {}, None
@@ -1287,12 +1343,11 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
         log(f'панель: хостов у ноды — {len(hosts)}' + (': ' + ', '.join(h['remark'] for h in hosts) if hosts else ''))
         profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
         cur = next((p for p in profiles if p['uuid'] == (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
+        before = cur
         if extras:
             cur = panel.upgrade_node(pnode, extras, hosts, log)
         if want_port is not None and want_port != '':
             active = set(active_inbounds(pnode))
-            if extras:  # нода уже на inbound'ах варианта
-                active = {h['inbound']['configProfileInboundUuid'] for h in hosts} or active
             ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)
             target = int((ib or {}).get('port') or 443)
             public = public_port(want_port, int(prof.get('node_port') or 2222)) or target
@@ -1308,6 +1363,20 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
                 panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'finalMask': mask})
             log('панель: Final Mask ' + ('поставлен' if mask else 'убран') + f' на хостах ({len(hosts)})')
 
+    if extras and r is not None:
+        stage('check')
+        port = next((int(i['port']) for i in (cur or {}).get('inbounds', []) if i['uuid'] in active_inbounds(pnode) and i.get('port')), 443)
+        problem = xray_problem(r, port, log, tries=check_tries, every=check_every)
+        if problem:  # Xray не поднялся с новым профилем — сразу возвращаем ноду, чтобы клиенты не остались без связи
+            log(f'⚠️ {problem} — возвращаю ноду в профиль «{before["name"]}»')
+            if before and cur and before['uuid'] != cur['uuid']:
+                base = lambda t: _strip_extras('', [t])[1][0]  # noqa: E731
+                back = {base(i['tag']): i['tag'] for i in before['inbounds']}
+                with PANEL_LOCK:
+                    panel.move_node(pnode, cur, before, {i['tag']: back[base(i['tag'])] for i in cur['inbounds']
+                                                        if base(i['tag']) in back}, hosts, log, squads=False)
+            raise StepError(f'{problem}. Нода возвращена в профиль «{before["name"]}», клиенты снова подключаются. '
+                            'Строки ошибок Xray — в журнале задачи')
     if extras:
         stage('check')
         for attempt in range(check_tries):

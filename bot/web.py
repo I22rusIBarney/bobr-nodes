@@ -582,6 +582,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         engine.forget_host(runner.known_hosts(), ip)
         return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/rollback')
+    async def panel_node_rollback(request):
+        """Убрать дополнения: нода и её хосты — обратно в исходный профиль (Psiphon/WARP на ноде остаются, но не нужны)."""
+        p = profile_or_404(request.match_info['pid'])
+        uuid = request.match_info['uuid']
+        nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        data = {'kind': 'node', 'rollback': True, 'node_uuid': uuid, 'name': n['name'], 'ip': bd.get('ip') or n['address'],
+                'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
+                'flag': '↩️', 'loc_name': n['name'], 'spec': 'убрать дополнения'}
+        jid = store.add_job('node-' + uuid[:8], p['id'], int(request['user']['id']), data)
+        await runner.render(jid, force=True)
+        runner.start(jid)
+        return J({'id': jid})
+
     @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
     async def panel_node_apply(request):
         """Задача «дополнения на ноде»: Psiphon/WARP (с переводом ноды в вариант профиля), порт, Final Mask."""

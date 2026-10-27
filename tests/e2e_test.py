@@ -660,6 +660,29 @@ async def main():
     ok(next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['inbound']['configProfileUuid'] == mp['uuid'],
        'её хост найден по IP и переведён на копию профиля')
 
+    # Xray не поднялся с профилем-копией — нода сама возвращается туда, где была (здесь — «Manual nodes Psiphon»)
+    behaviour['xray-198.51.100.250'] = 'down'
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/apply', 'POST', {'warp': {'enabled': True}})
+    await runner.wait_all()
+    fj = store.job(js['id'])
+    mnode = next(n for n in world.nodes if n['uuid'] == mu)
+    ok(fj['status'] == 'failed' and 'возвращена в профиль «Manual nodes Psiphon»' in fj['error']
+       and mnode['configProfile']['activeConfigProfileUuid'] == mp['uuid']
+       and next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['inbound']['configProfileUuid'] == mp['uuid'],
+       f'Xray не поднялся — нода и хост вернулись в прежний профиль: {fj["error"][:160]}')
+    ok('unknown geosite' in (TMP / 'logs' / f'job-{fj["id"]}.log').read_text(), 'ошибка Xray — в журнале задачи')
+    behaviour.pop('xray-198.51.100.250')
+    # «Убрать дополнения»: обратно в исходный профиль без SSH
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/rollback', 'POST', {})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'done'
+       and next(n for n in world.nodes if n['uuid'] == mu)['configProfile']['activeConfigProfileUuid'] == man['uuid']
+       and next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['inbound']['configProfileUuid'] == man['uuid'],
+       f'«Убрать дополнения»: нода и хост снова в «Manual nodes»: {store.job(js["id"])["error"]}')
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/rollback', 'POST', {})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'failed' and 'не профиль с дополнениями' in store.job(js['id'])['error'], 'повторно убирать нечего — понятная ошибка')
+
     # смена IP: нода, купленная ботом, — через bcloud (с баланса владельца), DNS и панель — сами
     from bot.runner import bcloud_from as _bcf
     tj = store.job(mj[1]['id'])

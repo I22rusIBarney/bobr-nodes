@@ -330,6 +330,10 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                     return 0, '\x1b[1;31mERROR:\x1b[0m docker is not installed\nPSI_RC=1\n'
                 psiphon.add(ip)
                 return 0, '==> waiting for the tunnel\nregion DE · exit 198.18.0.7\nPSI_RC=0\nPSI_ADDR=172.17.0.1 PSI_PORT=1080\n'
+            if cmd.startswith('ss -ltnH "sport = :'):  # Xray после смены профиля: слушает ли порт, ошибки в логах
+                if behaviour.get(f'xray-{ip}') == 'down':
+                    return 0, '@@@\nFailed to start: main: failed to load config files > infra/conf: unknown geosite\n'
+                return 0, 'LISTEN 0 4096 *:443 *:*\n@@@\n'
             if cmd.startswith('ip rule 2>/dev/null'):
                 return 0, 'WARP_UP\n' if ip in warp else ''
             if 'warp_install.sh' in cmd:
