@@ -10,6 +10,7 @@ from pathlib import Path
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scripts (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -70,6 +71,25 @@ class Store:
 
     def delete_profile(self, pid: int) -> None:
         self._q('DELETE FROM profiles WHERE id=?', (pid,))
+
+    # ── мои скрипты ──
+    def scripts(self) -> list[dict]:
+        return [{**json.loads(r['data']), 'id': r['id']} for r in self._q('SELECT * FROM scripts ORDER BY id')]
+
+    def script(self, sid: int) -> dict | None:
+        rows = self._q('SELECT * FROM scripts WHERE id=?', (sid,))
+        return {**json.loads(rows[0]['data']), 'id': rows[0]['id']} if rows else None
+
+    def save_script(self, data: dict) -> int:
+        body = json.dumps({k: v for k, v in data.items() if k != 'id'}, ensure_ascii=False)
+        if data.get('id'):
+            self._q('UPDATE scripts SET data=? WHERE id=?', (body, data['id']))
+            return data['id']
+        with self.lock:
+            return self.db.execute('INSERT INTO scripts(data) VALUES(?)', (body,)).lastrowid
+
+    def delete_script(self, sid: int) -> None:
+        self._q('DELETE FROM scripts WHERE id=?', (sid,))
 
     # ── задачи ──
     def add_job(self, batch: str, profile_id: int, chat_id: int, data: dict) -> int:

@@ -69,12 +69,14 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
 
 class Runner:
     def __init__(self, store: Store, bot, logdir: str | Path = 'data/logs', *, deploy=engine.deploy,
+                 deploy_recipe=engine.deploy_recipe,
                  bcloud_factory=bcloud_from, poll_every: float = 10, ip_timeout: float = 20 * 60, edit_every: float = 3):
         self.store = store
         self.bot = bot
         self.logdir = Path(logdir)
         self.logdir.mkdir(parents=True, exist_ok=True)
         self.deploy = deploy
+        self.deploy_recipe = deploy_recipe
         self.bcloud_factory = bcloud_factory
         self.poll_every = poll_every
         self.ip_timeout = ip_timeout
@@ -195,6 +197,14 @@ class Runner:
                         'traffic_control': prof.get('traffic_control', True)}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
                          'ssh_pubkey': self.store.get('ssh_pubkey')}
+                fn = self.deploy
+                sid = d.get('script_id', prof.get('script_id'))
+                if sid:
+                    script = self.store.script(int(sid))
+                    if not script or script.get('status') != 'approved' or not script.get('recipe'):
+                        raise Fail('скрипт установки группы удалён или не утверждён — проверьте «Мои скрипты»')
+                    pconf['script'] = script
+                    fn = self.deploy_recipe
 
                 def on_log(text: str) -> None:
                     self.last[jid] = text
@@ -208,7 +218,7 @@ class Runner:
 
                 with open(self.log_path(jid), 'a', encoding='utf-8') as lf:
                     lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} запуск задачи #{jid}: {d["domain"]} {d["ip"]}\n')
-                    await asyncio.to_thread(self.deploy, node, pconf, lf, on_log, on_stage)
+                    await asyncio.to_thread(fn, node, pconf, lf, on_log, on_stage)
             await self._set(jid, status='done', error='')
         except (Fail, engine.StepError, BcloudError) as e:
             await self._set(jid, status='failed', error=str(e))

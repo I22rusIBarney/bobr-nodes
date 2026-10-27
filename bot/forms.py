@@ -147,6 +147,29 @@ SETTINGS = {
     'ssh_pubkey': ('Мой SSH-ключ', 'Публичный ключ (содержимое .pub) — добавим на каждый сервер. «-» — не добавлять', False, v_pubkey),
     'parallel': ('Параллельных установок', 'Сколько нод ставить одновременно, 1–10', False, v_parallel),
 }
+def v_proxy(v, _=None):
+    v = v.strip()
+    if v in ('', '-'):
+        return ''
+    if not re.match(r'^(https?|socks5h?)://[^\s/]+(:\d+)?/?$', v):
+        raise ValueError('нужен адрес вида http://user:pass@host:port или socks5://host:port')
+    return v
+
+
+def v_model(v, _=None):
+    v = v.strip().removeprefix('models/')
+    if v in ('', '-'):
+        return ''
+    if not re.fullmatch(r'[a-z0-9][a-z0-9.\-]{2,60}', v):
+        raise ValueError('название модели, например gemini-2.5-pro')
+    return v
+
+
+SETTINGS.update({
+    'gemini_key': ('Ключ Gemini API', 'Google AI Studio → Get API key. Нужен только для «Моих скриптов»', True, v_nonempty),
+    'gemini_model': ('Модель Gemini', 'Пусто — самая свежая pro-модель из доступных', False, v_model),
+    'gemini_proxy': ('Прокси для Gemini', 'Если Gemini не работает из страны сервера: http://… или socks5://…', True, v_proxy),
+})
 SECRET_SETTINGS = {k for k, (_, _, secret, _) in SETTINGS.items() if secret}
 
 PFIELDS = {

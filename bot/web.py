@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, services as svc
+from . import engine, forms, naming, scripts as sc, services as svc
 from .bcloud import BcloudError
 from .runner import STAGES, Runner, bcloud_from, buyer_of
 from .store import ACTIVE, Store
@@ -67,7 +67,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return await handler(request)
         except ApiError as e:
             return web.json_response({'detail': str(e)}, status=e.status)
-        except (ValueError, BcloudError, engine.StepError) as e:
+        except (ValueError, BcloudError, engine.StepError, sc.ScriptError) as e:
             return web.json_response({'detail': str(e)}, status=400)
 
     app = web.Application(middlewares=[guard], client_max_size=256 * 1024)
@@ -123,6 +123,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return {'id': p['id'], 'name': p['name'], 'panel_url': p['panel_url'], 'base_domain': p.get('base_domain', ''),
                 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
                 'name_pattern': p.get('name_pattern') or naming.DEFAULT_PATTERN,
+                'script': ((store.script(p['script_id']) or {}).get('recipe') or {}).get('title') if p.get('script_id') else '',
                 'servers': sum(1 for j in mine if j['status'] == 'done'),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
@@ -185,6 +186,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def profile_view(p: dict) -> dict:
         out = {k: ('' if k in forms.SECRET_FIELDS else p.get(k, '')) for k in forms.PFIELDS}
         out.update({'id': p['id'], 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
+                    'script_id': p.get('script_id'), 'panel_profile_uuid': p.get('panel_profile_uuid', ''),
+                    'panel_inbounds': p.get('panel_inbounds') or [],
                     'hints': {k: hint(str(p.get(k) or '')) for k in forms.SECRET_FIELDS}})
         return out
 
@@ -199,14 +202,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles')
     async def create_profile(request):
-        prof = await with_owner(forms.clean_profile(await body(request)))
+        data = await body(request)
+        prof = await with_script(await with_owner(forms.clean_profile(data)), data)
         prof['id'] = store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
 
     @r.put('/api/profiles/{pid}')
     async def update_profile(request):
         cur = profile_or_404(request.match_info['pid'])
-        prof = await with_owner(forms.clean_profile(await body(request), cur), cur)
+        data = await body(request)
+        prof = await with_script(await with_owner(forms.clean_profile(data, cur), cur), data)
         prof['id'] = cur['id']
         store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
@@ -228,6 +233,27 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         prof['owner_tg_id'] = str(u['tg_id'])
         name = u.get('first_name') or ''
         prof['owner_label'] = (f'@{u["username"]}' if u.get('username') else name or str(u['tg_id']))
+        return prof
+
+    async def with_script(prof: dict, data: dict) -> dict:
+        """Скрипт установки группы: встроенный Nuvrion (пусто) или утверждённый из «Моих скриптов»;
+        для скриптов без своего профиля — профиль и inbound'ы панели."""
+        if 'script_id' in data:
+            sid = data.get('script_id')
+            if sid in (None, '', 0):
+                prof['script_id'] = None
+            else:
+                s = store.script(int(sid))
+                if not s or s.get('status') != 'approved':
+                    raise ApiError('Скрипт установки: выберите утверждённый скрипт из «Моих скриптов»')
+                prof['script_id'] = s['id']
+        if 'panel_profile_uuid' in data:
+            prof['panel_profile_uuid'] = str(data.get('panel_profile_uuid') or '')
+        if 'panel_inbounds' in data:
+            inb = data.get('panel_inbounds') or []
+            if not isinstance(inb, list) or not all(isinstance(x, str) for x in inb):
+                raise ApiError('inbound: список UUID')
+            prof['panel_inbounds'] = inb
         return prof
 
     @r.delete('/api/profiles/{pid}')
@@ -348,6 +374,169 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
                                          squads, str(b.get('remark') or '')[:100], host)
         return J({'ids': ids})
+
+    # ── мои скрипты ──
+    sdir = Path(runner.logdir).parent / 'scripts'
+    sdir.mkdir(parents=True, exist_ok=True)
+
+    def script_or_404(sid) -> dict:
+        s = store.script(int(sid))
+        if not s:
+            raise ApiError('Скрипт не найден', 404)
+        return s
+
+    def gemini() -> sc.Gemini:
+        return sc.Gemini(store.get('gemini_key'), store.get('gemini_model'), store.get('gemini_proxy'),
+                         base=store.get('gemini_base') or None)
+
+    def script_summary(s: dict) -> dict:
+        used = [p['name'] for p in store.profiles() if p.get('script_id') == s['id']]
+        return {'id': s['id'], 'title': (s.get('recipe') or {}).get('title') or s['path'], 'path': s['path'],
+                'repo': f'{s["owner"]}/{s["repo"]}', 'sha': s['sha'][:12], 'status': s.get('status', 'draft'),
+                'has_recipe': bool(s.get('recipe')), 'used_by': used,
+                'profile_mode': ((s.get('recipe') or {}).get('profile') or {}).get('mode')}
+
+    def script_view(s: dict) -> dict:
+        out = {**script_summary(s), 'url': s.get('url'), 'sha_full': s['sha'], 'sha256': s['sha256'], 'size': s['size'],
+               'analysis': s.get('analysis'), 'recipe': s.get('recipe'),
+               'describe': sc.describe(s['recipe']) if s.get('recipe') else None,
+               'chat': [m for m in s.get('chat', []) if not m.get('hidden')],
+               'github': f'https://github.com/{s["owner"]}/{s["repo"]}/blob/{s["sha"]}/{s["path"]}'}
+        return out
+
+    @r.get('/api/scripts')
+    async def scripts_list(_):
+        return J({'scripts': [script_summary(s) for s in store.scripts()], 'gemini': bool(store.get('gemini_key'))})
+
+    @r.post('/api/scripts/resolve')
+    async def scripts_resolve(request):
+        b = await body(request)
+        return J(await sc.resolve(str(b.get('url') or '')))
+
+    @r.post('/api/scripts')
+    async def scripts_add(request):
+        b = await body(request)
+        res = await sc.resolve(str(b.get('url') or ''))
+        path = b.get('path') or res['path']
+        if not path:
+            return J({'choose': res['candidates'], 'sha': res['sha']})
+        if res['candidates'] and path not in {c['path'] for c in res['candidates']}:
+            raise ApiError('такого файла нет в репозитории')
+        f = await sc.fetch(res['owner'], res['repo'], res['sha'], path)
+        s = {'url': str(b.get('url')), 'owner': res['owner'], 'repo': res['repo'], 'ref': res['ref'], 'sha': res['sha'],
+             'path': path, 'sha256': f['sha256'], 'size': f['size'], 'status': 'draft', 'chat': [], 'analysis': None,
+             'recipe': None, 'created_at': time.time()}
+        s['id'] = store.save_script(s)
+        (sdir / f'{s["id"]}.sh').write_text(f['text'], encoding='utf-8')
+        (sdir / f'{s["id"]}.readme').write_text(f['readme'], encoding='utf-8')
+        return J({'id': s['id']})
+
+    def merge_answer(s: dict, raw: dict) -> dict:
+        a = sc.apply_answer(raw)
+        s['analysis'] = {k: a[k] for k in ('summary', 'recommendations', 'risks', 'questions', 'recipe_error')}
+        if a['recipe']:
+            if a['recipe'] != s.get('recipe'):
+                s['status'] = 'draft'  # новый рецепт снова нужно утвердить
+            s['recipe'] = a['recipe']
+        show = a['summary']
+        if a['questions']:
+            show += '\n\nВопросы:\n' + '\n'.join(f'• {q}' for q in a['questions'])
+        if a['recipe_error']:
+            show += f'\n\n⚠️ Рецепт не прошёл проверку: {a["recipe_error"]}'
+        s['chat'].append({'role': 'model', 'text': json.dumps(raw, ensure_ascii=False), 'show': show, 'ts': time.time()})
+        return s
+
+    def turns(s: dict) -> list[dict]:
+        return [{'role': m['role'], 'text': m['text']} for m in s['chat']]
+
+    @r.post('/api/scripts/{sid}/analyze')
+    async def scripts_analyze(request):
+        s = script_or_404(request.match_info['sid'])
+        text = (sdir / f'{s["id"]}.sh').read_text(encoding='utf-8')
+        readme = (sdir / f'{s["id"]}.readme').read_text(encoding='utf-8') if (sdir / f'{s["id"]}.readme').exists() else ''
+        s['chat'] = [{'role': 'user', 'text': sc.first_turn(s, text, readme), 'hidden': True, 'ts': time.time()}]
+        g = gemini()
+        raw = await g.ask(sc.SYSTEM, turns(s))
+        s['model'] = g.model
+        store.save_script(merge_answer(s, raw))
+        return J(script_view(s))
+
+    @r.post('/api/scripts/{sid}/chat')
+    async def scripts_chat(request):
+        s = script_or_404(request.match_info['sid'])
+        text = str((await body(request)).get('text') or '').strip()[:4000]
+        if not text:
+            raise ApiError('пустое сообщение')
+        if not s['chat']:
+            raise ApiError('сначала нажмите «Разобрать»')
+        s['chat'].append({'role': 'user', 'text': text, 'ts': time.time()})
+        cur = json.dumps(s.get('recipe'), ensure_ascii=False) if s.get('recipe') else 'нет'
+        g = gemini()
+        try:
+            raw = await g.ask(sc.SYSTEM, turns(s)[:-1] + [{'role': 'user', 'text': (
+                f'{text}\n\n(Текущий рецепт после ручных правок администратора: {cur}. '
+                'Ответь тем же JSON целиком: summary, recommendations, risks, questions, recipe.)')}])
+        except sc.ScriptError:
+            s['chat'].pop()
+            raise
+        store.save_script(merge_answer(s, raw))
+        return J(script_view(s))
+
+    @r.get('/api/scripts/{sid}')
+    async def scripts_get(request):
+        return J(script_view(script_or_404(request.match_info['sid'])))
+
+    @r.put('/api/scripts/{sid}/recipe')
+    async def scripts_recipe(request):
+        s = script_or_404(request.match_info['sid'])
+        rec = (await body(request)).get('recipe')
+        if isinstance(rec, str):
+            try:
+                rec = json.loads(rec)
+            except ValueError as e:
+                raise ApiError(f'рецепт: неверный JSON ({e})') from None
+        s['recipe'] = sc.clean_recipe(rec)
+        s['status'] = 'draft'
+        store.save_script(s)
+        return J(script_view(s))
+
+    @r.post('/api/scripts/{sid}/approve')
+    async def scripts_approve(request):
+        s = script_or_404(request.match_info['sid'])
+        if not s.get('recipe'):
+            raise ApiError('сначала получите рецепт')
+        s['status'], s['approved_at'] = 'approved', time.time()
+        store.save_script(s)
+        return J(script_view(s))
+
+    @r.delete('/api/scripts/{sid}')
+    async def scripts_delete(request):
+        s = script_or_404(request.match_info['sid'])
+        used = [p['name'] for p in store.profiles() if p.get('script_id') == s['id']]
+        if used:
+            raise ApiError('Скрипт выбран в группах: ' + ', '.join(used))
+        store.delete_script(s['id'])
+        for ext in ('sh', 'readme'):
+            (sdir / f'{s["id"]}.{ext}').unlink(missing_ok=True)
+        return J({'ok': True})
+
+    @r.post('/api/check/gemini')
+    async def check_gemini(_):
+        try:
+            g = gemini()
+            ms = await g.models()
+            model = g.model or sc.Gemini.pick(ms)
+            ok = model in ms
+            return J({'ok': ok, 'message': (f'Ключ работает. Модель: {model}' if ok else f'Модели {model} нет среди доступных')
+                      + f' (доступно моделей: {len(ms)})'})
+        except sc.ScriptError as e:
+            return J({'ok': False, 'message': str(e)})
+
+    @r.get('/api/gemini/models')
+    async def gemini_models(_):
+        g = gemini()
+        ms = await g.models()
+        return J({'models': ms, 'recommended': sc.Gemini.pick(ms) if ms else ''})
 
     # ── задачи ──
     def job_view(j: dict, full: bool = False) -> dict:

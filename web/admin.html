@@ -78,15 +78,17 @@ function home() {
   v.append(group(null, [row({ icon: 'stack', tile: '#0A84FF', title: 'Задачи', detail: j.active ? 'в работе: ' + j.active : '', onClick: () => UI.nav.push(jobsView) })]));
   v.append(group('Группы', [
     ...ST.profiles.map(p => row({ icon: 'stack', tile: '#0A84FF', title: p.name,
-      sub: 'Серверов: ' + p.servers + (p.owner_label ? ' · ' + p.owner_label : ''),
+      sub: 'Серверов: ' + p.servers + (p.owner_label ? ' · ' + p.owner_label : '') + (p.script ? ' · ' + p.script : ''),
       right: p.active ? badge('в работе: ' + p.active, 'accent') : p.failed ? badge('ошибок: ' + p.failed, 'bad') : null,
       onClick: () => UI.nav.push(() => groupView(p.id)) })),
     row({ icon: 'plusCircle', tile: '#34C759', title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })],
     'Группа — своя панель Remnawave, свой Cloudflare и свой клиент в bcloud: серверы группы покупаются от его имени, с его баланса и видны ему в bcloud.'));
+  v.append(group(null, [row({ icon: 'terminal', tile: '#5856D6', title: 'Мои скрипты', sub: 'свои скрипты установки нод с GitHub', onClick: () => { SCR = null; UI.nav.push(scriptsView); } })]));
   const ok = k => s[k] && s[k].set;
   v.append(group('Подключения', [
     row({ icon: 'store', tile: '#FF9500', title: 'bcloud', sub: 'покупка серверов', right: badge(ok('bcloud_url') && ok('bcloud_token') ? 'Подключён' : 'Не настроен', ok('bcloud_url') && ok('bcloud_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(bcloudView) }),
     row({ icon: 'globe', tile: '#FF9500', title: 'Cloudflare', sub: 'DNS-записи нод', right: badge(ok('cf_token') ? 'Подключён' : 'Не настроен', ok('cf_token') ? 'ok' : 'bad'), onClick: () => UI.nav.push(cfView) }),
+    row({ icon: 'sparkle', tile: '#5856D6', title: 'Gemini', sub: 'разбор своих скриптов', right: badge(ok('gemini_key') ? 'Подключён' : 'Не нужен', ok('gemini_key') ? 'ok' : ''), onClick: () => UI.nav.push(geminiView) }),
     row({ icon: 'key', tile: '#8E8E93', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })]));
   return v;
 }
@@ -130,6 +132,118 @@ function otherView() {
   return h('div', {}, ...title('SSH-ключ и очередь'), ...settingsForm('Доступ и скорость', ['ssh_pubkey', 'parallel'],
     'Публичный ключ (содержимое .pub) добавляется на каждый новый сервер — входить можно будет без пароля. Пусто или «-» — не добавлять. Параллельно ставится не больше указанного числа нод, остальные ждут в очереди.',
     null, { fields: { ssh_pubkey: { area: true, ph: 'ssh-ed25519 AAAA… me@laptop' }, parallel: { inputmode: 'numeric' } } }));
+}
+
+// ───────── мои скрипты ─────────
+let SCR = null;
+async function loadScripts() { try { SCR = await api('scripts'); } catch (e) { SCR = { error: e.message, scripts: [] }; } }
+const SST = { approved: ['Утверждён', 'ok'], draft: ['Черновик', 'warn'] };
+function scriptsView() {
+  if (SCR === null) { loadScripts().then(() => UI.nav.refresh()); return h('div', {}, ...title('Мои скрипты'), group(null, [h('div', { class: 'skeleton' })])); }
+  const v = h('div', {}, ...title('Мои скрипты'),
+    h('div', { class: 'subtitle' }, 'Свои скрипты установки нод с GitHub: Gemini разбирает скрипт, вы утверждаете рецепт — бот ставит по нему.'));
+  if (!SCR.gemini) v.append(h('div', { class: 'notice' }, h('b', {}, 'Нужен ключ Gemini: '), 'Подключения → Gemini.'));
+  const url = h('input', { type: 'url', placeholder: 'https://github.com/автор/репозиторий', autocapitalize: 'off', spellcheck: false, style: 'text-align:left' });
+  const status = statusLine();
+  const add = h('button', { class: 'btn', type: 'button' }, icon('plus'), 'Добавить');
+  const create = async (path) => {
+    const r = await api('scripts', 'POST', { url: url.value, path });
+    if (r.choose) {
+      UI.sheet('Какой файл ставит ноду?', close => h('div', {}, group(null, r.choose.map(c => row({ title: c.path, detail: Math.round(c.size / 1024) + ' КБ',
+        onClick: () => { close(); UI.run(() => create(c.path)); } })), 'Файлы .sh на коммите ' + r.sha.slice(0, 12) + '.')));
+      return;
+    }
+    SCR = null; UI.toast('Скрипт загружен');
+    UI.nav.push(() => scriptView(r.id, true));
+  };
+  add.onclick = UI.busy(add, async () => { try { await create(); status.textContent = ''; } catch (e) { showStatus(status, { ok: false, message: e.message }); } });
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новый скрипт'),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Ссылка на репозиторий или файл'), url)),
+    h('div', { class: 'group-f' }, 'Бот закрепит текущий коммит и SHA-256 файла: на ноды пойдёт ровно та версия, которую разобрали и утвердили.'), status),
+    h('div', { class: 'pad' }, add));
+  const list = SCR.scripts || [];
+  v.append(group('Скрипты', [
+    row({ icon: 'shield', tile: '#34C759', title: 'Nuvrion Vision', sub: 'встроенный · VLESS TLS Vision', right: badge('Встроенный', 'accent') }),
+    ...list.map(s => row({ icon: 'terminal', tile: '#5856D6', title: s.title, sub: `${s.repo} · ${s.path} @ ${s.sha.slice(0, 7)}` + (s.used_by.length ? ' · группы: ' + s.used_by.join(', ') : ''),
+      right: badge(...(SST[s.status] || [s.status, ''])), onClick: () => UI.nav.push(() => scriptView(s.id)) }))]));
+  return v;
+}
+const SV = {};
+function scriptView(id, autoAnalyze) {
+  const s = SV[id];
+  const reload = async () => { try { SV[id] = await api('scripts/' + id); } catch (e) { SV[id] = { error: e.message }; } UI.nav.refresh(); };
+  if (!s) { reload(); return h('div', {}, ...title('Скрипт', 'Мои скрипты'), group(null, [h('div', { class: 'skeleton' })])); }
+  if (s.error && !s.id) return h('div', {}, ...title('Скрипт', 'Мои скрипты'), h('div', { class: 'notice' }, s.error));
+  const busy = SV['busy' + id];
+  const analyze = async () => {
+    SV['busy' + id] = true; UI.nav.refresh();
+    try { SV[id] = await api('scripts/' + id + '/analyze', 'POST'); SCR = null; } catch (e) { UI.alert(e.message); }
+    SV['busy' + id] = false; UI.nav.refresh();
+  };
+  if (autoAnalyze && !s.analysis && !busy && SCR !== undefined) { SV['auto' + id] = true; }
+  if (SV['auto' + id] && !s.analysis && !busy) { SV['auto' + id] = false; analyze(); }
+  const v = h('div', {}, ...title(s.title, 'Мои скрипты'),
+    h('div', { class: 'subtitle' }, `${s.repo} · ${s.path} @ ${s.sha}`));
+  v.append(group(null, [
+    row({ title: 'Статус', right: badge(...(SST[s.status] || [s.status, ''])) }),
+    row({ title: 'Открыть на GitHub', sub: 'эта версия, SHA-256 ' + s.sha256.slice(0, 12) + '…', onClick: () => UI.openLink(s.github) })]));
+  if (busy) v.append(h('div', { class: 'notice', style: 'background:var(--accent-soft);color:var(--accent-text)' }, 'Gemini читает скрипт… обычно 20–60 секунд.'));
+  const a = s.analysis;
+  if (!a && !busy) v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', onclick: analyze }, icon('sparkle'), 'Разобрать с Gemini')));
+  if (a) {
+    v.append(group('Что делает скрипт', [row({ cls: 'wrap', title: a.summary || '—' })]));
+    if (a.recommendations.length) v.append(group('Рекомендации', a.recommendations.map(t => row({ cls: 'wrap', icon: 'info', tile: '#0A84FF', title: t }))));
+    if (a.risks.length) v.append(group('Риски', a.risks.map(t => row({ cls: 'wrap', icon: 'alert', tile: '#FF3B30', title: t }))));
+    if (a.recipe_error) v.append(h('div', { class: 'notice', style: 'background:var(--danger-soft);color:var(--danger)' }, 'Рецепт от Gemini не прошёл проверку: ' + a.recipe_error + '. Напишите ему ниже или поправьте вручную.'));
+  }
+  const d = s.describe;
+  if (d) {
+    const rows = [row({ cls: 'wrap', title: 'Запуск', sub: h('span', { class: 'mono' }, d.run) })];
+    Object.entries(d.env || {}).forEach(([k, val]) => rows.push(row({ cls: 'wrap', title: 'Переменная ' + k, sub: h('span', { class: 'mono' }, val) })));
+    d.prompts.forEach(p => rows.push(row({ cls: 'wrap', title: 'На «' + p.match + '»', sub: '→ ' + (p.answer.includes('{secret_key}') ? '‹SECRET_KEY›' : p.answer) + (p.why ? ' — ' + p.why : '') })));
+    if (d.done_when) rows.push(row({ cls: 'wrap', title: 'Готово, когда в выводе', sub: h('span', { class: 'mono' }, d.done_when) }));
+    d.post_commands.forEach(c => rows.push(row({ cls: 'wrap', icon: 'terminal', tile: '#FF9500', title: 'Выполнить после установки', sub: h('span', { class: 'mono' }, c) })));
+    if (d.check_command) rows.push(row({ cls: 'wrap', title: 'Проверка', sub: h('span', { class: 'mono' }, d.check_command) }));
+    rows.push(row({ cls: 'wrap', title: 'Профиль Xray', sub: d.profile.mode === 'file' ? `скрипт пишет ${d.profile.path} (inbound ${d.profile.inbound_tag || 'первый'}) — бот создаст профиль в панели` : 'уже есть в панели — выберите его в настройках группы' }));
+    v.append(group('Как бот будет ставить', rows, 'На любой вопрос скрипта, которого нет в списке, бот остановится. Команды «после установки» выполняются под root — проверьте их.'));
+    const acts = [];
+    if (s.status !== 'approved') {
+      const ok = h('button', { class: 'btn', type: 'button' }, icon('check'), 'Утвердить');
+      ok.onclick = UI.busy(ok, async () => { const r = await UI.run(() => api('scripts/' + id + '/approve', 'POST'), 'Утверждён — можно выбрать в группе'); if (r) { SV[id] = r; SCR = null; UI.nav.refresh(); } });
+      acts.push(ok);
+    }
+    const edit = h('button', { class: 'btn tinted', type: 'button' }, 'Править рецепт');
+    edit.onclick = () => UI.sheet('Рецепт (JSON)', close => {
+      const ta = h('textarea', { class: 'wide', rows: 18, spellcheck: false, style: 'font:12px ui-monospace,monospace;text-align:left' });
+      ta.value = JSON.stringify(s.recipe, null, 2);
+      const sv = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
+      sv.onclick = UI.busy(sv, async () => { const r = await UI.run(() => api('scripts/' + id + '/recipe', 'PUT', { recipe: ta.value }), 'Сохранено — утвердите снова'); if (r) { SV[id] = r; close(); UI.nav.refresh(); } });
+      return h('div', { style: 'padding:0 var(--gutter) 20px' }, ta, h('div', { style: 'margin-top:12px' }, sv));
+    });
+    acts.push(edit);
+    v.append(h('div', { class: 'actions' }, acts));
+  }
+  if (s.chat.length) {
+    v.append(h('div', { class: 'group-h', style: 'margin:0 var(--gutter) 8px' }, 'Переписка с Gemini'));
+    v.append(UI.chat(s.chat.map(m => ({ author: m.role === 'user' ? 'me' : 'ai', text: m.role === 'user' ? m.text : (m.show || ''), created: new Date((m.ts || 0) * 1000).toISOString() })), ['me'], { ai: 'Gemini' }));
+  }
+  if (a) v.append(UI.composer('Ответьте Gemini или попросите изменить рецепт', async text => {
+    SV['busy' + id] = true; UI.nav.refresh();
+    try { SV[id] = await api('scripts/' + id + '/chat', 'POST', { text }); } catch (e) { UI.alert(e.message); SV['busy' + id] = false; UI.nav.refresh(); return false; }
+    SV['busy' + id] = false; UI.nav.refresh();
+  }));
+  v.append(group(null, [
+    row({ title: 'Разобрать заново', cls: 'accent', onClick: async () => { if (await UI.ask({ title: 'Разобрать заново?', message: 'Переписка и рецепт будут заменены новым разбором.', buttons: [{ id: 'y', text: 'Разобрать' }] })) analyze(); } }),
+    row({ title: 'Удалить скрипт', cls: 'destructive', onClick: async () => {
+      if (!(await UI.ask({ title: 'Удалить скрипт?', message: 'Ноды, уже поставленные им, останутся.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] }))) return;
+      if (await UI.run(() => api('scripts/' + id, 'DELETE'), 'Удалён') !== undefined) { SCR = null; delete SV[id]; UI.nav.back(); }
+    } })]));
+  return v;
+}
+function geminiView() {
+  return h('div', {}, ...title('Gemini'), ...settingsForm('Нейросеть для «Моих скриптов»', ['gemini_key', 'gemini_model', 'gemini_proxy'],
+    'Ключ — Google AI Studio → Get API key. Модель пусто — бот возьмёт самую свежую pro-модель. Если сервер бота в стране, где Gemini недоступен, укажите прокси (например, через свою ноду). На ноды нейросеть доступа не получает: она только предлагает рецепт.',
+    'check/gemini', { fields: { gemini_proxy: { ph: 'socks5://user:pass@host:1080' } } }));
 }
 
 // ───────── группа ─────────
@@ -191,6 +305,7 @@ function profileView(p) {
   save.onclick = UI.busy(save, async () => {
     const data = Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, i.value]));
     data.traffic_control = tc;
+    data.script_id = sel.script || null; data.panel_profile_uuid = sel.profile || ''; data.panel_inbounds = [...sel.inbounds];
     const r = await UI.run(() => p.id ? api('profiles/' + p.id, 'PUT', data) : api('profiles', 'POST', data));
     if (!r) return;
     showStatus(status, r.check);
@@ -201,6 +316,32 @@ function profileView(p) {
   });
   const test = h('button', { class: 'btn tinted', type: 'button' }, 'Проверить');
   test.onclick = UI.busy(test, async () => { if (!p.id) return UI.alert('Сначала создайте группу'); const r = await UI.run(() => api('profiles/' + p.id + '/check', 'POST')); if (r) showStatus(status, r); });
+  // скрипт установки и (для скриптов без своего профиля) профиль панели
+  const sel = { script: p.script_id || null, profile: p.panel_profile_uuid || '', inbounds: new Set(p.panel_inbounds || []) };
+  const scriptBox = h('div');
+  let meta = null, scripts = null;
+  const drawScript = () => {
+    const approved = (scripts || []).filter(x => x.status === 'approved');
+    const cur = approved.find(x => x.id === sel.script);
+    const rows = [h('div', { style: 'padding:12px 0 6px' }, UI.chips([{ value: null, label: 'Nuvrion Vision' }, ...approved.map(x => ({ value: x.id, label: x.title }))], sel.script,
+      x => { sel.script = x; drawScript(); }))];
+    let foot = cur ? `${cur.repo} · ${cur.path} @ ${cur.sha.slice(0, 7)}` : 'Встроенный установщик: VLESS TLS Vision, общий профиль «NV Vision».';
+    if (cur && cur.profile_mode === 'existing') {
+      if (!meta) { rows.push(h('div', { class: 'skeleton' })); if (p.id) api('profiles/' + p.id + '/panel').then(m => { meta = m; drawScript(); }).catch(e => { meta = { error: e.message, profiles: [] }; drawScript(); }); else foot += ' Сохраните группу, чтобы выбрать профиль панели.'; }
+      else if (meta.error) rows.push(row({ cls: 'wrap', title: 'Панель недоступна', sub: meta.error }));
+      else {
+        rows.push(h('div', { class: 'group-h', style: 'margin:10px 16px 6px' }, 'Профиль панели'),
+          h('div', { style: 'padding:0 0 6px' }, UI.chips(meta.profiles.map(x => ({ value: x.uuid, label: x.name })), sel.profile, x => { sel.profile = x; sel.inbounds = new Set(); drawScript(); })));
+        const pr = meta.profiles.find(x => x.uuid === sel.profile);
+        if (pr) pr.inbounds.forEach(i => rows.push(row({ title: i.tag, sub: [i.type, i.security, i.port].filter(Boolean).join(' · '),
+          right: UI.toggle(sel.inbounds.has(i.uuid), on => { on ? sel.inbounds.add(i.uuid) : sel.inbounds.delete(i.uuid); }, i.tag) })));
+        foot += ' Скрипт не пишет свой профиль: ноды получат выбранный профиль панели, хосты — по отмеченным inbound (без отметок — первый).';
+      }
+    }
+    scriptBox.replaceChildren(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Скрипт установки'), h('div', { class: 'list' }, rows), h('div', { class: 'group-f' }, foot)));
+  };
+  api('scripts').then(r => { scripts = r.scripts; drawScript(); }).catch(() => { scripts = []; drawScript(); });
+  drawScript();
   const ownerText = () => p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в bcloud.' : 'Пусто — серверы покупаются с вашего аккаунта bcloud.';
   const ownerNote = h('div', { class: 'group-f' }, ownerText());
   const out = [...title(p.id ? p.name : 'Новая группа'),
@@ -214,6 +355,7 @@ function profileView(p) {
       h('div', { class: 'list' }, ['email', 'base_domain', 'name_pattern', 'squads'].map(field),
         row({ title: 'Traffic Control', sub: 'фильтрация сканеров на нодах', right: UI.toggle(tc, v => { tc = v; }, 'Traffic Control') })),
       h('div', { class: 'group-f' }, 'Домен для автоимён: например example.com → ноды de1.example.com, nl2.example.com. Пусто — домены только вручную. В шаблоне {cc} — код локации, {n} — номер; «vpn» в именах запрещено. Сквады — UUID внутренних сквадов, куда добавить inbound новых нод.')),
+    scriptBox,
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Cloudflare'),
       h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, 'Токен Cloudflare, где лежат домены нод этой группы. Пусто — общий токен из «Подключений».')),
     h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', onclick: () => save.click() }, p.id ? 'Сохранить' : 'Создать'))];

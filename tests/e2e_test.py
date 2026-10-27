@@ -144,6 +144,7 @@ async def main():
     behaviour = {}
     os.environ['NV_SRC'] = NV_SRC
     engine.Remote = fakes.make_fake_remote(engine, str(ROOT / 'tests' / 'mock_installer.sh'), behaviour)
+    fakes_remote = engine.Remote
 
     # bcloud
     await BD.init_db()
@@ -155,7 +156,9 @@ async def main():
         await s.commit()
         await BD.change_balance(s, 1, 100_000, 'admin_adjust')
     real_client = httpx.AsyncClient
-    bcmod.httpx.AsyncClient = lambda **kw: real_client(transport=httpx.ASGITransport(app=bapp), **kw)
+    import types  # подменяем httpx только в клиенте bcloud: GitHub и Gemini ходят в свои тестовые сервера
+    bcmod.httpx = types.SimpleNamespace(AsyncClient=lambda **kw: real_client(transport=httpx.ASGITransport(app=bapp), **kw),
+                                        HTTPError=httpx.HTTPError)
 
     # бот
     store = Store(TMP / 'bot.db')
@@ -433,6 +436,95 @@ async def main():
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')
+
+    # ── «Мои скрипты»: сторонний скрипт с GitHub → разбор в Gemini → рецепт → установка
+    from bot import scripts as SC
+    SC.GH_API, SC.GH_RAW = base + '/gh-api', base + '/gh-raw'
+    mock = open(os.path.join(os.path.dirname(__file__), 'mock_remnanode.sh'), 'rb').read()
+    world.gh_files.update({'remnanode.sh': mock, 'remnawave.sh': b'#!/bin/bash\necho panel\n', 'README.md': b'# RemnaNode\n'})
+    store.set('gemini_base', base + '/gemini')
+    st, js = await wapi('scripts')
+    ok(st == 200 and js['gemini'] is False, 'Мои скрипты: без ключа Gemini — подсказка')
+    st, js = await wapi('settings', 'POST', {'values': {'gemini_key': 'gem-key-123456', 'gemini_proxy': 'ftp://x'}})
+    ok(st == 400 and 'socks5' in js['detail'], 'неверный прокси Gemini отклонён')
+    await wapi('settings', 'POST', {'values': {'gemini_key': 'gem-key-123456'}})
+    st, js = await wapi('check/gemini', 'POST')
+    ok(js['ok'] and 'gemini-3.0-pro' in js['message'], f'проверка Gemini выбирает свежую pro-модель: {js}')
+    st, js = await wapi('scripts', 'POST', {'url': 'https://github.com/acme/node-scripts'})
+    ok(st == 200 and [c['path'] for c in js['choose']] == ['remnanode.sh', 'remnawave.sh'], f'репозиторий: выбор .sh-файла: {js}')
+    st, js = await wapi('scripts', 'POST', {'url': 'https://github.com/acme/node-scripts', 'path': 'remnanode.sh'})
+    sid = js['id']
+    good = {'title': 'RemnaNode (acme)', 'args': ['@', 'install', '--force', '--secret-key={secret_key}', '--port={node_port}'],
+            'prompts': [], 'done_when': 'remnanode\\s+\\|', 'success_codes': [0],
+            'profile': {'mode': 'existing'},
+            'post_commands': ['ufw allow from {panel_ip} to any port {node_port} proto tcp'], 'check_command': None}
+    world.gemini_replies.append({'summary': 'Ставит RemnaNode в Docker. В конце бесконечно показывает логи.',
+                                 'recommendations': ['Запускать с --force'], 'risks': ['Скрипт не закрывает порт API фаерволом'],
+                                 'questions': ['Ставить Xray-core на хост (--xray)?'], 'recipe': good})
+    st, sv = await wapi(f'scripts/{sid}/analyze', 'POST')
+    ok(st == 200 and sv['status'] == 'draft' and sv['recipe']['args'][2] == '--force' and sv['analysis']['questions'],
+       f'разбор: сводка, вопросы, рецепт-черновик: {sv.get("analysis")}')
+    call = world.gemini_calls[-1]
+    ok(call['model'] == 'gemini-3.0-pro' and 'SCRIPT' in call['body']['contents'][0]['parts'][0]['text']
+       and 'MOCK_LOG' in call['body']['contents'][0]['parts'][0]['text'], 'в Gemini ушёл текст скрипта на закреплённом коммите')
+    ok(sv['describe']['run'].endswith('--secret-key=‹SECRET_KEY› --port={node_port}'), 'в описании рецепта ключ скрыт')
+    world.gemini_replies.append({'summary': 'Добавил --xray.', 'recommendations': [], 'risks': [], 'questions': [],
+                                 'recipe': {**good, 'args': good['args'] + ['--xray']}})
+    st, sv = await wapi(f'scripts/{sid}/chat', 'POST', {'text': 'Да, Xray-core ставь'})
+    ok(sv['recipe']['args'][-1] == '--xray' and [m['role'] for m in sv['chat']] == ['model', 'user', 'model'],
+       'переписка: рецепт обновлён по ответу')
+    world.gemini_replies.append({'summary': 'x', 'recipe': {**good, 'args': ['install;rm', '-rf', '/']}})
+    st, bad = await wapi(f'scripts/{sid}/chat', 'POST', {'text': 'попробуй иначе'})
+    ok(bad['analysis']['recipe_error'] and 'install;rm' in bad['analysis']['recipe_error'] and bad['recipe']['args'][-1] == '--xray',
+       'опасный рецепт от Gemini не принят, остаётся прежний')
+    st, js = await wapi(f'scripts/{sid}/recipe', 'PUT', {'recipe': {**good, 'args': ['$(reboot)']}})
+    ok(st == 400 and 'символы оболочки' in js['detail'], 'ручная правка с символами оболочки отклонена')
+    st, js = await wapi('profiles', 'POST', {**prof_in, 'name': 'Reality', 'base_domain': 'example.com', 'script_id': sid})
+    ok(st == 400 and 'утверждённый' in js['detail'], 'неутверждённый скрипт выбрать в группе нельзя')
+    st, sv = await wapi(f'scripts/{sid}/approve', 'POST')
+    ok(sv['status'] == 'approved', 'скрипт утверждён')
+    world.profiles.append({'uuid': '77777777-7777-7777-7777-777777777777', 'name': 'Reality', 'config': {},
+                           'inbounds': [{'uuid': '88888888-8888-8888-8888-888888888888', 'tag': 'VLESS_REALITY', 'port': 8443,
+                                         'type': 'vless', 'security': 'reality'},
+                                        {'uuid': '99999999-9999-9999-9999-999999999999', 'tag': 'XHTTP', 'port': 9443}]})
+    st, js = await wapi('profiles', 'POST', {**prof_in, 'name': 'Reality', 'base_domain': 'example.com', 'script_id': sid,
+                                             'panel_profile_uuid': '77777777-7777-7777-7777-777777777777',
+                                             'panel_inbounds': ['88888888-8888-8888-8888-888888888888']})
+    ok(st == 200, f'группа со своим скриптом и профилем панели: {js}')
+    rid = js['id']
+    st, meta = await wapi(f'profiles/{rid}/panel')
+    ok(any(x['name'] == 'Reality' and x['inbounds'][0]['port'] == 8443 for x in meta['profiles']), 'профили панели с inbound для выбора')
+    behaviour['tmp'] = str(TMP)
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    st, dj = await wapi('domains/auto', 'POST', {'pid': rid, 'location': 'nl', 'count': 1})
+    hb = len(world.hosts)
+    st, js = await wapi('deploy', 'POST', {'pid': rid, 'period': '1m', 'items': [{'location': 'nl', 'idx': 0, 'domains': dj['domains']}]})
+    await runner.wait_all()
+    rj = store.job(js['ids'][0])
+    ok(rj['status'] == 'done', f'нода поставлена своим скриптом: {rj["error"]}')
+    got = open(os.path.join(str(TMP), f'mock-{rj["data"]["ip"]}.txt')).read()
+    ok(f'key={secret}' in got and 'port=2222' in got and 'xray=yes' in got, 'скрипт получил SECRET_KEY, порт и --xray по рецепту')
+    ok(fakes_remote.post and fakes_remote.post[-1] == (rj['data']['ip'], 'ufw allow from 203.0.113.10 to any port 2222 proto tcp'),
+       f'команда после установки выполнена: {fakes_remote.post[-1:]}')
+    node = next(n for n in world.nodes if n['address'] == rj['data']['ip'])
+    h = world.hosts[hb:]
+    ok(node['configProfile'] == {'activeConfigProfileUuid': '77777777-7777-7777-7777-777777777777',
+                                 'activeInbounds': ['88888888-8888-8888-8888-888888888888']}
+       and len(h) == 1 and h[0]['port'] == 8443 and h[0]['securityLayer'] == 'DEFAULT' and 'sni' not in h[0],
+       f'нода в профиле Reality, хост на порт inbound с его настройками безопасности: {h}')
+    jlog = (TMP / 'logs' / f'job-{rj["id"]}.log').read_text()
+    ok('done_when' in jlog and secret[:30] not in jlog.replace(got, ''), 'бесконечные логи прерваны по done_when; ключ не в журнале бота')
+    behaviour[f'198.51.100.{max(astra.made) - 500 + 1}'] = 'unknown'
+    st, dj = await wapi('domains/auto', 'POST', {'pid': rid, 'location': 'nl', 'count': 1})
+    world.nodes[:] = [n for n in world.nodes]  # без изменений
+    st, js = await wapi('deploy', 'POST', {'pid': rid, 'period': '1m', 'items': [{'location': 'nl', 'idx': 0, 'domains': dj['domains']}]})
+    await runner.wait_all()
+    uj = store.job(js['ids'][0])
+    ok(uj['status'] == 'failed' and 'remove old data' in uj['error'] and 'Мои скрипты' in uj['error'],
+       f'вопрос не из рецепта (удаление данных) — остановка: {uj["error"][:120]}')
+    st, js = await wapi(f'scripts/{sid}', 'DELETE')
+    ok(st == 400 and 'Reality' in js['detail'], 'скрипт, выбранный в группе, удалить нельзя')
 
     # ── ручные домены: чужая зона и успешная попытка с ошибкой установщика
     await tap('m:deploy')

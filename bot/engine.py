@@ -304,10 +304,14 @@ class Panel:
         for t in self.call('GET', '/api/subscription-templates')['templates']:
             if t.get('templateType') == 'XRAY_JSON':
                 tpls.append({'uuid': t['uuid'], 'name': t['name'], 'balancer_tag': balancer_tag_of(t.get('templateJson'))})
-        return {'squads': squads, 'templates': tpls}
+        profiles = [{'uuid': p['uuid'], 'name': p['name'],
+                     'inbounds': [{'uuid': i['uuid'], 'tag': i['tag'], 'port': i.get('port'), 'type': i.get('type'),
+                                   'security': i.get('security')} for i in p.get('inbounds', [])]}
+                    for p in self.call('GET', '/api/config-profiles')['configProfiles']]
+        return {'squads': squads, 'templates': tpls, 'profiles': profiles}
 
-    def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof_uuid: str, inbound_uuid: str,
-                        node: dict, log) -> str:
+    def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof: dict, inbound: dict,
+                        node: dict, log, tls: bool = True) -> str:
         """Шаблон Balancer_<tag> (копия базового с подстановкой тега) и видимый хост-балансировщик с ним.
         Если они уже есть — ничего не меняем: новые скрытые хосты с тегом подхватятся сами."""
         tag = tag.upper()
@@ -331,11 +335,8 @@ class Panel:
         if bh:
             log(f'панель: хост-балансировщик «{bh["remark"]}» уже есть')
         else:
-            self.call('POST', '/api/hosts', {
-                'inbound': {'configProfileUuid': prof_uuid, 'configProfileInboundUuid': inbound_uuid},
-                'remark': remark[:100], 'address': node['domain'], 'port': 443, 'sni': node['domain'],
-                'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS',
-                'xrayJsonTemplateUuid': tpl['uuid']})
+            self.call('POST', '/api/hosts', {**self.host_body(prof, inbound, node, tls), 'remark': remark[:100],
+                                             'xrayJsonTemplateUuid': tpl['uuid']})
             log(f'панель: хост-балансировщик «{remark}» создан')
         return tpl['uuid']
 
@@ -354,7 +355,37 @@ class Panel:
         inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
             raise StepError(f'в профиле нет inbound {tag}')
-        cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [inbound['uuid']]}
+        self.attach(node, prof, [inbound], squads, node_port, log, tls=True)
+
+    def existing_profile(self, uuid: str, inbound_uuids: list[str]) -> tuple[dict, list[dict]]:
+        """Профиль, уже настроенный в панели (для скриптов, которые сами профиль не пишут)."""
+        profiles = self.call('GET', '/api/config-profiles')['configProfiles']
+        prof = next((p for p in profiles if p['uuid'] == uuid), None)
+        if not prof:
+            raise StepError('выбранного в группе профиля в панели больше нет — выберите другой в настройках группы')
+        inbounds = [i for i in prof['inbounds'] if i['uuid'] in inbound_uuids] or prof['inbounds'][:1]
+        if not inbounds:
+            raise StepError(f'в профиле «{prof["name"]}» нет inbound')
+        return prof, inbounds
+
+    def node_state(self, ip: str) -> dict | None:
+        return next((n for n in self.call('GET', '/api/nodes') if n['address'] == ip), None)
+
+    @staticmethod
+    def host_body(prof: dict, inbound: dict, node: dict, tls: bool) -> dict:
+        body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbound['uuid']},
+                'address': node['domain']}
+        if tls:  # свой TLS-профиль бота: SNI = домен ноды
+            body.update({'port': 443, 'sni': node['domain'], 'alpn': 'h2,http/1.1', 'fingerprint': 'firefox',
+                         'securityLayer': 'TLS'})
+        else:    # чужой профиль (например Reality): параметры безопасности — из inbound
+            body.update({'port': int(inbound.get('port') or 443), 'securityLayer': 'DEFAULT'})
+        return body
+
+    def attach(self, node: dict, prof: dict, inbounds: list[dict], squads: list[str], node_port: int, log,
+               tls: bool = True):
+        """Нода с профилем и inbound'ами, хосты (обычные/скрытые с тегами/балансировщик), сквады."""
+        cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [i['uuid'] for i in inbounds]}
 
         nodes = self.call('GET', '/api/nodes')
         existing = next((n for n in nodes if n['address'] in (node['ip'], node['domain'])), None)
@@ -373,33 +404,34 @@ class Panel:
         hidden = bool(opts.get('hidden', balancer))
         tags = [t for t in (opts.get('tags') or []) if re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
         hosts = self.call('GET', '/api/hosts')
-        host = next((h for h in hosts if h['address'] == node['domain']
-                     and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
-                     and not h.get('xrayJsonTemplateUuid')), None)
-        if host:
-            log('панель: хост уже есть')
-        else:
-            body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbound['uuid']},
-                    'remark': (node.get('remark') or node['name'])[:100],
-                    'address': node['domain'], 'port': 443, 'sni': node['domain'],
-                    'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS'}
+        for n, inbound in enumerate(inbounds, 1):
+            host = next((h for h in hosts if h['address'] == node['domain']
+                         and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
+                         and not h.get('xrayJsonTemplateUuid')), None)
+            if host:
+                log(f'панель: хост {inbound.get("tag", "")} уже есть')
+                continue
+            body = self.host_body(prof, inbound, node, tls)
+            remark = (node.get('remark') or node['name'])
+            body['remark'] = (remark if len(inbounds) == 1 else f'{remark} {inbound.get("tag", n)}')[:100]
             if hidden:
                 body['isHidden'] = True
             if tags:
                 body['tags'] = tags
             self.call('POST', '/api/hosts', body)
             extra = ', '.join(([] if not hidden else ['скрытый']) + ([f'теги {", ".join(tags)}'] if tags else []))
-            log('панель: хост создан' + (f' ({extra})' if extra else ''))
+            log(f'панель: хост {inbound.get("tag", "")} создан' + (f' ({extra})' if extra else ''))
         if balancer:
             b = opts.get('balancer') or {}
             self.ensure_balancer(b.get('tag') or (tags[0] if tags else 'PL'), b.get('template'),
-                                 b.get('remark') or node.get('remark') or node['name'], prof['uuid'], inbound['uuid'], node, log)
+                                 b.get('remark') or node.get('remark') or node['name'], prof, inbounds[0], node, log, tls)
 
         for sq in squads:
             cur = self.call('GET', f'/api/internal-squads/{sq}')
             ids = [i['uuid'] for i in cur.get('inbounds', [])]
-            if inbound['uuid'] not in ids:
-                self.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + [inbound['uuid']]})
+            new = [i['uuid'] for i in inbounds if i['uuid'] not in ids]
+            if new:
+                self.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + new})
                 log(f'панель: inbound добавлен в сквад «{cur.get("name", sq)}»')
 
 
@@ -629,3 +661,141 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
             return 'готово'
         log(f'проверка: код {code}, жду профиль из панели ({attempt + 1}/{check_tries})')
     raise StepError('панель настроена, но проверка на ноде так и не прошла — посмотрите ноду в панели')
+
+
+# ─────────────────────────────── Установка по рецепту («Мои скрипты») ──
+
+def drive_recipe(child, recipe: dict, values: dict, log, secret: str) -> int:
+    """Отвечает на вопросы чужого скрипта строго по рецепту. Незнакомый вопрос — остановка.
+    done_when — вывод, после которого установка считается законченной (скрипт прерывается Ctrl+C)."""
+    from .scripts import DEFAULT_STOP, render
+    rules = [(r'(?i)password:', None)] + [(p['match'], p) for p in recipe['prompts']]
+    if recipe.get('done_when'):
+        rules.append((recipe['done_when'], 'DONE'))
+    stops = list(recipe.get('stop_on') or []) + DEFAULT_STOP
+    rules += [(rx, 'STOP') for rx in stops]
+    patterns = [rx for rx, _ in rules] + [pexpect.EOF, pexpect.TIMEOUT]
+    started = False
+    while True:
+        i = child.expect(patterns)
+        if i == len(rules):
+            child.close()
+            return child.exitstatus if child.exitstatus is not None else 128 + (child.signalstatus or 0)
+        if i == len(rules) + 1:
+            child.close(force=True)
+            raise StepError('скрипт слишком долго ничего не выводил (таймаут)')
+        _, rule = rules[i]
+        if rule is None:  # пароль SSH — только до первого вопроса скрипта
+            if not started and values.get('ssh_password'):
+                child.sendline(values['ssh_password'])
+            continue
+        started = True
+        if rule == 'DONE':
+            log('скрипт сообщил о завершении — прерываю (done_when)')
+            child.sendcontrol('c')
+            try:
+                child.expect(pexpect.EOF, timeout=30)
+            except pexpect.TIMEOUT:
+                pass
+            child.close(force=True)
+            return 0
+        if rule == 'STOP':
+            tail = strip_ansi((child.before or '') + (child.after or '')).strip().splitlines()
+            text = tail[-1] if tail else ''
+            child.sendcontrol('c')
+            child.close(force=True)
+            raise StepError(f'скрипт задал вопрос, которого нет в рецепте: «{text[-140:]}» — добавьте правило в «Мои скрипты»')
+        answer = render(rule['answer'], values)
+        shown = '‹SECRET_KEY›' if '{secret_key}' in rule['answer'] else answer
+        q = strip_ansi(child.after).strip()
+        log(f'ответ: {q[:70]} → {shown[:40]}')
+        child.sendline(answer)
+        if rule.get('multiline_end'):
+            child.sendline('')
+
+
+def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
+                  check_tries: int = 18, check_every: int = 10) -> str:
+    """Установка ноды скриптом из «Моих скриптов». prof['script'] — утверждённый скрипт с рецептом."""
+    from .scripts import command, render
+    script = prof['script']
+    rec = script['recipe']
+    panel = Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
+    secret = panel.secret_key()
+    ips = prof['outgoing_ips'].split()
+    values = {'domain': node['domain'], 'ip': node['ip'], 'node_port': prof.get('node_port') or 2222,
+              'panel_ips': ' '.join(ips), 'panel_ip': ips[0] if ips else '', 'email': prof.get('email', ''),
+              'secret_key': secret, 'name': node['name'], 'yes': 'y', 'no': 'n',
+              'ssh_password': node.get('ssh_password')}
+
+    if not prof.get('skip_dns'):
+        stage('dns')
+        cf = Cloudflare(prof['cf_token'])
+        cf.upsert_a(node['domain'], node['ip'], log)
+        wait_dns(node['domain'], node['ip'], log)
+
+    stage('ssh')
+    r = Remote(node, logfile)
+    wait_ssh(r, log)
+    if prof.get('ssh_pubkey'):
+        key = prof['ssh_pubkey'].strip().replace("'", '')
+        r.run("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+              f"grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys")
+        log('SSH-ключ добавлен в authorized_keys')
+
+    stage('install')
+    existing = panel.node_state(node['ip'])
+    if existing and existing.get('isConnected'):
+        log('нода уже подключена к панели — установку пропускаю')
+    else:
+        log(f'запускаю {script["path"]} ({script["owner"]}/{script["repo"]} @ {script["sha"][:12]})')
+        child = r.spawn(command(script, values), True, int(prof.get('silence_timeout') or 2400))
+        rc = drive_recipe(child, rec, values, log, secret)
+        if rc not in rec['success_codes']:
+            raise StepError(f'скрипт завершился с кодом {rc}')
+        log(f'скрипт завершён, код {rc}')
+        for cmd in rec['post_commands']:
+            rc, out = r.run(render(cmd, values), 300)
+            log(f'после установки: {render(cmd, {**values, "secret_key": "‹SECRET_KEY›"})} → код {rc}')
+            if rc != 0:
+                raise StepError(f'команда после установки завершилась с кодом {rc}: {strip_ansi(out).strip()[-200:]}')
+
+    stage('panel')
+    squads = list(node['squads']) if node.get('squads') is not None else \
+        [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x]
+    with PANEL_LOCK:
+        if rec['profile']['mode'] == 'file':
+            rc, raw = r.run(f"cat {rec['profile']['path']}")
+            if rc != 0 or '{' not in raw:
+                raise StepError(f"не удалось прочитать профиль {rec['profile']['path']} на ноде")
+            cfg = json.loads(raw[raw.index('{'):])
+            tag = rec['profile'].get('inbound_tag') or (cfg.get('inbounds') or [{}])[0].get('tag', '')
+            pname = re.sub(r'[^A-Za-z0-9_ -]', '-', f'NV {node["name"]}')[:30]
+            new_tag = f'{tag}-{node["name"]}'[:60]
+            cfg = retag(cfg, tag, new_tag)  # теги inbound в панели уникальны
+            profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
+            pr = next((p for p in profiles if p['name'] == pname), None) or \
+                panel.call('POST', '/api/config-profiles', {'name': pname, 'config': cfg})
+            inbounds = [i for i in pr['inbounds'] if i['tag'] == new_tag] or pr['inbounds'][:1]
+            panel.attach(node, pr, inbounds, squads, int(values['node_port']), log, tls=False)
+        else:
+            if not prof.get('panel_profile_uuid'):
+                raise StepError('в группе не выбран профиль панели для этого скрипта (Настройки группы → Скрипт установки)')
+            pr, inbounds = panel.existing_profile(prof['panel_profile_uuid'], prof.get('panel_inbounds') or [])
+            log(f'панель: профиль «{pr["name"]}», inbound: {", ".join(i["tag"] for i in inbounds)}')
+            panel.attach(node, pr, inbounds, squads, int(values['node_port']), log, tls=False)
+
+    stage('check')
+    if rec.get('check_command'):
+        rc, out = r.run(render(rec['check_command'], values), 120)
+        if rc != 0:
+            raise StepError(f'проверка из рецепта не прошла (код {rc}): {strip_ansi(out).strip()[-200:]}')
+    for attempt in range(check_tries):
+        st = panel.node_state(node['ip']) or {}
+        if st.get('isConnected'):
+            log('нода подключилась к панели ✓')
+            return 'готово'
+        log(f'жду подключения ноды к панели ({attempt + 1}/{check_tries})' +
+            (f': {st["lastStatusMessage"]}' if st.get('lastStatusMessage') else ''))
+        time.sleep(check_every)
+    raise StepError('нода установлена, но к панели так и не подключилась — проверьте порт API и фаервол')

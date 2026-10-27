@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+GH_SHA = 'a318e2c8baf3e1a4b77b27b7a56dc349b36a711b'
 
 
 class World:
@@ -25,6 +26,9 @@ class World:
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
         self.templates: list[dict] = []
+        self.gh_files: dict[str, bytes] = {}       # путь → содержимое (репозиторий acme/node-scripts на коммите GH_SHA)
+        self.gemini_replies: list[dict] = []       # ответы поддельного Gemini по очереди
+        self.gemini_calls: list[dict] = []
         self.decoy = None  # без cookie: None — 404 JSON, 'html' — 200 со страницей-заглушкой, 'redirect' — 302
         self.lock = threading.Lock()
 
@@ -97,7 +101,44 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 return False
             return True
 
+        def raw(self, code, body: bytes, ctype='text/plain'):
+            self.send_response(code); self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
+
+        def github(self):
+            p = urlparse(self.path).path
+            if p.startswith('/gh-raw/acme/node-scripts/' + GH_SHA + '/'):
+                f = W.gh_files.get(p.split(GH_SHA + '/', 1)[1])
+                return self.raw(200, f) if f is not None else self.raw(404, b'404')
+            if p == '/gh-api/repos/acme/node-scripts':
+                return self.send(200, {'default_branch': 'main'})
+            if p == '/gh-api/repos/acme/node-scripts/commits/main':
+                return self.send(200, {'sha': GH_SHA})
+            if p == f'/gh-api/repos/acme/node-scripts/git/trees/{GH_SHA}':
+                return self.send(200, {'tree': [{'path': k, 'type': 'blob', 'size': len(v)} for k, v in W.gh_files.items()]})
+            return self.send(404, {'message': 'Not Found'})
+
+        def gemini(self):
+            if self.headers.get('x-goog-api-key') != 'gem-key-123456':
+                return self.send(400, {'error': {'message': 'API key not valid'}})
+            p = urlparse(self.path).path
+            if p == '/gemini/v1beta/models':
+                return self.send(200, {'models': [
+                    {'name': 'models/gemini-2.5-flash', 'supportedGenerationMethods': ['generateContent']},
+                    {'name': 'models/gemini-3.0-pro', 'supportedGenerationMethods': ['generateContent']},
+                    {'name': 'models/embedding-001', 'supportedGenerationMethods': ['embedContent']}]})
+            if p.endswith(':generateContent'):
+                b = self.body()
+                W.gemini_calls.append({'model': p.split('/')[-1].split(':')[0], 'body': b})
+                reply = W.gemini_replies.pop(0)
+                return self.send(200, {'candidates': [{'content': {'parts': [{'text': json.dumps(reply, ensure_ascii=False)}]}}]})
+            return self.send(404, {})
+
         def do_GET(self):
+            if self.path.startswith('/gh-'):
+                return self.github()
+            if self.path.startswith('/gemini'):
+                return self.gemini()
             if self.path.startswith('/client/v4'):
                 return self.cf('GET')
             if not self.guard():
@@ -123,6 +164,8 @@ def make_server(world: World) -> ThreadingHTTPServer:
             self.send(404, {})
 
         def do_POST(self):
+            if self.path.startswith('/gemini'):
+                return self.gemini()
             if self.path.startswith('/client/v4'):
                 return self.cf('POST')
             if not self.guard():
@@ -142,7 +185,7 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     return self.send(201, {'response': pr})
                 if p == '/api/nodes':
                     assert 3 <= len(b['name']) <= 30 and b['configProfile']['activeInbounds']
-                    n = dict(uuid=str(uuid.uuid4()), **b)
+                    n = dict(uuid=str(uuid.uuid4()), isConnected=True, lastStatusMessage=None, **b)
                     W.nodes.append(n)
                     return self.send(201, {'response': n})
                 if p == '/api/subscription-templates':
@@ -151,7 +194,10 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     W.templates.append(t)
                     return self.send(201, {'response': t})
                 if p == '/api/hosts':
-                    assert b['alpn'] == 'h2,http/1.1' and b['securityLayer'] == 'TLS' and b['sni'] == b['address']
+                    if b.get('securityLayer') == 'TLS':
+                        assert b['alpn'] == 'h2,http/1.1' and b['sni'] == b['address']
+                    else:
+                        assert b['securityLayer'] == 'DEFAULT' and 'alpn' not in b and 'sni' not in b
                     import re as _re
                     assert all(_re.fullmatch(r'[A-Z0-9_:]+', t) for t in b.get('tags', []))
                     h = {'uuid': str(uuid.uuid4()), 'xrayJsonTemplateUuid': None, 'isHidden': False, 'tags': [], **b}
@@ -200,6 +246,9 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
     installed: set[str] = set()
 
     class FakeRemote(engine.Remote):
+        calls: list = []
+        post: list = []
+
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
             assert self.n.get('ssh_password'), 'нет пароля root'
@@ -220,9 +269,24 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                                                       'panel_ips': '203.0.113.10', 'email': 'a@b.cd'}))
             if '--check' in cmd:
                 return 0, 'rc=0\n'
+            if cmd.startswith('ufw ') or cmd.startswith('docker ps'):
+                FakeRemote.post.append((ip, cmd))
+                return 0, ''
             raise AssertionError(cmd)
 
         def spawn(self, cmd, tty, timeout):
+            if 'bash ./s.sh' in cmd:  # скрипт из «Моих скриптов»
+                import shlex as _sh
+                assert 'sha256sum -c' in cmd and '/acme/node-scripts/' + GH_SHA + '/' in cmd, cmd
+                args = _sh.split(cmd.split('bash ./s.sh', 1)[1])
+                FakeRemote.calls.append({'ip': self.n['ip'], 'cmd': cmd, 'args': args})
+                env = {**os.environ, 'MOCK_LOG': os.path.join(behaviour.get('tmp', '/tmp'), f'mock-{self.n["ip"]}.txt')}
+                if behaviour.get(self.n['ip']) == 'unknown':
+                    env['MOCK_EXTRA'] = 'ask'
+                child = pexpect.spawn('bash', [os.path.join(HERE, 'mock_remnanode.sh'), *args], encoding='utf-8',
+                                      timeout=30, dimensions=(50, 120), env=env)
+                child.logfile_read = self.logfile
+                return child
             assert tty and 'sha256sum -c' in cmd and engine.DEFAULT_SHA256 in cmd, cmd
             mode = behaviour.get(self.n['ip'], 'ok')
             child = pexpect.spawn('bash', [mock_sh, self.n['ip'], mode], encoding='utf-8', timeout=60,
