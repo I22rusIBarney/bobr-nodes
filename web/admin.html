@@ -84,6 +84,8 @@ function home() {
     row({ icon: 'plusCircle', tile: '#34C759', title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })],
     'Группа — своя панель Remnawave, свой Cloudflare и свой клиент в bcloud: серверы группы покупаются от его имени, с его баланса и видны ему в bcloud.'));
   v.append(group(null, [row({ icon: 'terminal', tile: '#5856D6', title: 'Мои скрипты', sub: 'свои скрипты установки нод с GitHub', onClick: () => { SCR = null; UI.nav.push(scriptsView); } })]));
+  v.append(group(null, [row({ icon: 'share', tile: '#0A84FF', title: 'Перенос хостов', sub: 'хосты с профилем и шаблоном — в другую панель или из присланного JSON',
+    onClick: () => { TX = null; UI.nav.push(transferView); } })]));
   const sec = ST.security || {}, hd = sec.hardened;
   v.append(group(null, [row({ icon: 'shield', tile: hd ? '#34C759' : '#FF9500', title: 'Безопасность сервера',
     sub: hd ? `за сутки заблокировано IP: ${sec.bans_24h || 0} · вход по паролю ${hd.password_login ? 'разрешён' : 'выключен'}` : 'не настроена — bnodes harden на сервере',
@@ -285,8 +287,100 @@ function groupView(pid) {
   return v;
 }
 
+// ───────── перенос хостов ─────────
+let TX = null;
+function txMeta(pid, key) {
+  if (!pid || TX[key + 'Pid'] === pid) return;
+  TX[key + 'Pid'] = pid; TX[key] = null;
+  api('profiles/' + pid + '/panel').then(m => { if (TX && TX[key + 'Pid'] === pid) { TX[key] = m; if (key === 'dstMeta') TX.squads = new Set(m.default_squads); UI.nav.refresh(); } })
+    .catch(e => { if (TX && TX[key + 'Pid'] === pid) { TX[key] = { error: e.message, hosts: [], squads: [] }; UI.nav.refresh(); } });
+}
+function transferView() {
+  if (!TX) TX = { src: (ST.profiles[0] || {}).id || 'json', dst: (ST.profiles[1] || ST.profiles[0] || {}).id, hosts: new Set(), squads: new Set(), mode: 'copy', json: '', tname: '', filter: '' };
+  const v = h('div', {}, ...title('Перенос хостов'));
+  const groups = ST.profiles.map(p => ({ value: p.id, label: p.name }));
+  v.append(UI.section('Откуда', UI.chips([...groups, { value: 'json', label: 'Вставить JSON' }], TX.src, x => { TX.src = x; TX.hosts = new Set(); TX.result = null; UI.nav.refresh(); })));
+  let bundleKind = null;
+  if (TX.src === 'json') {
+    const ta = areaIn(TX.json, 8, x => { TX.json = x; }, t => !t.trim() || jsonOk(t));
+    ta.placeholder = 'Набор хостов из Bobr Nodes («Скачать набор JSON») или просто Xray JSON-шаблон с роутингом';
+    let parsed = null; try { parsed = JSON.parse(TX.json); } catch (e) {}
+    bundleKind = parsed && parsed.kind === 'bobr-nodes/hosts' ? 'bundle' : parsed && typeof parsed === 'object' ? 'template' : null;
+    const rows = [h('label', { class: 'field stack' }, h('label', {}, 'JSON'), ta)];
+    const check = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 12px' }, 'Разобрать');
+    check.onclick = () => UI.nav.refresh();
+    rows.push(check);
+    if (bundleKind === 'bundle') rows.push(row({ cls: 'wrap', title: `Набор: хостов ${(parsed.hosts || []).length}, профилей ${(parsed.profiles || []).length}, шаблонов ${(parsed.templates || []).length}`,
+      sub: (parsed.hosts || []).slice(0, 8).map(x => x.remark).join(', ') }));
+    if (bundleKind === 'template') rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Имя шаблона Xray JSON'), textIn(TX.tname, 'например Arenda5', x => { TX.tname = x; })));
+    v.append(group(null, rows, bundleKind === 'template' ? 'Это не набор, а Xray JSON — бот создаст или обновит шаблон с этим именем. Хосты к нему привяжите в панели или перенесите набором.' : 'Набор переносит хосты вместе с их профилями и Xray JSON-шаблонами.'));
+  } else {
+    txMeta(TX.src, 'srcMeta');
+    const m = TX.srcMeta;
+    if (!m) v.append(group('Хосты', [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]));
+    else if (m.error) v.append(h('div', { class: 'notice' }, m.error));
+    else {
+      const flt = textIn(TX.filter, 'Поиск: название, адрес, профиль, шаблон', x => { TX.filter = x; draw(); });
+      const list = h('div', { class: 'list', style: 'max-height:55vh;overflow:auto' });
+      const cnt = h('div', { class: 'group-f' });
+      const draw = () => {
+        const q = TX.filter.trim().toLowerCase();
+        const items = m.hosts.filter(x => !q || [x.remark, x.address, x.profile, x.template].join(' ').toLowerCase().includes(q));
+        list.replaceChildren(...items.map(x => row({ cls: 'wrap', title: x.remark || x.address, chevron: false,
+          sub: [`${x.address}:${x.port}`, x.profile, x.template ? 'шаблон ' + x.template : '', x.balancer ? 'балансировщик' : ''].filter(Boolean).join(' · '),
+          right: UI.toggle(TX.hosts.has(x.uuid), on => { on ? TX.hosts.add(x.uuid) : TX.hosts.delete(x.uuid); cnt.textContent = `Выбрано: ${TX.hosts.size}`; }, x.remark) })));
+        cnt.textContent = `Выбрано: ${TX.hosts.size}`;
+      };
+      draw();
+      const exp = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 0' }, 'Скачать набор JSON');
+      exp.onclick = UI.busy(exp, async () => {
+        if (!TX.hosts.size) return UI.toast('Выберите хосты', true);
+        const r = await UI.run(() => api('hosts/export', 'POST', { pid: TX.src, hosts: [...TX.hosts] }));
+        if (r) { TX.exported = JSON.stringify(r, null, 2); UI.nav.refresh(); }
+      });
+      v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Хосты'), h('div', { style: 'padding:0 0 8px' }, h('label', { class: 'field' }, flt)), list, exp, cnt));
+      if (TX.exported) {
+        const out = h('textarea', { class: 'wide', rows: 8, readonly: true, style: 'text-align:left;font-family:ui-monospace,monospace;font-size:12px' }); out.value = TX.exported;
+        v.append(group('Набор JSON', [h('label', { class: 'field stack' }, out), h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 12px', onclick: () => UI.copy(TX.exported, 'Набор') }, icon('copy'), ' Скопировать')],
+          'Его можно переслать и вставить в любом Bobr Nodes: «Откуда → Вставить JSON».'));
+      }
+    }
+  }
+  v.append(UI.section('Куда', UI.chips(groups, TX.dst, x => { TX.dst = x; TX.result = null; UI.nav.refresh(); })));
+  txMeta(TX.dst, 'dstMeta');
+  const dm = TX.dstMeta;
+  const srows = !dm ? [h('div', { class: 'skeleton' })] : dm.error ? [row({ cls: 'wrap', title: 'Панель недоступна', sub: dm.error })]
+    : dm.squads.length ? dm.squads.map(q => row({ title: q.name, right: UI.toggle(TX.squads.has(q.uuid), on => { on ? TX.squads.add(q.uuid) : TX.squads.delete(q.uuid); }, q.name) }))
+    : [row({ title: 'В панели нет сквадов' })];
+  v.append(group('Сквады в панели назначения', srows, 'Inbound перенесённых хостов добавится в отмеченные сквады — иначе пользователи хосты не увидят.'));
+  v.append(group('Если шаблон с таким именем уже есть', [h('div', { style: 'padding:12px' }, UI.segmented([{ value: 'copy', label: 'Создать копию' }, { value: 'update', label: 'Обновить его' }], TX.mode, x => { TX.mode = x; }))],
+    '«Обновить» меняет роутинг у всех хостов с этим шаблоном — удобно, когда прислали новый роутинг. Профили не перезаписываются никогда: другой конфиг — копия с новыми тегами. Хост с тем же названием, адресом и портом обновляется, а не дублируется.'));
+  const go = h('button', { class: 'btn', type: 'button' }, icon('share'), 'Перенести');
+  go.onclick = UI.busy(go, async () => {
+    const body = { pid: TX.dst, squads: [...TX.squads], template_mode: TX.mode };
+    if (TX.src === 'json') {
+      let parsed; try { parsed = JSON.parse(TX.json); } catch (e) { return UI.toast('Это не JSON', true); }
+      if (parsed && parsed.kind === 'bobr-nodes/hosts') body.bundle = parsed; else { body.template_json = parsed; body.template_name = TX.tname; }
+    } else {
+      if (!TX.hosts.size) return UI.toast('Выберите хосты', true);
+      body.from_pid = TX.src; body.hosts = [...TX.hosts];
+    }
+    const r = await UI.run(() => api('hosts/import', 'POST', body), 'Готово');
+    if (r) { TX.result = r; TX.dstMeta = null; TX.dstMetaPid = null; UI.nav.refresh(); }
+  });
+  v.append(h('div', { class: 'pad' }, go));
+  if (TX.result) {
+    const r = TX.result;
+    v.append(group(`Сделано: хостов создано ${r.created}, обновлено ${r.updated}; профилей ${r.profiles}, шаблонов ${r.templates}`,
+      r.log.map(x => row({ cls: 'wrap', title: x }))));
+  }
+  return v;
+}
+
 // ───────── безопасность ─────────
 function securityView() {
+  v.append(group(null, [row({ icon: 'share', tile: '#0A84FF', title: 'Перенос хостов', sub: 'хосты с профилем и шаблоном — в другую панель или из присланного JSON',
+    onClick: () => { TX = null; UI.nav.push(transferView); } })]));
   const sec = ST.security || {}, hd = sec.hardened;
   const v = h('div', {}, ...title('Безопасность'));
   const fmt = ts => new Date(ts * 1000).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });

@@ -632,6 +632,49 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         runner.start(jid)
         return J({'id': jid})
 
+    # ── перенос хостов между панелями ──
+    @r.post('/api/hosts/export')
+    async def hosts_export(request):
+        """Набор хостов (с профилями и Xray JSON-шаблонами) из панели группы pid."""
+        b = await body(request)
+        p = profile_or_404(b.get('pid', 0))
+        uuids = [u for u in (b.get('hosts') or []) if isinstance(u, str)]
+        if not 1 <= len(uuids) <= 200:
+            raise ApiError('Выберите хосты')
+        try:
+            return J(await asyncio.to_thread(engine.export_hosts, panel_of(p), uuids))
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+
+    @r.post('/api/hosts/import')
+    async def hosts_import(request):
+        """Создать хосты в панели группы pid: из другой группы (from_pid + hosts), из набора JSON (bundle)
+        или просто шаблон Xray JSON (template_name + template_json)."""
+        b = await body(request)
+        p = profile_or_404(b.get('pid', 0))
+        squads = [x for x in (b.get('squads') or []) if isinstance(x, str)]
+        mode = 'update' if b.get('template_mode') == 'update' else 'copy'
+        lines: list[str] = []
+
+        def run():
+            if b.get('from_pid'):
+                src = profile_or_404(b['from_pid'])
+                uuids = [u for u in (b.get('hosts') or []) if isinstance(u, str)]
+                if not uuids:
+                    raise ApiError('Выберите хосты')
+                bundle = engine.export_hosts(panel_of(src), uuids)
+            elif b.get('template_json'):
+                bundle = engine.template_bundle(str(b.get('template_name') or ''), b['template_json'])
+            else:
+                bundle = engine.check_bundle(b.get('bundle'))
+            with engine.PANEL_LOCK:
+                return engine.import_bundle(panel_of(p), bundle, squads, mode, lines.append)
+        try:
+            res = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            raise ApiError(f'{e}' + (' — сделано до ошибки: ' + '; '.join(lines) if lines else '')) from None
+        return J({**res, 'log': lines})
+
     # ── развёртывание ──
     @r.get('/api/catalog')
     async def catalog(request):

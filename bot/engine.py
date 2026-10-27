@@ -496,9 +496,13 @@ class Panel:
                      'psiphon': psiphon_of(p.get('config')) is not None, 'warp': warp_of(p.get('config'))}
                     for p in self.call('GET', '/api/config-profiles')['configProfiles']]
         btpl = {t['uuid'] for t in tpls if t['balancer_tag']}
-        hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''),
+        tname = {t['uuid']: t['name'] for t in tpls}
+        pname = {p['uuid']: p['name'] for p in profiles}
+        hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''), 'port': x.get('port'),
                   'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
-                  'balancer': x.get('xrayJsonTemplateUuid') in btpl}
+                  'balancer': x.get('xrayJsonTemplateUuid') in btpl,
+                  'profile': pname.get((x.get('inbound') or {}).get('configProfileUuid'), ''),
+                  'template': tname.get(x.get('xrayJsonTemplateUuid'), '')}
                  for x in sorted(self.call('GET', '/api/hosts'), key=lambda x: x.get('viewPosition', 0))]
         return {'squads': squads, 'templates': tpls, 'profiles': profiles, 'hosts': hosts}
 
@@ -1507,3 +1511,180 @@ def remove_node(prof: dict, ip: str, domain: str, log: Callable[[str], None]) ->
         except StepError as e:
             log(f'Cloudflare: {e}')
     return removed
+
+
+# ─────────────────────────────── Перенос хостов между панелями ──
+
+BUNDLE_KIND = 'bobr-nodes/hosts'
+HOST_FIELDS = ['remark', 'address', 'port', 'path', 'sni', 'host', 'alpn', 'fingerprint', 'isDisabled', 'securityLayer',
+               'xhttpExtraParams', 'muxParams', 'sockoptParams', 'finalMask', 'serverDescription', 'tags', 'isHidden',
+               'overrideSniFromAddress', 'keepSniBlank', 'pinnedPeerCertSha256', 'verifyPeerCertByName', 'vlessRouteId',
+               'shuffleHost', 'mihomoX25519', 'mihomoIpVersion', 'excludeFromSubscriptionTypes', 'mapper']
+
+
+def export_hosts(panel: 'Panel', uuids: list[str]) -> dict:
+    """Набор для переноса: хосты со всеми полями + их профили (конфиг Xray) и Xray JSON-шаблоны.
+    Ссылки внутри — по именам и тегам, а не UUID: в другой панели UUID свои."""
+    hosts = {h['uuid']: h for h in panel.call('GET', '/api/hosts')}
+    profiles = {p['uuid']: p for p in panel.call('GET', '/api/config-profiles')['configProfiles']}
+    tpls = {t['uuid']: t for t in panel.call('GET', '/api/subscription-templates')['templates']}
+    out = {'kind': BUNDLE_KIND, 'version': 1, 'profiles': [], 'templates': [], 'hosts': []}
+    seen_p, seen_t = set(), set()
+    for u in uuids:
+        h = hosts.get(u)
+        if not h:
+            raise StepError('хоста больше нет в панели — обновите список')
+        ib = h.get('inbound') or {}
+        prof = profiles.get(ib.get('configProfileUuid'))
+        inbound = next((i for i in (prof or {}).get('inbounds', []) if i['uuid'] == ib.get('configProfileInboundUuid')), None)
+        if not prof or not inbound:
+            raise StepError(f'у хоста «{h.get("remark", "")}» нет профиля или inbound')
+        if prof['uuid'] not in seen_p:
+            seen_p.add(prof['uuid'])
+            out['profiles'].append({'name': prof['name'], 'config': prof.get('config') or {}})
+        tpl = tpls.get(h.get('xrayJsonTemplateUuid')) if h.get('xrayJsonTemplateUuid') else None
+        if tpl and tpl['uuid'] not in seen_t:
+            seen_t.add(tpl['uuid'])
+            out['templates'].append({'name': tpl['name'], 'templateType': tpl.get('templateType') or 'XRAY_JSON',
+                                     'templateJson': tpl.get('templateJson')})
+        item = {k: h[k] for k in HOST_FIELDS if h.get(k) is not None}
+        item.update({'profile': prof['name'], 'inbound': inbound['tag'], 'template': tpl['name'] if tpl else None})
+        out['hosts'].append(item)
+    return out
+
+
+def _safe_name(name: str, limit: int) -> str:
+    return (re.sub(r'[^A-Za-z0-9_\s-]', '-', str(name or '')).strip() or 'Imported')[:limit]
+
+
+def check_bundle(b) -> dict:
+    if isinstance(b, str):
+        try:
+            b = json.loads(b)
+        except ValueError as e:
+            raise StepError(f'это не JSON: {e}') from None
+    if not isinstance(b, dict) or b.get('kind') != BUNDLE_KIND:
+        raise StepError('это не набор хостов Bobr Nodes (нет "kind": "bobr-nodes/hosts")')
+    hosts, profiles, tpls = b.get('hosts') or [], b.get('profiles') or [], b.get('templates') or []
+    if not isinstance(hosts, list) or not 1 <= len(hosts) + len(tpls) <= 300:
+        raise StepError('в наборе нет хостов и шаблонов (или их слишком много)')
+    pnames = {p.get('name') for p in profiles if isinstance(p, dict)}
+    tnames = {t.get('name') for t in tpls if isinstance(t, dict)}
+    for h in hosts:
+        if not isinstance(h, dict) or h.get('profile') not in pnames or not h.get('inbound') or not h.get('remark'):
+            raise StepError('в наборе хост без профиля, inbound или названия')
+        if h.get('template') and h['template'] not in tnames:
+            raise StepError(f'шаблона «{h["template"]}» нет в наборе')
+    return b
+
+
+def import_bundle(panel: 'Panel', bundle, squads: list[str], template_mode: str, log) -> dict:
+    """Создаёт в панели хосты из набора. Профили: одноимённый с тем же конфигом — берём его, иначе — копия с новыми
+    тегами inbound (теги в панели уникальны). Шаблоны: одноимённый — обновить (template_mode='update') или копия.
+    Хост с тем же названием, адресом и портом — обновляется, а не дублируется. inbound'ы — в выбранные сквады."""
+    b = check_bundle(bundle)
+    res = {'profiles': 0, 'templates': 0, 'created': 0, 'updated': 0}
+    profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
+    taken = {i['tag'] for p in profiles for i in p['inbounds']}
+    pmap: dict[str, tuple[dict, dict]] = {}   # имя в наборе → (профиль в панели, тег из набора → тег в панели)
+    for p in b.get('profiles') or []:
+        if not any(h['profile'] == p['name'] for h in b['hosts']):
+            continue
+        cfg = p.get('config') or {}
+        tags = [i.get('tag') for i in cfg.get('inbounds', []) if i.get('tag')]
+        same = next((x for x in profiles if x['name'] == p['name'] and (x.get('config') or {}) == cfg), None)
+        if same:
+            pmap[p['name']] = (same, {t: t for t in tags})
+            log(f'профиль «{p["name"]}» уже есть такой же — использую его')
+            continue
+        tmap = {}
+        for t in tags:
+            new, n = t, 1
+            while new in taken:
+                n += 1
+                new = f'{t}-{n}'
+            tmap[t] = new
+            taken.add(new)
+        for old, new in tmap.items():
+            if old != new:
+                cfg = retag(cfg, old, new)
+        names = {x['name'] for x in profiles}
+        name, n = _safe_name(p['name'], 29), 1
+        while name in names:
+            n += 1
+            name = f'{_safe_name(p["name"], 26)} {n}'
+        created = panel.call('POST', '/api/config-profiles', {'name': name, 'config': cfg})
+        profiles.append(created)
+        pmap[p['name']] = (created, tmap)
+        res['profiles'] += 1
+        log(f'профиль «{name}» создан' + (f' (теги: {", ".join(f"{a}→{c}" for a, c in tmap.items() if a != c)})'
+                                          if any(a != c for a, c in tmap.items()) else ''))
+    tpls = panel.call('GET', '/api/subscription-templates')['templates']
+    tmap_t: dict[str, str] = {}
+    for t in b.get('templates') or []:
+        if (t.get('templateType') or 'XRAY_JSON') != 'XRAY_JSON' or not isinstance(t.get('templateJson'), dict):
+            raise StepError(f'шаблон «{t.get("name")}»: переносятся только Xray JSON-шаблоны')
+        cur = next((x for x in tpls if x['name'] == t['name'] and x.get('templateType') == 'XRAY_JSON'), None)
+        if cur and (cur.get('templateJson') == t['templateJson'] or template_mode == 'update'):
+            if cur.get('templateJson') != t['templateJson']:
+                panel.call('PATCH', '/api/subscription-templates', {'uuid': cur['uuid'], 'templateJson': t['templateJson']})
+                log(f'шаблон «{cur["name"]}» обновлён')
+            else:
+                log(f'шаблон «{cur["name"]}» уже такой же')
+            tmap_t[t['name']] = cur['uuid']
+            continue
+        names = {x['name'] for x in tpls}
+        name, n = _safe_name(t['name'], 250), 1
+        while name in names:
+            n += 1
+            name = f'{_safe_name(t["name"], 240)} {n}'
+        new = panel.call('POST', '/api/subscription-templates', {'name': name, 'templateType': 'XRAY_JSON'})
+        new = panel.call('PATCH', '/api/subscription-templates', {'uuid': new['uuid'], 'templateJson': t['templateJson']})
+        tpls.append(new)
+        tmap_t[t['name']] = new['uuid']
+        res['templates'] += 1
+        log(f'шаблон «{name}» создан')
+    existing = panel.call('GET', '/api/hosts')
+    used_inbounds = set()
+    for h in b['hosts']:
+        prof, tagmap = pmap[h['profile']]
+        tag = tagmap.get(h['inbound'], h['inbound'])
+        ib = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
+        if not ib:
+            raise StepError(f'в профиле «{prof["name"]}» нет inbound {tag}')
+        used_inbounds.add(ib['uuid'])
+        body = {k: h[k] for k in HOST_FIELDS if h.get(k) is not None}
+        body['inbound'] = {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': ib['uuid']}
+        body['xrayJsonTemplateUuid'] = tmap_t.get(h['template']) if h.get('template') else None
+        same = next((x for x in existing if x.get('remark') == h['remark'] and x.get('address') == h.get('address')
+                     and x.get('port') == h.get('port')), None)
+        if same:
+            panel.call('PATCH', '/api/hosts', {'uuid': same['uuid'], **body})
+            res['updated'] += 1
+            log(f'хост «{h["remark"]}» обновлён')
+        else:
+            panel.call('POST', '/api/hosts', body)
+            res['created'] += 1
+            log(f'хост «{h["remark"]}» создан')
+    for sq in squads:
+        cur = panel.call('GET', f'/api/internal-squads/{sq}')
+        ids = [i['uuid'] for i in cur.get('inbounds', [])]
+        add = [u for u in used_inbounds if u not in ids]
+        if add:
+            panel.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + add})
+            log(f'inbound добавлен в сквад «{cur.get("name", sq)}»')
+    return res
+
+
+def template_bundle(name: str, raw) -> dict:
+    """Просто Xray JSON (присланный роутинг) → набор из одного шаблона, без хостов."""
+    try:
+        tj = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError as e:
+        raise StepError(f'это не JSON: {e}') from None
+    if not isinstance(tj, dict):
+        raise StepError('шаблон Xray JSON — это объект { … }')
+    if not name or not name.strip():
+        raise StepError('укажите имя шаблона')
+    return {'kind': BUNDLE_KIND, 'version': 1, 'profiles': [], 'hosts': [],
+            'templates': [{'name': name.strip(), 'templateType': 'XRAY_JSON', 'templateJson': tj}]}
