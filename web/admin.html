@@ -226,133 +226,192 @@ function profileView(p) {
 
 // ───────── развёртывание ─────────
 let D = null;
+const PERIOD = { '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год' };
+const ACTIVE_ST = ['queued', 'buying', 'provisioning', 'deploying'];
 function fetchCat() {
-  const d = D; d.cat = null; d.err = null; d.idx = null; d.meta = null; d.metaErr = null; d.squads = null;
+  const d = D;
+  Object.assign(d, { cat: null, err: null, meta: null, metaErr: null, squads: null, zones: null, zonesErr: '', items: [], domains: {}, picked: false });
+  api('catalog?pid=' + d.pid).then(c => {
+    if (D !== d) return;
+    d.cat = c;
+    if (c.locations[0]) d.items = [{ loc: c.locations[0].code, idx: null, count: 1 }];
+    UI.nav.refresh();
+  }).catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
   api('profiles/' + d.pid + '/panel').then(m => { if (D !== d) return; d.meta = m; d.squads = new Set(m.default_squads); UI.nav.refresh(); })
     .catch(e => { if (D === d) { d.metaErr = e.message; UI.nav.refresh(); } });
-  api('catalog?pid=' + d.pid).then(c => { if (D !== d) return; d.cat = c; if (!c.locations.some(l => l.code === d.loc)) d.loc = c.locations[0] && c.locations[0].code; UI.nav.refresh(); })
-    .catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
+  api('profiles/' + d.pid + '/zones').then(z => { if (D !== d) return; d.zones = z.zones; d.zonesErr = z.error; if (!d.zone || !z.zones.includes(d.zone)) d.zone = z.default; UI.nav.refresh(); })
+    .catch(e => { if (D === d) { d.zones = []; d.zonesErr = e.message; UI.nav.refresh(); } });
+}
+function stepper(value, onChange, max) {
+  const num = h('b', { class: 'num', style: 'min-width:34px;text-align:center;font-size:20px' }, String(value));
+  const range = h('input', { type: 'range', min: 1, max, value, 'aria-label': 'Количество', style: 'flex:1;accent-color:var(--accent)' });
+  const set = v => { v = Math.max(1, Math.min(max, v)); if (v === value) return; value = v; num.textContent = String(v); range.value = v; UI.haptic('select'); onChange(v); };
+  range.addEventListener('input', () => set(+range.value));
+  const btn = (t, d) => h('button', { class: 'btn tinted small', type: 'button', style: 'min-width:44px;font-size:20px', onclick: () => set(value + d) }, t);
+  return h('div', { style: 'display:flex;align-items:center;gap:10px;padding:12px 16px' }, btn('−', -1), num, btn('+', 1), range);
+}
+function multiChips(options, selected, onToggle) {
+  const wrap = h('div', { class: 'chips', role: 'group' });
+  options.forEach(o => wrap.append(h('button', { type: 'button', 'aria-pressed': String(selected.includes(o.value)), onclick: () => { UI.haptic('select'); onToggle(o.value); } },
+    o.flag ? h('span', { class: 'f', 'aria-hidden': 'true' }, o.flag) : null, o.label)));
+  return wrap;
 }
 function deployView(pid) {
-  if (!D) {
-    D = { pid: pid || (ST.profiles[0] && ST.profiles[0].id), loc: null, idx: null, period: '1m', count: 1, mode: null, manual: '', domains: [], cat: null, err: null };
-    fetchCat();
-  }
+  if (!D) { D = { pid: pid || (ST.profiles[0] && ST.profiles[0].id), period: '1m', domMode: null, manual: {}, zone: '' }; fetchCat(); }
   const v = h('div', {}, ...title('Развернуть'));
   const prof = ST.profiles.find(p => p.id === D.pid) || ST.profiles[0];
-  const reset = () => { D.domains = []; };
-  if (ST.profiles.length > 1) v.append(UI.section('Группа', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; D.mode = null; reset(); fetchCat(); UI.nav.refresh(); })));
+  const resetNames = () => { D.domains = {}; D.picked = false; };
+  if (ST.profiles.length > 1) v.append(UI.section('Группа', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; fetchCat(); UI.nav.refresh(); })));
   if (D.err) { v.append(h('div', { class: 'notice' }, D.err)); return v; }
   if (!D.cat) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  v.append(UI.section('Локация', UI.chips(D.cat.locations.map(l => ({ value: l.code, flag: l.flag, label: l.name })), D.loc, x => { D.loc = x; D.idx = null; reset(); UI.nav.refresh(); })));
-  const loc = D.cat.locations.find(l => l.code === D.loc);
-  if (!loc) return v;
-  v.append(group('Конфигурация', loc.offers.map(o => {
-    const on = o.idx === D.idx;
-    const r = row({ title: `${o.cpu} vCPU · ${o.ram} ГБ · ${o.disk} ГБ`, sub: o.speed || '', detail: rubK(o.price_kop) + '/мес', cls: 'offer', chevron: false,
-      right: on ? icon('check', 'tick') : null, onClick: () => { D.idx = o.idx; UI.nav.refresh(); } });
-    r.setAttribute('aria-pressed', String(on));
-    return r;
-  })));
-  if (D.idx === null) return v;
-  if (D.cat.periods.length > 1) v.append(UI.section('Срок аренды', h('div', { style: 'padding:0 var(--gutter)' },
-    UI.segmented(D.cat.periods.map(p => ({ value: p.code, label: ({ '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год' })[p.code] + (p.pct ? ' −' + p.pct + '%' : '') })), D.period, x => { D.period = x; UI.nav.refresh(); }))));
-  const cnt = h('input', { type: 'number', inputmode: 'numeric', min: 1, max: 50, 'aria-label': 'Количество' }); cnt.value = D.count;
-  cnt.addEventListener('change', () => { D.count = Math.max(1, Math.min(50, Math.round(+cnt.value || 1))); reset(); UI.nav.refresh(); });
-  v.append(group('Сколько нод', [h('label', { class: 'field' }, h('span', {}, 'Количество'), cnt, h('span', { class: 'unit' }, 'шт.'))]));
-  // домены
-  const modes = [{ value: 'auto', label: 'Автоматически' }, { value: 'manual', label: 'Вручную' }].filter(m => m.value === 'manual' || prof.base_domain);
-  if (!D.mode) D.mode = modes[0].value;
-  const domBox = h('div');
-  const status = statusLine();
-  if (D.mode === 'auto') {
-    const pick = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, D.domains.length ? 'Подобрать заново' : 'Подобрать имена');
-    pick.onclick = UI.busy(pick, async () => {
-      const r = await UI.run(() => api('domains/auto', 'POST', { pid: prof.id, location: D.loc, count: D.count }));
-      if (r) { D.domains = r.domains; UI.nav.refresh(); }
+  const L = code => D.cat.locations.find(l => l.code === code);
+  // локации (можно несколько)
+  v.append(UI.section('Локации', multiChips(D.cat.locations.map(l => ({ value: l.code, flag: l.flag, label: l.name })), D.items.map(i => i.loc), code => {
+    const i = D.items.findIndex(x => x.loc === code);
+    if (i >= 0) { if (D.items.length > 1) D.items.splice(i, 1); } else D.items.push({ loc: code, idx: null, count: 1 });
+    resetNames(); UI.nav.refresh();
+  }), D.items.length > 1 ? 'Выбрано локаций: ' + D.items.length + '. У каждой — своя конфигурация и количество.' : 'Можно выбрать несколько локаций сразу.'));
+  for (const it of D.items) {
+    const loc = L(it.loc);
+    if (!loc) continue;
+    const rows = loc.offers.map(o => {
+      const on = o.idx === it.idx;
+      const r = row({ title: `${o.cpu} vCPU · ${o.ram} ГБ · ${o.disk} ГБ`, sub: o.speed || '', detail: rubK(o.price_kop) + '/мес', cls: 'offer', chevron: false,
+        right: on ? icon('check', 'tick') : null, onClick: () => { it.idx = o.idx; UI.nav.refresh(); } });
+      r.setAttribute('aria-pressed', String(on));
+      return r;
     });
-    domBox.append(D.domains.length ? h('div', { class: 'domains' }, D.domains.map(d => h('span', {}, d))) : null, pick);
+    rows.push(h('div', {}, h('div', { class: 'group-h', style: 'margin:12px 16px 0' }, 'Сколько нод'), stepper(it.count, n => { it.count = n; resetNames(); UI.nav.refresh(); }, 20)));
+    v.append(group(`${loc.flag} ${loc.name}`, rows));
+  }
+  if (D.cat.periods.length > 1) v.append(UI.section('Срок аренды', h('div', { style: 'padding:0 var(--gutter)' },
+    UI.segmented(D.cat.periods.map(p => ({ value: p.code, label: PERIOD[p.code] + (p.pct ? ' −' + p.pct + '%' : '') })), D.period, x => { D.period = x; UI.nav.refresh(); }))));
+  const ready = D.items.every(i => i.idx !== null);
+  if (!ready) { v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) 30px' }, 'Выберите конфигурацию в каждой локации.')); return v; }
+  const total = D.items.reduce((s, i) => s + i.count, 0);
+
+  // домены
+  const canAuto = D.zones === null || D.zones.length > 0;
+  if (!D.domMode) D.domMode = 'auto';
+  if (!canAuto) D.domMode = 'manual';
+  const status = statusLine();
+  const domBody = [];
+  if (D.domMode === 'auto') {
+    if (D.zones === null) domBody.push(h('div', { class: 'skeleton' }));
+    else {
+      domBody.push(h('div', { style: 'padding:12px 0 4px' }, UI.chips(D.zones.map(z => ({ value: z, label: z })), D.zone, x => { D.zone = x; resetNames(); UI.nav.refresh(); })));
+      const pick = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 12px' }, D.picked ? 'Подобрать заново' : 'Подобрать имена');
+      pick.onclick = UI.busy(pick, async () => {
+        const got = {}, exclude = [];
+        for (const it of D.items) {
+          const r = await UI.run(() => api('domains/auto', 'POST', { pid: prof.id, location: it.loc, count: it.count, base: D.zone, exclude }));
+          if (!r) return;
+          got[it.loc] = r.domains; exclude.push(...r.domains);
+        }
+        D.domains = got; D.picked = true; UI.nav.refresh();
+      });
+      if (D.picked) for (const it of D.items) domBody.push(h('div', { class: 'domains' }, h('span', { style: 'background:none;padding-left:0' }, L(it.loc).flag), (D.domains[it.loc] || []).map(d => h('span', {}, d))));
+      domBody.push(pick);
+    }
   } else {
-    const ta = h('textarea', { class: 'wide', rows: 4, placeholder: 'по одному домену в строке', spellcheck: false, autocapitalize: 'off', style: 'text-align:left' });
-    ta.value = D.manual;
-    ta.addEventListener('input', () => { D.manual = ta.value; D.domains = []; });
+    for (const it of D.items) {
+      const loc = L(it.loc);
+      const ta = h('textarea', { class: 'wide', rows: Math.min(6, it.count + 1), placeholder: `${it.count} — по одному в строке`, spellcheck: false, autocapitalize: 'off', style: 'text-align:left' });
+      ta.value = D.manual[it.loc] || '';
+      ta.addEventListener('input', () => { D.manual[it.loc] = ta.value; D.picked = false; });
+      domBody.push(h('label', { class: 'field stack' }, h('label', {}, `${loc.flag} ${loc.name} · ${it.count}`), ta));
+    }
     const chk = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, 'Проверить домены');
     chk.onclick = UI.busy(chk, async () => {
-      try { const r = await api('domains/check', 'POST', { pid: prof.id, domains: D.manual, count: D.count }); D.domains = r.domains; showStatus(status, { ok: true, message: 'Домены в порядке' }); UI.nav.refresh(); }
-      catch (e) { showStatus(status, { ok: false, message: e.message }); }
+      const got = {};
+      try {
+        for (const it of D.items) got[it.loc] = (await api('domains/check', 'POST', { pid: prof.id, domains: D.manual[it.loc] || '', count: it.count })).domains;
+        const all = Object.values(got).flat();
+        if (new Set(all).size !== all.length) throw new Error('Один домен указан в двух локациях');
+        D.domains = got; D.picked = true; showStatus(status, { ok: true, message: 'Домены в порядке' }); UI.nav.refresh();
+      } catch (e) { showStatus(status, { ok: false, message: e.message }); }
     });
-    domBox.append(h('label', { class: 'field stack' }, ta), chk, status);
+    domBody.push(chk, status);
   }
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Домены'),
-    h('div', { style: 'padding:0 0 10px' }, modes.length > 1 ? h('div', { style: 'padding:10px 12px 0' }, UI.segmented(modes, D.mode, x => { D.mode = x; reset(); UI.nav.refresh(); })) : null),
-    h('div', { class: 'list' }, domBox),
-    h('div', { class: 'group-f' }, D.mode === 'auto' ? `Шаблон профиля, например ${(prof.base_domain ? 'de1.' + prof.base_domain : '')}. Занятые имена пропускаются.` : (prof.base_domain ? '' : 'Для автоимён задайте «Домен для автоимён» в профиле. ') + 'Зоны доменов должны быть в Cloudflare.')));
-  // хосты в панели
-  const sameLoc = D.count >= 2;
-  const defTag = (D.loc || '').replace(/[^A-Za-z0-9_]/g, '').toUpperCase();
-  if (!D.hostTouched) D.hostMode = (sameLoc || (D.meta && D.meta.templates.some(t => t.balancer_tag === defTag))) ? 'balancer' : 'simple';
+    canAuto ? h('div', { style: 'padding:0 12px 10px' }, UI.segmented([{ value: 'auto', label: 'Автоматически' }, { value: 'manual', label: 'Вручную' }], D.domMode, x => { D.domMode = x; resetNames(); UI.nav.refresh(); })) : null,
+    h('div', { class: 'list' }, domBody),
+    h('div', { class: 'group-f' }, D.zonesErr ? D.zonesErr : D.domMode === 'auto' ? `Имена по шаблону группы: ${(prof.name_pattern || '{cc}{n}')} → например ${D.items[0].loc}1.${D.zone || 'example.com'}. Занятые пропускаются.` : 'Зоны доменов должны быть в Cloudflare.')));
+
+  // сквады
+  const sq = [];
+  if (D.metaErr) sq.push(row({ cls: 'wrap', title: 'Панель недоступна', sub: D.metaErr + ' Сквады возьмём из настроек группы.' }));
+  else if (!D.meta) sq.push(h('div', { class: 'skeleton' }));
+  else if (D.meta.squads.length) D.meta.squads.forEach(q => sq.push(row({ title: q.name, right: UI.toggle(D.squads.has(q.uuid), on => { on ? D.squads.add(q.uuid) : D.squads.delete(q.uuid); }, q.name) })));
+  else sq.push(row({ title: 'В панели нет сквадов' }));
+  v.append(group('Сквады', sq, 'Inbound новых нод добавится в отмеченные сквады — только их пользователи увидят ноды и балансировщики.'));
+
+  // хосты
+  const multi = D.items.length > 1;
+  const one = D.items[0], defTag = (one.loc || '').replace(/[^A-Za-z0-9_]/g, '').toUpperCase();
+  const tpls = (D.meta && D.meta.templates) || [];
+  if (!D.hostTouched) D.hostMode = multi ? 'normal' : (one.count >= 2 || tpls.some(t => t.balancer_tag === defTag)) ? 'balancer' : 'simple';
   if (D.remark === undefined) D.remark = '{flag} {country} {n}';
-  if (D.tagTouched !== true) D.tag = defTag;
-  if (D.tags === undefined) D.tags = 'NORMAL';
+  if (!D.tagTouched) D.tag = defTag;
   if (D.bremark === undefined) D.bremark = '{flag} {country}';
+  if (D.tags === undefined || D.tagsMode !== D.hostMode) { D.tags = 'NORMAL'; D.tagsMode = D.hostMode; }
   const input = (val, ph, on, mono) => { const i = h('input', { type: 'text', placeholder: ph, autocapitalize: 'off', spellcheck: false, style: 'text-align:left' + (mono ? ';font-family:ui-monospace,monospace' : '') }); i.value = val; i.addEventListener('input', () => on(i.value)); return i; };
-  const preview = (tpl, n) => (tpl || '').replace('{flag}', loc.flag).replace('{country}', loc.name).replace('{n}', String(n)).replace('{name}', D.domains[0] ? D.domains[0].split('.')[0] : '').replace('{domain}', D.domains[0] || '').replace(/\s+/g, ' ').trim();
-  const hostRows = [];
-  if (D.metaErr) hostRows.push(row({ cls: 'wrap', title: 'Панель недоступна', sub: D.metaErr + ' Сквады возьмём из настроек группы.' }));
-  else if (!D.meta) hostRows.push(h('div', { class: 'skeleton' }));
-  else if (D.meta.squads.length) D.meta.squads.forEach(q => hostRows.push(row({ title: q.name, right: UI.toggle(D.squads.has(q.uuid), on => { on ? D.squads.add(q.uuid) : D.squads.delete(q.uuid); }, q.name) })));
-  else hostRows.push(row({ title: 'В панели нет сквадов' }));
-  v.append(group('Сквады', hostRows, 'Inbound новых нод добавится в отмеченные сквады — только их пользователи увидят ноды (и балансировщик).'));
-  const remarkIn = input(D.remark, '{flag} {country} {n}', x => { D.remark = x; prevEl.textContent = 'Например: ' + preview(D.remark, 1); });
-  const prevEl = h('div', { class: 'group-f' }, 'Например: ' + preview(D.remark, 1) + '. {flag} — флаг, {country} — страна, {n} — номер ноды, {name}, {domain}.');
-  const hostBox = h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Хосты в панели'),
-    h('div', { style: 'padding:0 12px 12px' }, UI.segmented([{ value: 'simple', label: 'Обычные' }, { value: 'balancer', label: 'Балансировщик' }], D.hostMode, x => { D.hostMode = x; D.hostTouched = true; UI.nav.refresh(); })),
-    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), remarkIn)),
-    prevEl);
-  v.append(hostBox);
-  if (D.hostMode === 'balancer') {
-    const tpls = (D.meta && D.meta.templates) || [];
-    const tag = (D.tag || defTag).toUpperCase();
-    const existing = tpls.find(t => t.balancer_tag === tag);
+  const loc0 = L(one.loc);
+  const preview = tpl => (tpl || '').replace('{flag}', loc0.flag).replace('{country}', loc0.name).replace('{n}', '1').replace('{name}', one.loc + '1').replace('{domain}', one.loc + '1.' + (D.zone || 'example.com')).replace(/\s+/g, ' ').trim();
+  const prevEl = h('div', { class: 'group-f' });
+  const setPrev = () => { prevEl.textContent = 'Например: ' + preview(D.remark) + '. {flag} — флаг, {country} — страна, {n} — номер ноды, {name}, {domain}.'; };
+  setPrev();
+  const modes = [{ value: 'simple', label: 'Обычные' }, { value: 'balancer', label: 'По стране' }, { value: 'normal', label: 'Общий NORMAL' }];
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Хосты в панели'),
+    h('div', { style: 'padding:0 12px 12px' }, UI.segmented(modes, D.hostMode, x => { D.hostMode = x; D.hostTouched = true; UI.nav.refresh(); })),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), input(D.remark, '{flag} {country} {n}', x => { D.remark = x; setPrev(); }))),
+    prevEl));
+  if (D.hostMode === 'normal') {
+    v.append(group('Общий балансировщик', [h('label', { class: 'field stack' }, h('label', {}, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true))],
+      'Хосты видимые, с тегом ' + (D.tags || 'NORMAL').toUpperCase() + ' — их подхватит ваш уже настроенный общий балансировщик. Шаблоны и хосты-балансировщики бот не создаёт.'));
+  } else if (D.hostMode === 'balancer') {
     const bases = tpls.filter(t => t.balancer_tag);
-    if (!D.btpl || !bases.some(t => t.uuid === D.btpl)) D.btpl = (existing || bases[0] || {}).uuid;
-    const brows = [
-      h('label', { class: 'field stack' }, h('label', {}, 'Тег балансировщика'), input(D.tag, defTag, x => { D.tag = x.toUpperCase(); D.tagTouched = true; }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Ещё теги хостов нод'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста-балансировщика'), input(D.bremark, '{flag} {country}', x => { D.bremark = x; })),
-    ];
-    if (!existing && bases.length > 1) brows.push(h('div', { style: 'padding:10px 12px' }, h('div', { class: 'group-h', style: 'margin:0 4px 8px' }, 'Скопировать шаблон'),
+    const tagsFor = multi ? D.items.map(i => i.loc.replace(/[^A-Za-z0-9_]/g, '').toUpperCase()) : [(D.tag || defTag).toUpperCase()];
+    const existing = tagsFor.filter(t => tpls.some(x => x.balancer_tag === t));
+    if (!D.btpl || !bases.some(t => t.uuid === D.btpl)) D.btpl = (tpls.find(t => t.balancer_tag === tagsFor[0]) || bases[0] || {}).uuid;
+    const brows = [];
+    if (!multi) brows.push(h('label', { class: 'field stack' }, h('label', {}, 'Тег балансировщика'), input(D.tag, defTag, x => { D.tag = x.toUpperCase(); D.tagTouched = true; }, true)));
+    brows.push(h('label', { class: 'field stack' }, h('label', {}, 'Ещё теги хостов нод'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста-балансировщика'), input(D.bremark, '{flag} {country}', x => { D.bremark = x; })));
+    if (bases.length > 1 && existing.length < tagsFor.length) brows.push(h('div', { style: 'padding:10px 12px' }, h('div', { class: 'group-h', style: 'margin:0 4px 8px' }, 'Копировать шаблон'),
       UI.chips(bases.map(t => ({ value: t.uuid, label: t.name })), D.btpl, x => { D.btpl = x; })));
-    const note = !D.meta ? '' : existing
-      ? `Балансировщик ${tag} уже есть в панели (шаблон «${existing.name}») — новые ноды добавятся в него сами.`
-      : bases.length ? `Создам шаблон Balancer_${tag.toLowerCase()} копией «${(bases.find(t => t.uuid === D.btpl) || bases[0]).name}» и видимый хост-балансировщик.`
-      : 'В панели нет Xray-шаблона с балансировщиком (remnawave.injectHosts) — создайте один вручную, дальше бот будет копировать его.';
-    v.append(group('Балансировщик', brows, note + ' Хосты нод — скрытые, с тегами ' + [tag, ...String(D.tags || '').toUpperCase().split(/[\s,]+/).filter(Boolean)].filter((x, i, a) => a.indexOf(x) === i).join(', ') + '.'));
+    const fresh = tagsFor.filter(t => !existing.includes(t));
+    let note = !D.meta ? '' : (existing.length ? `Уже есть: ${existing.join(', ')} — ноды добавятся туда. ` : '')
+      + (fresh.length ? (bases.length ? `Создам: ${fresh.map(t => 'Balancer_' + t.toLowerCase()).join(', ')} копией шаблона и хост-балансировщик для каждого. ` : 'В панели нет Xray-шаблона с балансировщиком (remnawave.injectHosts) — создайте один вручную. ') : '');
+    note += 'Хосты нод скрытые, теги: ' + (multi ? 'код страны' : tagsFor[0]) + ', ' + ((D.tags || '').toUpperCase() || '—') + '.';
+    v.append(group(multi ? 'Балансировщики по странам' : 'Балансировщик', brows, note));
   }
+
   // итог
   const per = D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 };
-  const offer = loc.offers.find(o => o.idx === D.idx);
-  const one = per.months <= 1 ? offer.price_kop : Math.ceil(offer.price_kop * per.months * (100 - per.pct) / 100 / 100) * 100;
-  const total = one * D.count, bal = D.cat.balance_kop;
-  const enough = bal === null || bal >= total;
+  const priceOf = it => { const o = L(it.loc).offers.find(x => x.idx === it.idx); return per.months <= 1 ? o.price_kop : Math.ceil(o.price_kop * per.months * (100 - per.pct) / 100 / 100) * 100; };
+  const sum = D.items.reduce((s, it) => s + priceOf(it) * it.count, 0), bal = D.cat.balance_kop;
+  const enough = bal === null || bal >= sum;
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Итого'), h('div', { class: 'list' },
-    h('div', { class: 'total' }, h('span', {}, `${rubK(one)} × ${D.count}`), h('b', {}, rubK(total))),
+    ...D.items.map(it => row({ title: `${L(it.loc).flag} ${L(it.loc).name} × ${it.count}`, detail: rubK(priceOf(it) * it.count) })),
+    h('div', { class: 'total' }, h('span', {}, `${total} ${UI.plural(total, 'нода', 'ноды', 'нод')} · ${PERIOD[D.period]}`), h('b', {}, rubK(sum))),
     row({ title: 'Платит', detail: D.cat.buyer }),
     row({ title: 'Баланс', detail: bal === null ? '—' : rubK(bal), right: enough ? null : badge('Не хватает', 'bad') }),
     row({ title: 'Система', detail: D.cat.os_label }),
     row({ title: 'Traffic Control', detail: prof.traffic_control ? 'да' : 'нет' }))));
-  const go = h('button', { class: 'btn', type: 'button', disabled: !enough || D.domains.length !== D.count }, icon('bolt'), 'Купить и установить');
+  const go = h('button', { class: 'btn', type: 'button', disabled: !enough || !D.picked }, icon('bolt'), 'Купить и установить');
   go.onclick = UI.busy(go, async () => {
-    const ok = await UI.ask({ title: 'Купить и установить?', message: `${D.count} × ${loc.name}, ${rubK(total)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
+    const ok = await UI.ask({ title: 'Купить и установить?', message: `${total} ${UI.plural(total, 'нода', 'ноды', 'нод')}, ${rubK(sum)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
     if (!ok) return;
-    const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, location: D.loc, idx: D.idx, period: D.period, domains: D.domains,
+    const items = D.items.map(it => ({ location: it.loc, idx: it.idx, domains: D.domains[it.loc] || [] }));
+    const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, items, period: D.period,
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
       balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });
   v.append(h('div', { class: 'pad' }, go,
-    h('div', { class: 'group-f', style: 'margin:8px 0 0' }, D.domains.length === D.count ? 'Ход установки — в «Задачах» и сообщениями в чате с ботом.' : 'Подберите или проверьте домены, чтобы продолжить.')));
+    h('div', { class: 'group-f', style: 'margin:8px 0 0' }, D.picked ? 'Ход установки — на странице группы, в «Задачах» и сообщениями в чате с ботом.' : 'Подберите или проверьте домены, чтобы продолжить.')));
   return v;
 }
 

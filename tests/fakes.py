@@ -58,6 +58,8 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 return self.send(403, {'success': False, 'errors': [{'message': 'bad token'}]})
             if p == '/user/tokens/verify':
                 return ok({'status': 'active'})
+            if p == '/zones' and 'name' not in q:
+                return ok([{'id': i, 'name': n} for n, i in W.zones.items()])
             if p == '/zones':
                 z = W.zones.get(q.get('name', ''))
                 return ok([{'id': z, 'name': q['name']}] if z else [])

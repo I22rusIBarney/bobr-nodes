@@ -398,6 +398,33 @@ async def main():
                                            'host_mode': 'balancer', 'balancer_tag': 'de-1'})
     ok(st == 400 and 'тег' in js['detail'], 'неверный тег балансировщика отклонён')
 
+    # ── несколько локаций сразу: общий балансировщик NORMAL, домены из списка зон Cloudflare
+    world.zones['example.net'] = 'z2'
+    st, zs = await wapi(f'profiles/{pid}/zones')
+    ok(zs['zones'][0] == 'example.com' and 'example.net' in zs['zones'] and zs['default'] == 'example.com' and not zs['error'],
+       f'зоны Cloudflare для выбора: {zs}')
+    st, d1 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 2, 'base': 'example.net'})
+    st, d2 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'nl', 'count': 1, 'base': 'example.net', 'exclude': d1['domains']})
+    ok(d1['domains'] == ['de1.example.net', 'de2.example.net'] and d2['domains'] == ['nl1.example.net'], 'имена на выбранном домене')
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    hb, tb = len(world.hosts), len(world.templates)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'host_mode': 'normal', 'tags': 'NORMAL', 'remark': '{flag} {country} {n}',
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': d1['domains']},
+                                                     {'location': 'nl', 'idx': 1, 'domains': d2['domains']}]})
+    ok(st == 200 and len(js['ids']) == 3, f'деплой в две локации разом: {js}')
+    await runner.wait_all()
+    mj = [store.job(i) for i in js['ids']]
+    ok(all(j['status'] == 'done' for j in mj) and sorted(j['data']['location'] for j in mj) == ['de', 'de', 'nl']
+       and [j['data']['idx'] for j in mj if j['data']['location'] == 'nl'] == [1], f'все ноды готовы, у каждой своя локация и тариф: {[j["error"] for j in mj]}')
+    nh = world.hosts[hb:]
+    ok(len(nh) == 3 and all(not h['isHidden'] and h['tags'] == ['NORMAL'] and not h.get('xrayJsonTemplateUuid') for h in nh)
+       and len(world.templates) == tb, 'режим NORMAL: хосты видимые с тегом NORMAL, шаблоны и балансировщики не создаются')
+    ok({h['remark'] for h in nh} == {'🇩🇪 Германия 1', '🇩🇪 Германия 2', '🇳🇱 Нидерланды 1'}, f'названия хостов: {[h["remark"] for h in nh]}')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
+        {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
+    ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')
+
     # ── ручные домены: чужая зона и успешная попытка с ошибкой установщика
     await tap('m:deploy')
     out = await tap(f'd:p:{pid}')

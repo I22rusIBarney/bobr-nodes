@@ -13,7 +13,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, services as svc
+from . import engine, forms, naming, services as svc
 from .bcloud import BcloudError
 from .runner import STAGES, Runner, bcloud_from, buyer_of
 from .store import ACTIVE, Store
@@ -122,6 +122,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         mine = [j for j in jobs if j['profile_id'] == p['id']]
         return {'id': p['id'], 'name': p['name'], 'panel_url': p['panel_url'], 'base_domain': p.get('base_domain', ''),
                 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
+                'name_pattern': p.get('name_pattern') or naming.DEFAULT_PATTERN,
                 'servers': sum(1 for j in mine if j['status'] == 'done'),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
@@ -273,6 +274,22 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return J({'locations': cat['locations'], 'periods': cat['periods'], 'os_label': cat['os_label'], 'balance_kop': bal,
                   'buyer': p.get('owner_label') or 'ваш аккаунт'})
 
+    @r.get('/api/profiles/{pid}/zones')
+    async def zones(request):
+        """Домены Cloudflare для выбора: зоны аккаунта (токен группы или общий) + домен группы для автоимён."""
+        p = profile_or_404(request.match_info['pid'])
+        base = p.get('base_domain') or ''
+        try:
+            names = await asyncio.to_thread(lambda: svc.cf_for(store, p).zone_names())
+            err = ''
+        except engine.StepError as e:
+            names, err = [], str(e)
+            if '403' in err or 'uthentication' in err or 'permission' in err.lower():
+                err = 'Токену Cloudflare не хватает права Zone → Read, чтобы показать список доменов. Добавьте его — или введите домен в настройках группы.'
+        if base and base not in names:
+            names = [base, *names]
+        return J({'zones': names, 'default': base or (names[0] if names else ''), 'error': err})
+
     @r.post('/api/domains/auto')
     async def domains_auto(request):
         b = await body(request)
@@ -280,7 +297,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         n = int(b.get('count') or 0)
         if not 1 <= n <= 50:
             raise ApiError('Количество: от 1 до 50')
-        return J({'domains': await svc.auto_domains(store, p, str(b.get('location', '')), n)})
+        exclude = {naming.norm_domain(x) for x in (b.get('exclude') or []) if isinstance(x, str)}
+        return J({'domains': await svc.auto_domains(store, p, str(b.get('location', '')), n, b.get('base') or None, exclude)})
 
     @r.post('/api/domains/check')
     async def domains_check(request):
@@ -290,14 +308,28 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/deploy')
     async def deploy(request):
+        """Одна или несколько локаций: items = [{location, idx, domains}], либо старый вид location/idx/domains."""
         b = await body(request)
         p = profile_or_404(b.get('pid', 0))
-        domains = b.get('domains') or []
-        if not 1 <= len(domains) <= 50:
+        items = b.get('items') or [{'location': b.get('location'), 'idx': b.get('idx'), 'domains': b.get('domains') or []}]
+        if not isinstance(items, list) or not items:
+            raise ApiError('Не выбрано ни одной локации')
+        period = str(b.get('period') or '1m')
+        all_domains = [d for it in items for d in (it.get('domains') or [])]
+        if not 1 <= len(all_domains) <= 50:
             raise ApiError('Нужно от 1 до 50 доменов')
-        domains = await svc.check_domains(store, p, domains, len(domains))
+        checked = await svc.check_domains(store, p, all_domains, len(all_domains))
         cat = await svc.load_catalog(store, p)
-        q = svc.quote(cat, str(b.get('location')), int(b.get('idx')), str(b.get('period') or '1m'), len(domains))
+        plan, total, pos = [], 0, 0
+        for it in items:
+            n = len(it.get('domains') or [])
+            if not n:
+                continue
+            q = svc.quote(cat, str(it.get('location')), int(it.get('idx')), period, n)
+            plan.append((str(it['location']), int(it['idx']), checked[pos:pos + n]))
+            pos += n
+            total += q['total_kop']
+        q = {'total_kop': total}
         bal = await bcloud_from(store, buyer_of(store, p)).balance()
         if bal < q['total_kop']:
             who = p.get('owner_label') or 'вашего аккаунта'
@@ -305,11 +337,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         squads = b.get('squads')
         if squads is not None and (not isinstance(squads, list) or not all(isinstance(x, str) for x in squads)):
             raise ApiError('сквады: список UUID')
-        host = svc.host_options(str(b['location']), b.get('host_mode') or 'simple', b.get('tags'),
-                                str(b.get('balancer_tag') or ''), str(b.get('balancer_remark') or ''), b.get('balancer_template'))
-        ids = await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, str(b['location']),
-                                    int(b['idx']), str(b.get('period') or '1m'), domains, squads,
-                                    str(b.get('remark') or '')[:100], host)
+        mode = b.get('host_mode') or 'simple'
+        multi = len(plan) > 1
+        hosts = [svc.host_options(loc, mode, b.get('tags'),
+                                  '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
+                                  str(b.get('balancer_remark') or ''), b.get('balancer_template'))
+                 for loc, _, _ in plan]
+        ids = []
+        for (loc, idx, doms), host in zip(plan, hosts):
+            ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
+                                         squads, str(b.get('remark') or '')[:100], host)
         return J({'ids': ids})
 
     # ── задачи ──

@@ -123,6 +123,19 @@ class Cloudflare:
                 return res[0]['id']
         raise StepError(f'зона для {domain} не найдена в аккаунте Cloudflare')
 
+    def zone_names(self) -> list[str]:
+        """Домены (зоны) аккаунта — нужен токен с правом Zone → Read."""
+        out, page = [], 1
+        while page <= 10:
+            res = self.call('GET', f'/zones?per_page=50&page={page}')
+            out += [z['name'] for z in res]
+            for z in res:
+                self.zones[z['name']] = z['id']
+            if len(res) < 50:
+                break
+            page += 1
+        return sorted(out)
+
     def records(self, domain: str) -> list[dict]:
         zid = self.zone_for(domain)
         return self.call('GET', f'/zones/{zid}/dns_records?' + urllib.parse.urlencode({'name': domain}))
@@ -334,7 +347,8 @@ class Panel:
 
         opts = node.get('host') or {}
         balancer = opts.get('mode') == 'balancer'
-        tags = [t for t in (opts.get('tags') or []) if TAG_RE.match(t)] if balancer else []
+        hidden = bool(opts.get('hidden', balancer))
+        tags = [t for t in (opts.get('tags') or []) if re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
         hosts = self.call('GET', '/api/hosts')
         host = next((h for h in hosts if h['address'] == node['domain']
                      and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
@@ -346,10 +360,13 @@ class Panel:
                     'remark': (node.get('remark') or node['name'])[:100],
                     'address': node['domain'], 'port': 443, 'sni': node['domain'],
                     'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS'}
-            if balancer:
-                body.update({'isHidden': True, 'tags': tags})
+            if hidden:
+                body['isHidden'] = True
+            if tags:
+                body['tags'] = tags
             self.call('POST', '/api/hosts', body)
-            log('панель: хост создан' + (f' (скрытый, теги {", ".join(tags)})' if balancer else ''))
+            extra = ', '.join(([] if not hidden else ['скрытый']) + ([f'теги {", ".join(tags)}'] if tags else []))
+            log('панель: хост создан' + (f' ({extra})' if extra else ''))
         if balancer:
             b = opts.get('balancer') or {}
             self.ensure_balancer(b.get('tag') or (tags[0] if tags else 'PL'), b.get('template'),

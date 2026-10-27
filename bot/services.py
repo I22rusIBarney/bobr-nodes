@@ -62,15 +62,22 @@ def quote(cat: dict, location: str, idx: int, period: str, count: int) -> dict:
     return {'loc': loc, 'offer': offer, 'one_kop': one, 'total_kop': one * count}
 
 
-async def auto_domains(store: Store, prof: dict, location: str, count: int) -> list[str]:
-    if not prof.get('base_domain'):
-        raise ValueError('в группе не задан домен для автоимён')
+async def auto_domains(store: Store, prof: dict, location: str, count: int, base: str | None = None,
+                       exclude: set[str] | None = None) -> list[str]:
+    """Свободные имена по шаблону группы на домене base (по умолчанию — домен группы для автоимён)."""
+    base = naming.norm_domain(base or prof.get('base_domain') or '')
+    if not base:
+        raise ValueError('выберите домен для имён нод')
+    pattern = prof.get('name_pattern') or naming.DEFAULT_PATTERN
+    err = naming.check_pattern(pattern, base)
+    if err:
+        raise ValueError(err)
 
     def pick():
         cf = cf_for(store, prof)
-        cf.zone_for(prof['base_domain'])
-        return naming.auto_names(prof.get('name_pattern') or naming.DEFAULT_PATTERN, prof['base_domain'], location,
-                                 count, store.used_domains(), exists=lambda d: bool(cf.records(d)))
+        cf.zone_for(base)
+        return naming.auto_names(pattern, base, location, count, store.used_domains() | (exclude or set()),
+                                 exists=lambda d: bool(cf.records(d)))
     try:
         return await asyncio.to_thread(pick)
     except engine.StepError as e:
@@ -118,21 +125,31 @@ def render_remark(tpl: str, loc: dict, name: str, domain: str, i: int) -> str:
     return ' '.join(out.split())[:100] or name
 
 
-def host_options(location: str, mode: str = 'simple', tags: str | list | None = None, balancer_tag: str = '',
-                 balancer_remark: str = '', balancer_template: str | None = None) -> dict:
-    """Как регистрировать хосты: обычные или скрытые с тегами + общий хост-балансировщик."""
-    if mode != 'balancer':
-        return {'mode': 'simple'}
-    tag = (balancer_tag or re.sub(r'[^A-Za-z0-9_]', '', location) or 'NODES').upper()
-    if not re.fullmatch(r'[A-Z0-9_]{1,30}', tag):
-        raise ValueError('тег балансировщика: латиница, цифры, подчёркивание')
+def _tags(tags) -> list[str]:
     if isinstance(tags, str):
         tags = [t for t in re.split(r'[\s,]+', tags.upper()) if t]
-    tags = list(dict.fromkeys([tag, *(tags if tags is not None else ['NORMAL'])]))
+    tags = [str(t).upper() for t in (tags or [])]
     bad = [t for t in tags if not re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
     if bad:
         raise ValueError('теги: латиница, цифры, подчёркивание — ' + ', '.join(bad))
-    return {'mode': 'balancer', 'tags': tags[:10],
+    return list(dict.fromkeys(tags))[:10]
+
+
+def host_options(location: str, mode: str = 'simple', tags: str | list | None = None, balancer_tag: str = '',
+                 balancer_remark: str = '', balancer_template: str | None = None) -> dict:
+    """Как регистрировать хосты:
+    simple   — видимые, без тегов;
+    normal   — видимые, с тегом NORMAL (общий балансировщик по всем странам, уже настроен в панели);
+    balancer — скрытые, с тегом страны (+NORMAL), и балансировщик страны: шаблон Balancer_<тег> и видимый хост."""
+    if mode == 'normal':
+        return {'mode': 'normal', 'hidden': False, 'tags': _tags(tags if tags else ['NORMAL'])}
+    if mode != 'balancer':
+        return {'mode': 'simple', 'hidden': False, 'tags': []}
+    tag = (balancer_tag or re.sub(r'[^A-Za-z0-9_]', '', location) or 'NODES').upper()
+    if not re.fullmatch(r'[A-Z0-9_]{1,30}', tag):
+        raise ValueError('тег балансировщика: латиница, цифры, подчёркивание')
+    tags = _tags([tag, *(_tags(tags) if tags is not None else ['NORMAL'])])
+    return {'mode': 'balancer', 'hidden': True, 'tags': tags,
             'balancer': {'tag': tag, 'remark': balancer_remark or DEFAULT_BALANCER_REMARK, 'template': balancer_template}}
 
 
