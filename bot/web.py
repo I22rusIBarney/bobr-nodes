@@ -22,7 +22,13 @@ from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
-          'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2'}  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
+          'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
+          'fx.js': 'application/javascript'}
+# оформление, как в bcloud: фон и сезонные эффекты (auto — по календарю)
+THEME_BGS = ('none', 'aurora', 'night', 'ocean', 'sunset', 'forest', 'image')
+THEME_EFFECTS = ('auto', 'none', 'snow', 'newyear', 'halloween', 'leaves', 'hearts', 'flowers', 'confetti')
+IMG_TYPES = {b'\xff\xd8\xff': ('jpg', 'image/jpeg'), b'\x89PNG\r\n\x1a\n': ('png', 'image/png'), b'RIFF': ('webp', 'image/webp')}
+BG_MAX = 4 * 1024 * 1024
 
 
 def validate_init_data(init_data: str, bot_token: str, max_age_s: int = 86400, now: float | None = None) -> dict | None:
@@ -83,7 +89,8 @@ def client_ip(request) -> str:
 
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
-              bot_username: str = '', security=None) -> web.Application:
+              bot_username: str = '', security=None, data_dir: str | Path = 'data') -> web.Application:
+    media = Path(data_dir) / 'media'
     fails: dict[str, list[float]] = {}
 
     @web.middleware
@@ -167,6 +174,62 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def health(_):
         return J({'ok': True})
 
+    def bg_file() -> Path | None:
+        return next((f for f in (media / f'bg.{e}' for e, _ in IMG_TYPES.values()) if f.exists()), None)
+
+    @r.get('/media/bg')
+    async def media_bg(_):  # картинка фона; без авторизации, как и статика: её грузит CSS
+        f = bg_file()
+        if not f:
+            raise web.HTTPNotFound()
+        ctype = next(t for e, t in IMG_TYPES.values() if f.suffix == '.' + e)
+        return web.FileResponse(f, headers={'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400'})
+
+    def theme() -> dict:
+        bg, effect = store.get('theme_bg') or 'none', store.get('theme_effect') or 'auto'
+        return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
+                'image': store.get('theme_bg_image') or ''}
+
+    @r.post('/api/theme')
+    async def theme_save(request):
+        data = await body(request)
+        if 'bg' in data:
+            if data['bg'] not in THEME_BGS or (data['bg'] == 'image' and not bg_file()):
+                raise ApiError('Такого фона нет')
+            store.set('theme_bg', data['bg'])
+        if 'effect' in data:
+            if data['effect'] not in THEME_EFFECTS:
+                raise ApiError('Такого эффекта нет')
+            store.set('theme_effect', data['effect'])
+        return J(theme())
+
+    @r.put('/api/theme/background')
+    async def theme_bg_upload(request):
+        data = await request.content.read(BG_MAX + 1)
+        if not data:
+            raise ApiError('Файл пустой.')
+        if len(data) > BG_MAX:
+            raise ApiError('Картинка больше 4 МБ. Уменьшите её и загрузите снова.')
+        kind = next((v for sig, v in IMG_TYPES.items() if data.startswith(sig) and (sig != b'RIFF' or data[8:12] == b'WEBP')), None)
+        if not kind:
+            raise ApiError('Подойдут JPG, PNG или WebP.')
+        media.mkdir(parents=True, exist_ok=True)
+        for e, _ in IMG_TYPES.values():
+            (media / f'bg.{e}').unlink(missing_ok=True)
+        (media / f'bg.{kind[0]}').write_bytes(data)
+        store.set('theme_bg_image', f'/media/bg?v={int(time.time())}')
+        store.set('theme_bg', 'image')
+        return J(theme())
+
+    @r.delete('/api/theme/background')
+    async def theme_bg_delete(_):
+        for e, _t in IMG_TYPES.values():
+            (media / f'bg.{e}').unlink(missing_ok=True)
+        store.set('theme_bg_image', '')
+        if store.get('theme_bg') == 'image':
+            store.set('theme_bg', 'none')
+        return J(theme())
+
     # ── состояние и настройки ──
     def settings_view() -> dict:
         out = {}
@@ -198,7 +261,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         jobs = store.jobs(1000)
         return J({'settings': settings_view(), 'profiles': [profile_summary(p, jobs) for p in store.profiles()],
                   'issues': issues(), 'bot_username': bot_username,
-                  'security': security.info() if security else None,
+                  'security': security.info() if security else None, 'theme': theme(),
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},

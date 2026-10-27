@@ -71,7 +71,7 @@ async def main():
     watch = Watch(store, bot, admins, data_dir)
     watch_task = asyncio.create_task(watch.run())  # входы по SSH и блокировки fail2ban на сервере бота
     sync_task = asyncio.create_task(runner.sync_loop())  # серверы, удалённые в bcloud, — убрать из панели
-    app = build_web(store, runner, token, admins, public_url, me.username, security=watch)
+    app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()

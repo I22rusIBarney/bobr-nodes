@@ -68,6 +68,7 @@
 <body>
 <div id="root"></div>
 <script src="/static/ui.js"></script>
+<script src="/static/fx.js"></script>
 <script>
 UI.init();
 const { h, row, group, icon } = UI;
@@ -84,7 +85,17 @@ const title = (t, back) => [UI.nav.backLink(back || 'Bobr Nodes'), h('h1', { cla
 
 async function load() {
   try { ST = await api('state'); } catch (e) { ST = { error: e.message }; }
+  if (ST.theme) applyTheme(ST.theme);
   UI.nav.refresh();
+}
+// оформление: фон и эффект перезапускаются, только если что-то поменялось
+let themeKey = '';
+function applyTheme(t) {
+  const key = [t.bg, t.image, t.effect].join('|');
+  if (key === themeKey || !window.FX) return;
+  themeKey = key;
+  FX.background(t.bg, t.bg === 'image' ? t.image : null);
+  FX.effect(t.effect);
 }
 
 // длинное значение — середина в многоточие: начало и конец домена важнее
@@ -109,7 +120,8 @@ function home() {
   v.append(group(null, [
     row({ title: 'Задачи', status: jobsStatus, detail: jobsStatus ? null : String(j.done || ''), onClick: () => UI.nav.push(jobsView) }),
     row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }),
-    row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } })]));
+    row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }),
+    row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })]));
   const sec = ST.security || {}, hd = sec.hardened;
   const ok = k => s[k] && s[k].set;
   const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
@@ -119,6 +131,45 @@ function home() {
     row({ title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ title: 'Gemini', status: conn(ok('gemini_key'), null), detail: ok('gemini_key') ? null : 'не задан', onClick: () => UI.nav.push(geminiView) }),
     row({ title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })]));
+  return v;
+}
+
+// ───────── оформление ─────────
+function themeView() {
+  const t = ST.theme;
+  const v = h('div', {}, ...title('Оформление'));
+  if (!window.FX) { v.append(h('div', { class: 'notice bad' }, 'Не загрузился модуль оформления. Обновите страницу.')); return v; }
+  const save = async patch => {
+    const r = await UI.run(() => api('theme', 'POST', patch));
+    if (r) { ST.theme = r; applyTheme(r); UI.haptic('select'); UI.nav.refresh(); }
+  };
+  const file = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', hidden: true });
+  file.onchange = async () => {
+    const f = file.files[0]; file.value = '';
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) { UI.alert('Картинка больше 4 МБ. Уменьшите её и загрузите снова.'); return; }
+    const r = await UI.run(async () => {
+      const res = await fetch('/api/theme/background', { method: 'PUT', headers: { 'X-Init-Data': UI.initData(), 'Content-Type': f.type || 'application/octet-stream' }, body: f });
+      let j = null; try { j = await res.json(); } catch (e) {}
+      if (!res.ok) throw new Error(UI.errText(j, res.status));
+      return j;
+    }, 'Картинка загружена');
+    if (r) { ST.theme = r; applyTheme(r); UI.nav.refresh(); }
+  };
+  const sw = k => k === 'image' ? (t.image ? `center / cover url("${t.image}")` : 'var(--surface-2)') : k === 'none' ? 'var(--bg)' : FX.BACKGROUNDS[k].dark;
+  const tiles = [...Object.keys(FX.BACKGROUNDS), 'image'].map(k => h('button', { class: 'tile', type: 'button', 'aria-pressed': String(t.bg === k),
+    onclick: () => { if (k === 'image' && !t.image) file.click(); else if (t.bg !== k) save({ bg: k }); } },
+    h('span', { class: 'sw', style: 'background:' + sw(k) }, k === 'image' && !t.image ? h('span', { class: 'plus' }, icon('plus')) : null), FX.BG_NAMES[k]));
+  v.append(h('div', { class: 'group-h' }, 'Фон'), h('div', { class: 'tiles' }, tiles), file);
+  if (t.image) v.append(group(null, [
+    act('Заменить картинку', () => file.click()),
+    act('Удалить картинку', async () => { const r = await UI.run(() => api('theme/background', 'DELETE'), 'Картинка удалена'); if (r) { ST.theme = r; applyTheme(r); UI.nav.refresh(); } }, 'destructive')],
+    'JPG, PNG или WebP до 4 МБ. Поверх картинки — лёгкое затемнение, чтобы текст читался.'));
+  const now = t.effect === 'auto' ? FX.seasonal(new Date()) : t.effect;
+  v.append(group('Эффект', Object.keys(FX.EFFECT_NAMES).map(k => row({ title: FX.EFFECT_NAMES[k], cls: 'wrap', chevron: false,
+    sub: k === 'auto' ? 'Новый год 15.12–14.01, Хэллоуин 24.10–01.11, 14 февраля, 8 марта, снег зимой, листопад осенью' : null,
+    right: t.effect === k ? icon('check', 'check') : null, onClick: () => { if (t.effect !== k) save({ effect: k }); } })),
+    `Сейчас: ${FX.EFFECT_NAMES[now].toLowerCase()}. Эффекты не мешают нажатиям и выключаются, если в системе включено «Уменьшение движения».`));
   return v;
 }
 

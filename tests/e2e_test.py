@@ -189,7 +189,7 @@ async def main():
     from bot.web import build_web
     from bot.security import Watch
     watch = Watch(store, bot, {1}, TMP, every=0)
-    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch)
+    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
@@ -276,6 +276,23 @@ async def main():
     page = await web.get('/admin')
     ok(page.status == 200 and 'Bobr Nodes' in await page.text(), 'страница админки отдаётся')
     ok((await web.get('/static/ui.css')).status == 200 and (await web.get('/static/../main.py')).status == 404, 'статика только своя')
+    ok((await web.get('/static/fx.js')).status == 200, 'модуль оформления отдаётся')
+    st, js = await wapi('state')
+    ok(js['theme'] == {'bg': 'none', 'effect': 'auto', 'image': ''}, 'оформление по умолчанию: без фона, эффект по календарю')
+    ok((await wapi('theme', 'POST', {'effect': 'rm -rf'}))[0] == 400 and (await wapi('theme', 'POST', {'bg': 'image'}))[0] == 400, 'чужой эффект и фон без картинки отклонены')
+    st, js = await wapi('theme', 'POST', {'bg': 'night', 'effect': 'snow'})
+    ok(st == 200 and js['bg'] == 'night' and js['effect'] == 'snow', 'фон и эффект сохраняются')
+    r = await web.put('/api/theme/background', data=b'not an image', headers=H)
+    ok(r.status == 400 and 'JPG, PNG' in (await r.json())['detail'], 'не картинка отклонена')
+    png = b'\x89PNG\r\n\x1a\n' + b'\0' * 64
+    r = await web.put('/api/theme/background', data=png, headers={**H, 'Content-Type': 'image/png'})
+    js = await r.json()
+    ok(r.status == 200 and js['bg'] == 'image' and js['image'].startswith('/media/bg'), 'своя картинка загружается и становится фоном')
+    rb = await web.get('/media/bg')
+    ok(rb.status == 200 and rb.headers['Content-Type'] == 'image/png' and await rb.read() == png, 'картинка фона отдаётся')
+    st, js = await wapi('theme/background', 'DELETE')
+    ok(js['bg'] == 'none' and not js['image'] and (await web.get('/media/bg')).status == 404, 'картинка удаляется, фон сбрасывается')
+    await wapi('theme', 'POST', {'effect': 'auto'})
 
     out = await say('/start')
     ok('Чтобы начать' in last(out) and 'web_app' in buttons() and 'nodes.test/admin' in buttons(), 'чат: меню с кнопкой панели, что настроить')
