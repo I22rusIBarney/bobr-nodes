@@ -22,7 +22,9 @@ class World:
         self.profiles: list[dict] = []
         self.nodes: list[dict] = []
         self.hosts: list[dict] = []
-        self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []}}
+        self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
+                       '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
+        self.templates: list[dict] = []
         self.decoy = None  # без cookie: None — 404 JSON, 'html' — 200 со страницей-заглушкой, 'redirect' — 302
         self.lock = threading.Lock()
 
@@ -107,6 +109,12 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 return self.send(200, {'response': W.nodes})
             if p == '/api/hosts':
                 return self.send(200, {'response': W.hosts})
+            if p == '/api/internal-squads':
+                return self.send(200, {'response': {'total': len(W.squads), 'internalSquads': [
+                    dict(uuid=u, name=v['name'], info={'membersCount': 0, 'inboundsCount': len(v['inbounds'])}, inbounds=v['inbounds'])
+                    for u, v in W.squads.items()]}})
+            if p == '/api/subscription-templates':
+                return self.send(200, {'response': {'total': len(W.templates), 'templates': W.templates}})
             if p.startswith('/api/internal-squads/'):
                 u = p.rsplit('/', 1)[1]
                 return self.send(200, {'response': dict(uuid=u, **W.squads[u])})
@@ -130,9 +138,16 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     n = dict(uuid=str(uuid.uuid4()), **b)
                     W.nodes.append(n)
                     return self.send(201, {'response': n})
+                if p == '/api/subscription-templates':
+                    assert b['templateType'] == 'XRAY_JSON'
+                    t = dict(uuid=str(uuid.uuid4()), name=b['name'], templateType=b['templateType'], templateJson=None, tags=[])
+                    W.templates.append(t)
+                    return self.send(201, {'response': t})
                 if p == '/api/hosts':
                     assert b['alpn'] == 'h2,http/1.1' and b['securityLayer'] == 'TLS' and b['sni'] == b['address']
-                    h = dict(uuid=str(uuid.uuid4()), **b)
+                    import re as _re
+                    assert all(_re.fullmatch(r'[A-Z0-9_:]+', t) for t in b.get('tags', []))
+                    h = {'uuid': str(uuid.uuid4()), 'xrayJsonTemplateUuid': None, 'isHidden': False, 'tags': [], **b}
                     W.hosts.append(h)
                     return self.send(201, {'response': h})
             self.send(404, {})
@@ -154,6 +169,10 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     return self.send(200, {'response': pr})
                 if p == '/api/nodes':
                     return self.send(200, {'response': {}})
+                if p == '/api/subscription-templates':
+                    t = next(x for x in W.templates if x['uuid'] == b['uuid'])
+                    t['templateJson'] = b['templateJson']
+                    return self.send(200, {'response': t})
                 if p == '/api/internal-squads':
                     W.squads[b['uuid']]['inbounds'] = [dict(uuid=x) for x in b['inbounds']]
                     return self.send(200, {'response': {}})

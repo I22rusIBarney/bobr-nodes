@@ -1,0 +1,213 @@
+{
+  "dns": {
+    "servers": [
+      "1.1.1.1",
+      "1.0.0.1",
+      "8.8.8.8"
+    ],
+    "queryStrategy": "UseIPv4"
+  },
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "protocol": [
+          "bittorrent"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:doubleclick.net",
+          "domain:googlesyndication.com",
+          "domain:googleadservices.com",
+          "domain:adservice.google.com",
+          "domain:ads.facebook.com",
+          "geosite:category-ads"
+        ],
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "full:example.org",
+          "geosite:github",
+          "geosite:youtube",
+          "geosite:telegram"
+        ],
+        "balancerTag": "Main_Balancer"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:ru",
+          "domain:su",
+          "domain:xn--p1ai",
+          "domain:yandex.com",
+          "domain:yandex.net",
+          "domain:ya.ru",
+          "domain:yastatic.net",
+          "domain:vk.com",
+          "domain:vk.me",
+          "domain:userapi.com",
+          "domain:ok.ru",
+          "domain:mycdn.me",
+          "domain:mail.ru",
+          "domain:gosuslugi.ru",
+          "domain:sberbank.ru",
+          "domain:sber.ru",
+          "domain:tbank.ru",
+          "domain:tinkoff.ru",
+          "domain:tinkoff.com",
+          "domain:tinkoff.io",
+          "domain:t-tech.team",
+          "domain:vtb.ru",
+          "domain:alfabank.ru",
+          "domain:ozon.ru",
+          "domain:ozon.com",
+          "domain:ozonusercontent.com",
+          "domain:wildberries.ru",
+          "domain:wb.ru",
+          "domain:wbstatic.net",
+          "domain:wbx-content.com",
+          "domain:avito.ru",
+          "domain:avito.st",
+          "domain:2gis.ru",
+          "domain:2gis.com",
+          "domain:terratraf.io",
+          "domain:gravityfield.ai",
+          "domain:diginetica.net",
+          "geosite:private",
+          "geosite:category-ru"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "ip": [
+          "77.88.8.8",
+          "geoip:ru",
+          "127.0.0.0/8",
+          "10.0.0.0/8",
+          "172.16.0.0/12",
+          "192.168.0.0/16",
+          "169.254.0.0/16",
+          "::1/128",
+          "fc00::/7",
+          "fe80::/10"
+        ],
+        "type": "field",
+        "outboundTag": "direct"
+      },
+      {
+        "ip": [
+          "1.1.1.1",
+          "1.0.0.1",
+          "8.8.8.8"
+        ],
+        "port": 53,
+        "type": "field",
+        "network": "tcp,udp",
+        "outboundTag": "direct"
+      },
+      {
+        "ip": [
+          "geoip:private"
+        ],
+        "type": "field",
+        "outboundTag": "block"
+      },
+      {
+        "type": "field",
+        "network": "tcp,udp",
+        "balancerTag": "Main_Balancer"
+      }
+    ],
+    "balancers": [
+      {
+        "tag": "Main_Balancer",
+        "selector": [
+          "pl"
+        ],
+        "strategy": {
+          "type": "random"
+        }
+      }
+    ],
+    "domainMatcher": "hybrid",
+    "domainStrategy": "AsIs"
+  },
+  "inbounds": [
+    {
+      "tag": "socks",
+      "port": 10808,
+      "listen": "127.0.0.1",
+      "protocol": "socks",
+      "settings": {
+        "udp": true,
+        "auth": "noauth"
+      },
+      "sniffing": {
+        "enabled": true,
+        "routeOnly": false,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    },
+    {
+      "tag": "http",
+      "port": 10809,
+      "listen": "127.0.0.1",
+      "protocol": "http",
+      "settings": {
+        "allowTransparent": false
+      },
+      "sniffing": {
+        "enabled": true,
+        "routeOnly": false,
+        "destOverride": [
+          "http",
+          "tls",
+          "quic"
+        ]
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "remnawave": {
+    "injectHosts": [
+      {
+        "selector": {
+          "type": "tagRegex",
+          "pattern": "^PL$"
+        },
+        "tagPrefix": "pl",
+        "selectFrom": "ALL"
+      }
+    ]
+  },
+  "burstObservatory": {
+    "pingConfig": {
+      "timeout": "5s",
+      "interval": "20s",
+      "sampling": 3,
+      "destination": "http://www.gstatic.com/generate_204",
+      "connectivity": ""
+    },
+    "subjectSelector": [
+      "pl"
+    ]
+  }
+}

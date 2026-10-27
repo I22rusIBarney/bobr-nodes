@@ -106,18 +106,53 @@ async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: i
     return doms
 
 
+DEFAULT_REMARK = '{flag} {country} {n}'
+DEFAULT_BALANCER_REMARK = '{flag} {country}'
+
+
+def render_remark(tpl: str, loc: dict, name: str, domain: str, i: int) -> str:
+    m = re.search(r'(\d+)$', name)
+    n = m.group(1) if m else str(i)
+    out = (tpl or DEFAULT_REMARK).replace('{flag}', loc.get('flag', '')).replace('{country}', loc.get('name', '')) \
+        .replace('{n}', n).replace('{name}', name).replace('{domain}', domain)
+    return ' '.join(out.split())[:100] or name
+
+
+def host_options(location: str, mode: str = 'simple', tags: str | list | None = None, balancer_tag: str = '',
+                 balancer_remark: str = '', balancer_template: str | None = None) -> dict:
+    """Как регистрировать хосты: обычные или скрытые с тегами + общий хост-балансировщик."""
+    if mode != 'balancer':
+        return {'mode': 'simple'}
+    tag = (balancer_tag or re.sub(r'[^A-Za-z0-9_]', '', location) or 'NODES').upper()
+    if not re.fullmatch(r'[A-Z0-9_]{1,30}', tag):
+        raise ValueError('тег балансировщика: латиница, цифры, подчёркивание')
+    if isinstance(tags, str):
+        tags = [t for t in re.split(r'[\s,]+', tags.upper()) if t]
+    tags = list(dict.fromkeys([tag, *(tags if tags is not None else ['NORMAL'])]))
+    bad = [t for t in tags if not re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
+    if bad:
+        raise ValueError('теги: латиница, цифры, подчёркивание — ' + ', '.join(bad))
+    return {'mode': 'balancer', 'tags': tags[:10],
+            'balancer': {'tag': tag, 'remark': balancer_remark or DEFAULT_BALANCER_REMARK, 'template': balancer_template}}
+
+
 async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int,
-                      period: str, domains: list[str]) -> list[int]:
+                      period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
+                      host: dict | None = None) -> list[int]:
     q = quote(cat, location, idx, period, len(domains))
     loc, offer = q['loc'], q['offer']
     batch = secrets.token_hex(4)
     cc = location.upper() if re.fullmatch(r'[a-z]{2}', location) else ''
     ids = []
-    for dom in domains:
+    host = host or {'mode': 'simple'}
+    if host.get('mode') == 'balancer':
+        host = {**host, 'balancer': {**host['balancer'], 'remark': render_remark(host['balancer']['remark'], loc, '', '', 1)}}
+    for i, dom in enumerate(domains, 1):
         name = naming.node_name(dom)
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
-                'remark': f'{loc["flag"]} {loc["name"]} {name}'.strip(), 'password': gen_password(),
+                'remark': render_remark(remark, loc, name, dom, i), 'password': gen_password(),
+                'host': host, 'squads': squads,
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)

@@ -133,7 +133,7 @@ function otherView() {
 }
 
 // ───────── группа ─────────
-const GJ = {};
+const GJ = {}, PS = {};
 function groupView(pid) {
   const g = ST.profiles.find(p => p.id === pid);
   if (!g) return h('div', {}, ...title('Группа'), h('div', { class: 'notice' }, 'Группа удалена'));
@@ -154,7 +154,14 @@ function groupView(pid) {
     return row({ title: j.domain, sub: j.status === 'failed' ? j.error.slice(0, 100) : `${j.flag} ${j.loc_name} · ${j.status === 'deploying' ? (STAGE[j.stage] || j.spec) : j.spec}`,
       right: badge(st, cls), onClick: () => { delete JOB[j.id]; UI.nav.push(() => jobView(j.id)); } });
   })));
-  v.append(group(null, [row({ icon: 'gear', tile: '#8E8E93', title: 'Настройки группы', sub: 'панель, клиент bcloud, Cloudflare, домены', onClick: () => openProfile(pid) })]));
+  const st = PS[pid];
+  if (st === undefined) { PS[pid] = null; api('profiles/' + pid + '/check', 'POST').then(r => { PS[pid] = r; UI.nav.refresh(); }).catch(e => { PS[pid] = { ok: false, message: e.message }; UI.nav.refresh(); }); }
+  const conn = row({ icon: 'bolt', tile: st && st.ok ? '#34C759' : st ? '#FF3B30' : '#8E8E93', title: 'Панель Remnawave', cls: 'wrap',
+    sub: st ? st.message.replace(/^Панель отвечает: /, '') : 'проверяю связь…',
+    right: st ? badge(st.ok ? 'На связи' : 'Нет связи', st.ok ? 'ok' : 'bad') : null,
+    onClick: () => { delete PS[pid]; UI.nav.refresh(); } });
+  v.insertBefore(group(null, [conn]), v.children[3] || null);
+  v.append(group(null, [row({ icon: 'gear', tile: '#8E8E93', title: 'Настройки группы', sub: 'панель, клиент bcloud, Cloudflare, домены', onClick: () => { delete PS[pid]; openProfile(pid); } })]));
   return v;
 }
 
@@ -220,7 +227,9 @@ function profileView(p) {
 // ───────── развёртывание ─────────
 let D = null;
 function fetchCat() {
-  const d = D; d.cat = null; d.err = null; d.idx = null;
+  const d = D; d.cat = null; d.err = null; d.idx = null; d.meta = null; d.metaErr = null; d.squads = null;
+  api('profiles/' + d.pid + '/panel').then(m => { if (D !== d) return; d.meta = m; d.squads = new Set(m.default_squads); UI.nav.refresh(); })
+    .catch(e => { if (D === d) { d.metaErr = e.message; UI.nav.refresh(); } });
   api('catalog?pid=' + d.pid).then(c => { if (D !== d) return; d.cat = c; if (!c.locations.some(l => l.code === d.loc)) d.loc = c.locations[0] && c.locations[0].code; UI.nav.refresh(); })
     .catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
 }
@@ -278,6 +287,48 @@ function deployView(pid) {
     h('div', { style: 'padding:0 0 10px' }, modes.length > 1 ? h('div', { style: 'padding:10px 12px 0' }, UI.segmented(modes, D.mode, x => { D.mode = x; reset(); UI.nav.refresh(); })) : null),
     h('div', { class: 'list' }, domBox),
     h('div', { class: 'group-f' }, D.mode === 'auto' ? `Шаблон профиля, например ${(prof.base_domain ? 'de1.' + prof.base_domain : '')}. Занятые имена пропускаются.` : (prof.base_domain ? '' : 'Для автоимён задайте «Домен для автоимён» в профиле. ') + 'Зоны доменов должны быть в Cloudflare.')));
+  // хосты в панели
+  const sameLoc = D.count >= 2;
+  const defTag = (D.loc || '').replace(/[^A-Za-z0-9_]/g, '').toUpperCase();
+  if (!D.hostTouched) D.hostMode = (sameLoc || (D.meta && D.meta.templates.some(t => t.balancer_tag === defTag))) ? 'balancer' : 'simple';
+  if (D.remark === undefined) D.remark = '{flag} {country} {n}';
+  if (D.tagTouched !== true) D.tag = defTag;
+  if (D.tags === undefined) D.tags = 'NORMAL';
+  if (D.bremark === undefined) D.bremark = '{flag} {country}';
+  const input = (val, ph, on, mono) => { const i = h('input', { type: 'text', placeholder: ph, autocapitalize: 'off', spellcheck: false, style: 'text-align:left' + (mono ? ';font-family:ui-monospace,monospace' : '') }); i.value = val; i.addEventListener('input', () => on(i.value)); return i; };
+  const preview = (tpl, n) => (tpl || '').replace('{flag}', loc.flag).replace('{country}', loc.name).replace('{n}', String(n)).replace('{name}', D.domains[0] ? D.domains[0].split('.')[0] : '').replace('{domain}', D.domains[0] || '').replace(/\s+/g, ' ').trim();
+  const hostRows = [];
+  if (D.metaErr) hostRows.push(row({ cls: 'wrap', title: 'Панель недоступна', sub: D.metaErr + ' Сквады возьмём из настроек группы.' }));
+  else if (!D.meta) hostRows.push(h('div', { class: 'skeleton' }));
+  else if (D.meta.squads.length) D.meta.squads.forEach(q => hostRows.push(row({ title: q.name, right: UI.toggle(D.squads.has(q.uuid), on => { on ? D.squads.add(q.uuid) : D.squads.delete(q.uuid); }, q.name) })));
+  else hostRows.push(row({ title: 'В панели нет сквадов' }));
+  v.append(group('Сквады', hostRows, 'Inbound новых нод добавится в отмеченные сквады — только их пользователи увидят ноды (и балансировщик).'));
+  const remarkIn = input(D.remark, '{flag} {country} {n}', x => { D.remark = x; prevEl.textContent = 'Например: ' + preview(D.remark, 1); });
+  const prevEl = h('div', { class: 'group-f' }, 'Например: ' + preview(D.remark, 1) + '. {flag} — флаг, {country} — страна, {n} — номер ноды, {name}, {domain}.');
+  const hostBox = h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Хосты в панели'),
+    h('div', { style: 'padding:0 12px 12px' }, UI.segmented([{ value: 'simple', label: 'Обычные' }, { value: 'balancer', label: 'Балансировщик' }], D.hostMode, x => { D.hostMode = x; D.hostTouched = true; UI.nav.refresh(); })),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), remarkIn)),
+    prevEl);
+  v.append(hostBox);
+  if (D.hostMode === 'balancer') {
+    const tpls = (D.meta && D.meta.templates) || [];
+    const tag = (D.tag || defTag).toUpperCase();
+    const existing = tpls.find(t => t.balancer_tag === tag);
+    const bases = tpls.filter(t => t.balancer_tag);
+    if (!D.btpl || !bases.some(t => t.uuid === D.btpl)) D.btpl = (existing || bases[0] || {}).uuid;
+    const brows = [
+      h('label', { class: 'field stack' }, h('label', {}, 'Тег балансировщика'), input(D.tag, defTag, x => { D.tag = x.toUpperCase(); D.tagTouched = true; }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Ещё теги хостов нод'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста-балансировщика'), input(D.bremark, '{flag} {country}', x => { D.bremark = x; })),
+    ];
+    if (!existing && bases.length > 1) brows.push(h('div', { style: 'padding:10px 12px' }, h('div', { class: 'group-h', style: 'margin:0 4px 8px' }, 'Скопировать шаблон'),
+      UI.chips(bases.map(t => ({ value: t.uuid, label: t.name })), D.btpl, x => { D.btpl = x; })));
+    const note = !D.meta ? '' : existing
+      ? `Балансировщик ${tag} уже есть в панели (шаблон «${existing.name}») — новые ноды добавятся в него сами.`
+      : bases.length ? `Создам шаблон Balancer_${tag.toLowerCase()} копией «${(bases.find(t => t.uuid === D.btpl) || bases[0]).name}» и видимый хост-балансировщик.`
+      : 'В панели нет Xray-шаблона с балансировщиком (remnawave.injectHosts) — создайте один вручную, дальше бот будет копировать его.';
+    v.append(group('Балансировщик', brows, note + ' Хосты нод — скрытые, с тегами ' + [tag, ...String(D.tags || '').toUpperCase().split(/[\s,]+/).filter(Boolean)].filter((x, i, a) => a.indexOf(x) === i).join(', ') + '.'));
+  }
   // итог
   const per = D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 };
   const offer = loc.offers.find(o => o.idx === D.idx);
@@ -294,7 +345,9 @@ function deployView(pid) {
   go.onclick = UI.busy(go, async () => {
     const ok = await UI.ask({ title: 'Купить и установить?', message: `${D.count} × ${loc.name}, ${rubK(total)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
     if (!ok) return;
-    const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, location: D.loc, idx: D.idx, period: D.period, domains: D.domains }), 'Задачи запущены');
+    const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, location: D.loc, idx: D.idx, period: D.period, domains: D.domains,
+      squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
+      balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });

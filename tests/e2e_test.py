@@ -345,6 +345,59 @@ async def main():
     st, js = await wapi(f'jobs?pid={gid}')
     ok([x['id'] for x in js['jobs']] == [cj['id']], 'серверы группы отдельно от других групп')
 
+    # ── балансировщик: 2 ноды в Польше, шаблон копируется с базового (конфиг пользователя), хост-балансировщик один
+    base_tpl = json.load(open(os.path.join(os.path.dirname(__file__), 'balancer_base.json')))
+    world.templates.append({'uuid': '33333333-3333-3333-3333-333333333333', 'name': 'Balancer_pl', 'templateType': 'XRAY_JSON',
+                            'templateJson': base_tpl, 'tags': []})
+    world.templates.append({'uuid': '44444444-4444-4444-4444-444444444444', 'name': 'Default', 'templateType': 'XRAY_JSON',
+                            'templateJson': {'outbounds': []}, 'tags': []})
+    st, meta = await wapi(f'profiles/{pid}/panel')
+    ok(st == 200 and {q['name'] for q in meta['squads']} == {'Default', 'Premium'}
+       and meta['default_squads'] == ['11111111-1111-1111-1111-111111111111']
+       and [t['balancer_tag'] for t in meta['templates']] == ['PL', None], f'панель: сквады и шаблоны с тегом балансировщика: {meta}')
+    st, js = await wapi(f'profiles/{pid}/check', 'POST')
+    ok(js['ok'], 'статус связи с панелью группы')
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 2})
+    hosts_before = len(world.hosts)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'de', 'idx': 0, 'period': '1m', 'domains': dj['domains'],
+                                           'squads': ['22222222-2222-2222-2222-222222222222'], 'remark': '{flag} Германия {n}',
+                                           'host_mode': 'balancer', 'balancer_tag': 'de', 'tags': 'normal',
+                                           'balancer_remark': '{flag} {country}', 'balancer_template': '33333333-3333-3333-3333-333333333333'})
+    ok(st == 200, f'деплой с балансировщиком: {js}')
+    await runner.wait_all()
+    bj = [store.job(i) for i in js['ids']]
+    ok(all(j['status'] == 'done' for j in bj), f'ноды за балансировщиком развёрнуты: {[j["error"] for j in bj]}')
+    new_hosts = world.hosts[hosts_before:]
+    node_hosts = [h for h in new_hosts if not h.get('xrayJsonTemplateUuid')]
+    bal_hosts = [h for h in new_hosts if h.get('xrayJsonTemplateUuid')]
+    ok(len(node_hosts) == 2 and all(h['isHidden'] and h['tags'] == ['DE', 'NORMAL'] for h in node_hosts),
+       f'хосты нод скрытые, с тегами DE и NORMAL: {[(h["isHidden"], h["tags"]) for h in node_hosts]}')
+    ok(sorted(h['remark'] for h in node_hosts) == sorted(f'🇩🇪 Германия {d.split(".")[0][2:]}' for d in dj['domains']),
+       f'названия хостов по шаблону: {[h["remark"] for h in node_hosts]}')
+    detpl = next((t for t in world.templates if t['name'] == 'Balancer_de'), None)
+    ok(detpl and detpl['templateJson']['remnawave']['injectHosts'][0]['selector']['pattern'] == '^DE$'
+       and detpl['templateJson']['routing']['balancers'][0]['selector'] == ['de']
+       and detpl['templateJson']['burstObservatory']['subjectSelector'] == ['de']
+       and detpl['templateJson']['routing']['rules'] == base_tpl['routing']['rules'], 'шаблон Balancer_de — копия базового с тегом DE')
+    ok(base_tpl == world.templates[0]['templateJson'], 'исходный шаблон не изменён')
+    ok(len(bal_hosts) == 1 and bal_hosts[0]['xrayJsonTemplateUuid'] == detpl['uuid'] and not bal_hosts[0]['isHidden']
+       and bal_hosts[0]['remark'] == '🇩🇪 Германия', f'один видимый хост-балансировщик: {[(h["remark"]) for h in bal_hosts]}')
+    prem = world.squads['22222222-2222-2222-2222-222222222222']['inbounds']
+    ok(len(prem) == 2, 'inbound нод добавлены в выбранный сквад')
+    # ещё одна нода в DE: шаблон и балансировщик переиспользуются
+    st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 1})
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'de', 'idx': 0, 'period': '1m', 'domains': dj['domains'],
+                                           'host_mode': 'balancer', 'balancer_tag': 'DE'})
+    await runner.wait_all()
+    ok(store.job(js['ids'][0])['status'] == 'done' and sum(1 for t in world.templates if t['name'] == 'Balancer_de') == 1
+       and sum(1 for h in world.hosts if h.get('xrayJsonTemplateUuid') == detpl['uuid']) == 1,
+       'третья нода: шаблон и хост-балансировщик не дублируются')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'de', 'idx': 0, 'period': '1m', 'domains': ['zz9.example.com'],
+                                           'host_mode': 'balancer', 'balancer_tag': 'de-1'})
+    ok(st == 400 and 'тег' in js['detail'], 'неверный тег балансировщика отклонён')
+
     # ── ручные домены: чужая зона и успешная попытка с ошибкой установщика
     await tap('m:deploy')
     out = await tap(f'd:p:{pid}')
@@ -372,7 +425,7 @@ async def main():
     await runner.wait_all()
     j = store.job(j['id'])
     ok(j['status'] == 'done' and len(astra.made) == bought, 'повтор доустановил ноду без новой покупки')
-    ok(len(world.nodes) == 4 and world.nodes[-1]['countryCode'] == 'NL', 'ещё одна нода в панели')
+    ok(world.nodes[-1]['countryCode'] == 'NL', 'ещё одна нода в панели')
 
     # ── перезапуск бота посреди задачи: продолжение
     jid = store.add_job('b', pid, 1, {**j['data'], 'domain': 'nl8.example.com', 'name': 'nl8', 'server_id': None,

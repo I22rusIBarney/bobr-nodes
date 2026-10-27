@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -175,6 +176,51 @@ def wait_dns(domain: str, ip: str, log, timeout=600, every=15):
 
 # ─────────────────────────────── Remnawave ───────────────────────────
 
+TAG_RE = re.compile(r'^[A-Z0-9_]{1,30}$')
+
+
+def balancer_tag_of(template_json) -> str | None:
+    """Тег, хосты с которым подтягивает шаблон-балансировщик (remnawave.injectHosts tagRegex ^TAG$), или None."""
+    try:
+        for e in template_json['remnawave']['injectHosts']:
+            sel = e.get('selector') or {}
+            m = re.fullmatch(r'\^?([A-Za-z0-9_]+)\$?', sel.get('pattern', '')) if sel.get('type') == 'tagRegex' else None
+            if m:
+                return m.group(1).upper()
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
+def make_balancer_template(base: dict, tag: str) -> dict:
+    """Копия шаблона-балансировщика под другой тег: injectHosts ^TAG$ с префиксом tag, селекторы балансиров и наблюдателя."""
+    tag = tag.upper()
+    if not TAG_RE.match(tag):
+        raise StepError('тег балансировщика: латиница, цифры, подчёркивание')
+    t = copy.deepcopy(base)
+    inject = ((t.get('remnawave') or {}).get('injectHosts')) or []
+    if not inject:
+        raise StepError('выбранный шаблон не похож на балансировщик: нет remnawave.injectHosts')
+    old = [e.get('tagPrefix') for e in inject if e.get('tagPrefix')]
+    new = tag.lower()
+    for e in inject:
+        e['selector'] = {'type': 'tagRegex', 'pattern': f'^{tag}$'}
+        e['tagPrefix'] = new
+        e.setdefault('selectFrom', 'ALL')
+
+    def swap(lst):
+        if not isinstance(lst, list):
+            return [new]
+        out = [new if x in old else x for x in lst]
+        return out if new in out else [new]
+    for b in ((t.get('routing') or {}).get('balancers') or []):
+        b['selector'] = swap(b.get('selector'))
+    for key in ('burstObservatory', 'observatory'):
+        if isinstance(t.get(key), dict) and 'subjectSelector' in t[key]:
+            t[key]['subjectSelector'] = swap(t[key]['subjectSelector'])
+    return t
+
+
 class Panel:
     def __init__(self, url: str, token: str, cookie: str = '', extra_headers: dict | None = None):
         self.url = url.rstrip('/')
@@ -217,6 +263,48 @@ class Panel:
         nodes = len(self.call('GET', '/api/nodes'))
         return f'профилей: {total}, нод: {nodes}'
 
+    def meta(self) -> dict:
+        """Сквады и Xray-шаблоны панели (для выбора при установке)."""
+        squads = [{'uuid': x['uuid'], 'name': x['name']} for x in self.call('GET', '/api/internal-squads')['internalSquads']]
+        tpls = []
+        for t in self.call('GET', '/api/subscription-templates')['templates']:
+            if t.get('templateType') == 'XRAY_JSON':
+                tpls.append({'uuid': t['uuid'], 'name': t['name'], 'balancer_tag': balancer_tag_of(t.get('templateJson'))})
+        return {'squads': squads, 'templates': tpls}
+
+    def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof_uuid: str, inbound_uuid: str,
+                        node: dict, log) -> str:
+        """Шаблон Balancer_<tag> (копия базового с подстановкой тега) и видимый хост-балансировщик с ним.
+        Если они уже есть — ничего не меняем: новые скрытые хосты с тегом подхватятся сами."""
+        tag = tag.upper()
+        tpls = self.call('GET', '/api/subscription-templates')['templates']
+        xray = [t for t in tpls if t.get('templateType') == 'XRAY_JSON']
+        tpl = next((t for t in xray if balancer_tag_of(t.get('templateJson')) == tag), None)
+        if tpl:
+            log(f'панель: шаблон балансировщика для {tag} уже есть — «{tpl["name"]}»')
+        else:
+            base = next((t for t in xray if t['uuid'] == base_uuid), None) if base_uuid else None
+            base = base or next((t for t in xray if balancer_tag_of(t.get('templateJson'))), None)
+            if not base:
+                raise StepError('в панели нет Xray-шаблона с балансировщиком (remnawave.injectHosts), чтобы скопировать его')
+            body = make_balancer_template(base['templateJson'], tag)
+            name = f'Balancer_{tag.lower()}'
+            tpl = self.call('POST', '/api/subscription-templates', {'name': name, 'templateType': 'XRAY_JSON'})
+            tpl = self.call('PATCH', '/api/subscription-templates', {'uuid': tpl['uuid'], 'templateJson': body})
+            log(f'панель: шаблон «{name}» создан из «{base["name"]}»')
+        hosts = self.call('GET', '/api/hosts')
+        bh = next((h for h in hosts if h.get('xrayJsonTemplateUuid') == tpl['uuid']), None)
+        if bh:
+            log(f'панель: хост-балансировщик «{bh["remark"]}» уже есть')
+        else:
+            self.call('POST', '/api/hosts', {
+                'inbound': {'configProfileUuid': prof_uuid, 'configProfileInboundUuid': inbound_uuid},
+                'remark': remark[:100], 'address': node['domain'], 'port': 443, 'sni': node['domain'],
+                'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS',
+                'xrayJsonTemplateUuid': tpl['uuid']})
+            log(f'панель: хост-балансировщик «{remark}» создан')
+        return tpl['uuid']
+
     def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log):
         pname = re.sub(r'[^A-Za-z0-9_ -]', '-', f'NV {node["name"]}')[:30]
         profiles = self.call('GET', '/api/config-profiles')['configProfiles']
@@ -244,18 +332,28 @@ class Panel:
             self.call('POST', '/api/nodes', body)
             log(f'панель: нода «{node["name"]}» создана')
 
+        opts = node.get('host') or {}
+        balancer = opts.get('mode') == 'balancer'
+        tags = [t for t in (opts.get('tags') or []) if TAG_RE.match(t)] if balancer else []
         hosts = self.call('GET', '/api/hosts')
         host = next((h for h in hosts if h['address'] == node['domain']
-                     and h['inbound']['configProfileInboundUuid'] == inbound['uuid']), None)
+                     and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
+                     and not h.get('xrayJsonTemplateUuid')), None)
         if host:
             log('панель: хост уже есть')
         else:
-            self.call('POST', '/api/hosts', {
-                'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbound['uuid']},
-                'remark': (node.get('remark') or node['name'])[:100],
-                'address': node['domain'], 'port': 443, 'sni': node['domain'],
-                'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS'})
-            log('панель: хост создан')
+            body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbound['uuid']},
+                    'remark': (node.get('remark') or node['name'])[:100],
+                    'address': node['domain'], 'port': 443, 'sni': node['domain'],
+                    'alpn': 'h2,http/1.1', 'fingerprint': 'firefox', 'securityLayer': 'TLS'}
+            if balancer:
+                body.update({'isHidden': True, 'tags': tags})
+            self.call('POST', '/api/hosts', body)
+            log('панель: хост создан' + (f' (скрытый, теги {", ".join(tags)})' if balancer else ''))
+        if balancer:
+            b = opts.get('balancer') or {}
+            self.ensure_balancer(b.get('tag') or (tags[0] if tags else 'PL'), b.get('template'),
+                                 b.get('remark') or node.get('remark') or node['name'], prof['uuid'], inbound['uuid'], node, log)
 
         for sq in squads:
             cur = self.call('GET', f'/api/internal-squads/{sq}')
@@ -467,8 +565,11 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
     if rc != 0 or '{' not in raw:
         raise StepError('не удалось прочитать vision-config-profile.json')
     profile = json.loads(raw[raw.index('{'):])
-    squads = [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x] \
-        if isinstance(prof.get('squads'), str) else list(prof.get('squads') or [])
+    if node.get('squads') is not None:
+        squads = list(node['squads'])
+    else:
+        squads = [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x] \
+            if isinstance(prof.get('squads'), str) else list(prof.get('squads') or [])
     with PANEL_LOCK:
         panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log)
 

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import re
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -249,6 +250,17 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def check_profile(request):
         return J(await panel_check(profile_or_404(request.match_info['pid'])))
 
+    @r.get('/api/profiles/{pid}/panel')
+    async def panel_meta(request):
+        """Сквады и Xray-шаблоны панели группы — для выбора при установке."""
+        p = profile_or_404(request.match_info['pid'])
+        try:
+            meta = await asyncio.to_thread(lambda: engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', '')).meta())
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        default = [x for x in re.split(r'[\s,]+', p.get('squads') or '') if x]
+        return J({**meta, 'default_squads': default})
+
     # ── развёртывание ──
     @r.get('/api/catalog')
     async def catalog(request):
@@ -290,8 +302,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if bal < q['total_kop']:
             who = p.get('owner_label') or 'вашего аккаунта'
             raise ApiError(f'Не хватает денег: на балансе {who} {bal / 100:.0f} ₽, нужно {q["total_kop"] / 100:.0f} ₽')
+        squads = b.get('squads')
+        if squads is not None and (not isinstance(squads, list) or not all(isinstance(x, str) for x in squads)):
+            raise ApiError('сквады: список UUID')
+        host = svc.host_options(str(b['location']), b.get('host_mode') or 'simple', b.get('tags'),
+                                str(b.get('balancer_tag') or ''), str(b.get('balancer_remark') or ''), b.get('balancer_template'))
         ids = await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, str(b['location']),
-                                    int(b['idx']), str(b.get('period') or '1m'), domains)
+                                    int(b['idx']), str(b.get('period') or '1m'), domains, squads,
+                                    str(b.get('remark') or '')[:100], host)
         return J({'ids': ids})
 
     # ── задачи ──

@@ -191,6 +191,7 @@ class Runner:
                 await self._set(jid, status='deploying', stage='dns')
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
                         'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
+                        'host': d.get('host'), 'squads': d.get('squads'),
                         'traffic_control': prof.get('traffic_control', True)}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
                          'ssh_pubkey': self.store.get('ssh_pubkey')}
