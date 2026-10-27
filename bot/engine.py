@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -31,6 +32,17 @@ PSI_REF = 'c28177d18a5337419616137400ed0462cf43eb51'
 PSI_SHA256 = 'e41b9aeed9f5f11a2a6f1fe2103a74e075f1703a01bc4d1e5cf734e8cf30f4f3'
 PSI_TAG = 'psiphon-out'
 PSI_DOMAINS = ['domain:google.com', 'domain:googleapis.com', 'domain:gstatic.com', 'domain:googleusercontent.com']
+# vps-warp — WireGuard-туннель WARP на ноде; Xray пускает в него трафик меткой sockopt.mark (одинаково на всех нодах)
+WARP_RAW = 'https://raw.githubusercontent.com/Chara-Freedom/vps-warp'
+WARP_REF = '79f8606acf593813a4d1df3ec3ce89e197360629'
+WARP_SHA256 = '26df0adb90e5a22b26399751b993e4be7142e77d93de2bb1fc7b771731eff502'
+WARP_TAG = 'warp-out'
+WARP_MARK = 255
+WARP_DOMAINS = ['geosite:tiktok', 'domain:cloudflare.com']
+# Final Mask хоста: фрагментация TLS ClientHello на клиенте (часть операторов режет его на 443/TCP)
+FINAL_MASK = {'tcp': [{'type': 'fragment', 'settings': {'length': '10-20', 'packets': 'tlshello', 'interval': '10-20'}}]}
+# дополнения ноды: ключ, название в имени профиля, код в теге inbound
+EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP')]
 INBOUND_TAG = 'Vision-TLS'
 YN = r'[^\n]*\[Д/Н; Enter — Н\]'
 
@@ -219,8 +231,8 @@ def retag(config, old: str, new: str):
     return config
 
 
-def psiphon_rules(raw) -> list[str]:
-    """Список доменов для Psiphon: «google.com» → «domain:google.com»; geosite:/full:/keyword: — как есть."""
+def domain_rules(raw, default: list[str], what: str) -> list[str]:
+    """Список доменов для правила: «google.com» → «domain:google.com»; geosite:/full:/keyword: — как есть."""
     items = re.split(r'[\s,]+', raw) if isinstance(raw, str) else list(raw or [])
     out = []
     for x in items:
@@ -230,10 +242,45 @@ def psiphon_rules(raw) -> list[str]:
         if not re.match(r'(domain|full|keyword|geosite):', x):
             x = 'domain:' + x
         if not re.fullmatch(r'(domain|full|keyword|geosite):[a-z0-9][a-z0-9._@!-]{0,200}', x):
-            raise StepError(f'Psiphon: непонятный домен «{x}»')
+            raise StepError(f'{what}: непонятный домен «{x}»')
         if x not in out:
             out.append(x)
-    return out or list(PSI_DOMAINS)
+    return out or list(default)
+
+
+def psiphon_rules(raw) -> list[str]:
+    return domain_rules(raw, PSI_DOMAINS, 'Psiphon')
+
+
+def warp_rules(raw) -> list[str]:
+    return domain_rules(raw, WARP_DOMAINS, 'WARP')
+
+
+def final_mask(raw):
+    """Final Mask хоста: dict или JSON-строка с объектом. Пусто — маска по умолчанию (фрагментация ClientHello)."""
+    if raw in (None, '', True):
+        return json.loads(json.dumps(FINAL_MASK))
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError as e:
+            raise StepError(f'Final Mask: это не JSON ({e})') from None
+    if not isinstance(raw, dict) or not raw or len(json.dumps(raw)) > 8000:
+        raise StepError('Final Mask: нужен JSON-объект, например {"tcp": [{"type": "fragment", …}]}')
+    return raw
+
+
+def public_port(raw, node_port: int = 2222) -> int | None:
+    """Порт для клиентов: пусто или 443 — стандартный (None), иначе 1024–65535, не порт API ноды."""
+    if raw in (None, '', 443, '443'):
+        return None
+    try:
+        p = int(raw)
+    except (TypeError, ValueError):
+        raise StepError('Порт: число от 1024 до 65535') from None
+    if not 1024 <= p <= 65535 or p == int(node_port or 2222):
+        raise StepError(f'Порт: от 1024 до 65535 и не {node_port or 2222} (порт API ноды)')
+    return p
 
 
 def psiphon_regions(raw) -> str:
@@ -263,6 +310,75 @@ def psiphon_of(config) -> dict | None:
             srv = (st.get('servers') or [st])[0]
             return {'address': srv.get('address'), 'port': int(srv.get('port') or 0)}
     return None
+
+
+def add_warp(config: dict, domains: list[str]) -> dict:
+    """Копия профиля с выходом warp-out (freedom с меткой 255 → таблица vps-warp) и правилом для доменов в конце."""
+    cfg = json.loads(json.dumps(config))
+    cfg['outbounds'] = [o for o in cfg.get('outbounds', []) if o.get('tag') != WARP_TAG] + [
+        {'tag': WARP_TAG, 'protocol': 'freedom', 'settings': {'domainStrategy': 'ForceIPv4v6'},
+         'streamSettings': {'sockopt': {'mark': WARP_MARK}}}]
+    routing = cfg.setdefault('routing', {})
+    routing['rules'] = [r for r in routing.get('rules', []) if r.get('outboundTag') != WARP_TAG] + [
+        {'type': 'field', 'domain': list(domains), 'outboundTag': WARP_TAG}]
+    return cfg
+
+
+def warp_of(config) -> bool:
+    return isinstance(config, dict) and any(o.get('tag') == WARP_TAG for o in config.get('outbounds', []))
+
+
+def features_of(config) -> set[str]:
+    """Какие дополнения уже прописаны в профиле."""
+    return {k for k, f in (('psiphon', psiphon_of(config) is not None), ('warp', warp_of(config))) if f}
+
+
+def apply_extras(config: dict, extras: dict) -> dict:
+    if 'psiphon' in extras:
+        config = add_psiphon(config, extras['psiphon']['out'], extras['psiphon']['domains'])
+    if 'warp' in extras:
+        config = add_warp(config, extras['warp']['domains'])
+    return config
+
+
+def extras_problem(config, extras: dict, pname: str) -> str:
+    """Почему готовый профиль не подходит для этих дополнений ('' — подходит)."""
+    if 'psiphon' in extras:
+        have, want = psiphon_of(config), extras['psiphon']['out']
+        if have is None:
+            return f'в профиле «{pname}» нет выхода {PSI_TAG} — добавьте его в панели или удалите профиль, бот создаст заново'
+        if have != {'address': want['address'], 'port': int(want['port'])}:
+            return (f'Psiphon на ноде слушает {want["address"]}:{want["port"]}, '
+                    f'а профиль «{pname}» ведёт на {have["address"]}:{have["port"]}')
+    if 'warp' in extras and not warp_of(config):
+        return f'в профиле «{pname}» нет выхода {WARP_TAG} — добавьте его в панели или удалите профиль, бот создаст заново'
+    return ''
+
+
+def _strip_extras(name: str, tags: list[str]) -> tuple[str, list[str]]:
+    while True:
+        cut = next((x for _, label, code in EXTRAS for x in (' ' + label, ' ' + code) if name.endswith(x)), None)
+        if not cut:
+            break
+        name = name[:-len(cut)]
+    out = []
+    for t in tags:
+        while any(t.endswith('-' + code) for _, _, code in EXTRAS):
+            t = t.rsplit('-', 1)[0]
+        out.append(t)
+    return name, out
+
+
+def variant(name: str, tags: list[str], feats: set[str]) -> tuple[str, dict[str, str]]:
+    """Имя профиля и теги inbound для набора дополнений, в одном порядке: «NV Vision Psiphon WARP», Vision-NV-PS-WP.
+    Суффиксы прежних дополнений снимаются, так что результат не зависит от того, что включали раньше."""
+    base, btags = _strip_extras(name, tags)
+    labels = [label for key, label, _ in EXTRAS if key in feats]
+    codes = [code for key, _, code in EXTRAS if key in feats]
+    full = ' '.join([base] + labels)
+    if len(full) > 29:  # в панели имя профиля — меньше 30 символов
+        full = (base[:29 - len(' '.join([''] + codes))].rstrip() + ' ' + ' '.join(codes)).strip()
+    return full, {old: '-'.join([b] + codes) for old, b in zip(tags, btags)}
 
 
 def balancer_tag_of(template_json) -> str | None:
@@ -359,7 +475,7 @@ class Panel:
         profiles = [{'uuid': p['uuid'], 'name': p['name'],
                      'inbounds': [{'uuid': i['uuid'], 'tag': i['tag'], 'port': i.get('port'), 'type': i.get('type'),
                                    'security': i.get('security')} for i in p.get('inbounds', [])],
-                     'psiphon': psiphon_of(p.get('config')) is not None}
+                     'psiphon': psiphon_of(p.get('config')) is not None, 'warp': warp_of(p.get('config'))}
                     for p in self.call('GET', '/api/config-profiles')['configProfiles']]
         hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''),
                   'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
@@ -431,34 +547,99 @@ class Panel:
         return new  # UUID нового хоста-балансировщика или None, если он уже был
 
     def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log,
-                 psiphon: dict | None = None):
+                 extras: dict | None = None):
         # Один общий профиль на все ноды: тег Vision-NV (уникален в панели), сертификат — через ссылку CERT_LINK.
-        # Ноды с Psiphon — в своём общем профиле: в нём есть выход psiphon-out, которого на остальных нодах нет.
+        # Ноды с дополнениями (Psiphon, WARP) — в своём общем профиле: там выходы, которых на остальных нодах нет.
+        extras = extras or {}
         tag, pname = SHARED_TAG, SHARED_PROFILE
         profile_config = shared_profile(profile_config, node['domain'])
-        if psiphon:
-            tag, pname = SHARED_TAG + '-PS', SHARED_PROFILE + ' Psiphon'
-            profile_config = add_psiphon(retag(profile_config, SHARED_TAG, tag), psiphon['out'], psiphon['domains'])
+        if extras:
+            pname, tmap = variant(SHARED_PROFILE, [SHARED_TAG], set(extras))
+            tag = tmap[SHARED_TAG]
+            profile_config = apply_extras(retag(profile_config, SHARED_TAG, tag), extras)
         profiles = self.call('GET', '/api/config-profiles')['configProfiles']
         prof = next((p for p in profiles if p['name'] == pname), None)
         if prof:
             # не перезаписываем: изменение профиля перезапускает Xray на всех нодах сразу
             log(f'панель: общий профиль «{pname}» уже есть')
-            if psiphon:
-                have = psiphon_of(prof.get('config'))
-                if have is None:
-                    raise StepError(f'в профиле «{pname}» нет выхода {PSI_TAG} — добавьте его в панели или удалите профиль, бот создаст заново')
-                if have != {'address': psiphon['out']['address'], 'port': int(psiphon['out']['port'])}:
-                    raise StepError(f'Psiphon на ноде слушает {psiphon["out"]["address"]}:{psiphon["out"]["port"]}, '
-                                    f'а профиль «{pname}» ведёт на {have["address"]}:{have["port"]}')
+            problem = extras_problem(prof.get('config'), extras, pname)
+            if problem:
+                raise StepError(problem)
         else:
             prof = self.call('POST', '/api/config-profiles', {'name': pname, 'config': profile_config})
-            log(f'панель: общий профиль «{pname}» создан' +
-                (f', Psiphon для: {", ".join(psiphon["domains"])}' if psiphon else ''))
+            log(f'панель: общий профиль «{pname}» создан' + ''.join(
+                f', {label} для: {", ".join(extras[key]["domains"])}' for key, label, _ in EXTRAS if key in extras))
         inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
             raise StepError(f'в профиле нет inbound {tag}')
         self.attach(node, prof, [inbound], squads, node_port, log, tls=True)
+
+    def node_hosts(self, pnode: dict, domains: set[str]) -> list[dict]:
+        """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP."""
+        active = set((pnode.get('configProfile') or {}).get('activeInbounds') or [])
+        names = {pnode['address']} | set(domains)
+        out = []
+        for h in self.call('GET', '/api/hosts'):
+            if (h.get('inbound') or {}).get('configProfileInboundUuid') not in active:
+                continue
+            mine = pnode['uuid'] in (h.get('nodes') or []) or h.get('address') in names
+            if not mine and h.get('address'):
+                try:
+                    mine = pnode['address'] in {a[4][0] for a in socket.getaddrinfo(h['address'], None, socket.AF_INET)}
+                except OSError:
+                    mine = False
+            if mine:
+                out.append(h)
+        return out
+
+    def upgrade_node(self, pnode: dict, extras: dict, hosts: list[dict], log) -> dict:
+        """Переводит ноду в вариант её профиля с дополнениями: профиль-копия с выходами и правилами,
+        нода, её хосты и сквады — на inbound'ы копии. Остальные ноды старого профиля не задеты."""
+        cp = pnode.get('configProfile') or {}
+        profiles = self.call('GET', '/api/config-profiles')['configProfiles']
+        cur = next((p for p in profiles if p['uuid'] == cp.get('activeConfigProfileUuid')), None)
+        if not cur:
+            raise StepError('у ноды в панели нет профиля')
+        feats = features_of(cur.get('config')) | set(extras)
+        if feats == features_of(cur.get('config')) and not extras_problem(cur.get('config'), extras, cur['name']):
+            log(f'панель: в профиле «{cur["name"]}» всё уже есть')
+            return cur
+        vname, tmap = variant(cur['name'], [i['tag'] for i in cur['inbounds']], feats)
+        prof = next((p for p in profiles if p['name'] == vname), None)
+        if prof:
+            log(f'панель: профиль «{vname}» уже есть')
+            problem = extras_problem(prof.get('config'), extras, vname)
+            if problem:
+                raise StepError(problem)
+        else:
+            cfg = cur.get('config') or {}
+            for old, new in tmap.items():
+                cfg = retag(cfg, old, new)
+            prof = self.call('POST', '/api/config-profiles', {'name': vname, 'config': apply_extras(cfg, extras)})
+            log(f'панель: профиль «{vname}» создан из «{cur["name"]}»')
+        by_tag = {i['tag']: i['uuid'] for i in prof['inbounds']}
+        old_tag = {i['uuid']: i['tag'] for i in cur['inbounds']}
+        umap = {u: by_tag[tmap[t]] for u, t in old_tag.items() if tmap.get(t) in by_tag}
+        active = [umap[u] for u in cp.get('activeInbounds') or [] if u in umap]
+        if not active:
+            raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
+        self.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'],
+                                          'configProfile': {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': active}})
+        log(f'панель: нода «{pnode["name"]}» переведена в «{vname}»')
+        for h in hosts:
+            u = h['inbound']['configProfileInboundUuid']
+            if u in umap:
+                self.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'inbound': {
+                    'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}})
+                h['inbound'] = {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}
+        log(f'панель: хосты ноды ({len(hosts)}) — на inbound «{vname}»')
+        for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
+            ids = [i['uuid'] for i in sq.get('inbounds', [])]
+            add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
+            if add:
+                self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
+                log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
+        return prof
 
     def existing_profile(self, uuid: str, inbound_uuids: list[str]) -> tuple[dict, list[dict]]:
         """Профиль, уже настроенный в панели (для скриптов, которые сами профиль не пишут)."""
@@ -483,6 +664,11 @@ class Panel:
                          'securityLayer': 'TLS'})
         else:    # чужой профиль (например Reality): параметры безопасности — из inbound
             body.update({'port': int(inbound.get('port') or 443), 'securityLayer': 'DEFAULT'})
+        opts = node.get('host') or {}
+        if opts.get('port'):        # нестандартный порт: на ноде он переадресован на порт inbound
+            body['port'] = int(opts['port'])
+        if opts.get('final_mask'):
+            body['finalMask'] = opts['final_mask']
         return body
 
     def attach(self, node: dict, prof: dict, inbounds: list[dict], squads: list[str], node_port: int, log,
@@ -715,6 +901,77 @@ def install_psiphon(r: 'Remote', opts: dict, log) -> dict:
     return {'address': m.group(1), 'port': int(m.group(2))}
 
 
+def install_warp(r: 'Remote', opts: dict, log) -> None:
+    """Ставит vps-warp с закреплённого коммита (или оставляет уже работающий). Вопросы установщика (язык, ключ WARP+)
+    без терминала получают ответ по умолчанию: английский и без WARP+."""
+    up = 'ip rule 2>/dev/null | grep -q "fwmark 0xff" && systemctl is-active --quiet wg-quick@warp && echo WARP_UP'
+    _, out = r.run(f'{up}; true')
+    if 'WARP_UP' in out:
+        log('WARP уже работает на ноде')
+        return
+    log(f'ставлю vps-warp @ {WARP_REF[:12]}')
+    rc, out = r.run(
+        'd=$(mktemp -d /root/warp.XXXXXX) && cd "$d" && '
+        f'curl -fsSL -o w.sh {WARP_RAW}/{WARP_REF}/warp_install.sh && '
+        f'echo "{WARP_SHA256}  w.sh" | sha256sum -c --quiet && TERM=dumb setsid -w bash ./w.sh </dev/null; '
+        f'echo "WARP_RC=$?"; sleep 2; {up}; true', 900)
+    text = strip_ansi(out)
+    lines = [x.strip() for x in text.splitlines() if x.strip() and not x.strip().startswith('WARP_')]
+    for line in lines[-10:]:
+        log('warp: ' + line[:200])
+    m = re.search(r'WARP_RC=(\d+)', text)
+    if not m or m.group(1) != '0' or 'WARP_UP' not in text:
+        tail = ' / '.join(lines[-3:])
+        raise StepError('установка WARP не удалась' + (f': {tail[-300:]}' if tail else ''))
+    log(f'WARP работает: трафик с меткой {WARP_MARK} уходит в туннель')
+
+
+def setup_port(r: 'Remote', public: int, target: int, log) -> None:
+    """Клиенты подключаются на public, ядро переадресует его на target (порт Xray). Фаервол и Traffic Control видят
+    уже target, поэтому открывать ничего не нужно; target тоже продолжает работать. Правило переживает перезагрузку."""
+    if public == target:
+        return
+    unit = f'bnodes-port-{public}'
+    rule = f'PREROUTING -p tcp --dport {public} -j REDIRECT --to-ports {target}'
+    body = (f'[Unit]\nDescription=Bobr Nodes: port {public} -> {target}\n'
+            'After=network-online.target docker.service ufw.service nftables.service\n'
+            f'[Service]\nType=oneshot\nRemainAfterExit=yes\n'
+            f"ExecStart=/bin/sh -c 'iptables -t nat -C {rule} 2>/dev/null || iptables -t nat -I {rule}; "
+            f"ip6tables -t nat -C {rule} 2>/dev/null || ip6tables -t nat -I {rule} 2>/dev/null; true'\n"
+            f"ExecStop=/bin/sh -c 'iptables -t nat -D {rule}; ip6tables -t nat -D {rule}; true'\n"
+            '[Install]\nWantedBy=multi-user.target\n')
+    rc, out = r.run(
+        f'if ss -ltnH "sport = :{public}" 2>/dev/null | grep -q .; then echo PORT_BUSY; exit 0; fi; '
+        'command -v iptables >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables >/dev/null; }; '
+        f'printf "{body}" > /etc/systemd/system/{unit}.service && systemctl daemon-reload && '
+        f'systemctl enable -q {unit} && systemctl restart {unit} && iptables -t nat -C {rule} && echo PORT_OK; true', 300)
+    if 'PORT_BUSY' in out:
+        raise StepError(f'порт {public} на ноде уже занят другой программой — выберите другой')
+    if 'PORT_OK' not in out:
+        raise StepError(f'не удалось переадресовать порт {public} → {target}: {strip_ansi(out).strip()[-200:]}')
+    log(f'порт {public} переадресован на {target} (служба {unit})')
+
+
+def add_keys(r: 'Remote', keys: str, log) -> None:
+    for key in [k.strip().replace("'", '') for k in (keys or '').splitlines() if k.strip()]:
+        r.run("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
+              f"grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys")
+    if keys and keys.strip():
+        log('SSH-ключи добавлены в authorized_keys')
+
+
+def install_extras(r: 'Remote', node: dict, log) -> dict:
+    """Psiphon и WARP на ноде → данные для профиля."""
+    extras = {}
+    if node.get('psiphon'):
+        extras['psiphon'] = {'out': install_psiphon(r, node['psiphon'], log),
+                             'domains': psiphon_rules(node['psiphon'].get('domains'))}
+    if node.get('warp'):
+        install_warp(r, node['warp'], log)
+        extras['warp'] = {'domains': warp_rules(node['warp'].get('domains'))}
+    return extras
+
+
 def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
            check_tries: int = 12, check_every: int = 20) -> str:
     """Разворачивает одну ноду. node: name, ip, domain, country, remark, ssh_user/ssh_port/ssh_password/ssh_key,
@@ -737,11 +994,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
     stage('ssh')
     r = Remote(node, logfile)
     wait_ssh(r, log)
-    if prof.get('ssh_pubkey'):
-        key = prof['ssh_pubkey'].strip().replace("'", '')
-        r.run("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
-              f"grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys")
-        log('SSH-ключ добавлен в authorized_keys')
+    add_keys(r, prof.get('ssh_pubkey') or '', log)
     _, out = r.run('test -f /opt/remnanode/.installation-complete && echo NV_DONE; '
                    'test -e /opt/remnanode && echo NV_EXISTS; '
                    'test -f /opt/remnanode/.nuvrion-managed && echo NV_MANAGED; true')
@@ -768,10 +1021,13 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
             raise StepError(f'установщик завершился с кодом {rc}')
         log(f'установщик завершён, код {rc}' + (' (ждёт профиль из панели)' if rc == 2 else ''))
 
-    psi = None
-    if node.get('psiphon'):
-        stage('psiphon')
-        psi = {'out': install_psiphon(r, node['psiphon'], log), 'domains': psiphon_rules(node['psiphon'].get('domains'))}
+    port = (node.get('host') or {}).get('port')
+    extras = {}
+    if node.get('psiphon') or node.get('warp') or port:
+        stage('extras')
+        extras = install_extras(r, node, log)
+        if port:
+            setup_port(r, int(port), 443, log)
     if panel is None:
         return 'установлено, панель пропущена'
     stage('panel')
@@ -790,7 +1046,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         squads = [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x] \
             if isinstance(prof.get('squads'), str) else list(prof.get('squads') or [])
     with PANEL_LOCK:
-        panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, psi)
+        panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, extras)
 
     stage('check')
     for attempt in range(check_tries):
@@ -879,11 +1135,7 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
     stage('ssh')
     r = Remote(node, logfile)
     wait_ssh(r, log)
-    if prof.get('ssh_pubkey'):
-        key = prof['ssh_pubkey'].strip().replace("'", '')
-        r.run("umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; "
-              f"grep -qxF '{key}' ~/.ssh/authorized_keys || echo '{key}' >> ~/.ssh/authorized_keys")
-        log('SSH-ключ добавлен в authorized_keys')
+    add_keys(r, prof.get('ssh_pubkey') or '', log)
 
     stage('install')
     existing = panel.node_state(node['ip'])
@@ -902,10 +1154,11 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
             if rc != 0:
                 raise StepError(f'команда после установки завершилась с кодом {rc}: {strip_ansi(out).strip()[-200:]}')
 
-    psi = None
-    if node.get('psiphon'):
-        stage('psiphon')
-        psi = {'out': install_psiphon(r, node['psiphon'], log), 'domains': psiphon_rules(node['psiphon'].get('domains'))}
+    extras = {}
+    port = (node.get('host') or {}).get('port')
+    if node.get('psiphon') or node.get('warp') or port:
+        stage('extras')
+        extras = install_extras(r, node, log)
 
     stage('panel')
     squads = list(node['squads']) if node.get('squads') is not None else \
@@ -920,8 +1173,9 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
             pname = re.sub(r'[^A-Za-z0-9_ -]', '-', f'NV {node["name"]}')[:30]
             new_tag = f'{tag}-{node["name"]}'[:60]
             cfg = retag(cfg, tag, new_tag)  # теги inbound в панели уникальны
-            if psi:
-                cfg = add_psiphon(cfg, psi['out'], psi['domains'])
+            cfg = apply_extras(cfg, extras)
+            if port:
+                setup_port(r, int(port), int(next((i.get('port') for i in cfg.get('inbounds', []) if i.get('tag') == new_tag), 443)), log)
             profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
             pr = next((p for p in profiles if p['name'] == pname), None) or \
                 panel.call('POST', '/api/config-profiles', {'name': pname, 'config': cfg})
@@ -932,14 +1186,11 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
                 raise StepError('в группе не выбран профиль панели для этого скрипта (Настройки группы → Скрипт установки)')
             pr, inbounds = panel.existing_profile(prof['panel_profile_uuid'], prof.get('panel_inbounds') or [])
             log(f'панель: профиль «{pr["name"]}», inbound: {", ".join(i["tag"] for i in inbounds)}')
-            if psi:  # чужой профиль бот не меняет — только предупреждает
-                have = psiphon_of(pr.get('config'))
-                if have is None:
-                    log(f'⚠️ в профиле «{pr["name"]}» нет выхода {PSI_TAG}: Psiphon поставлен, но трафик в него не идёт — '
-                        f'добавьте outbound socks {psi["out"]["address"]}:{psi["out"]["port"]} в профиль')
-                elif have != psi['out']:
-                    log(f'⚠️ профиль ведёт {PSI_TAG} на {have["address"]}:{have["port"]}, '
-                        f'а Psiphon на ноде слушает {psi["out"]["address"]}:{psi["out"]["port"]}')
+            problem = extras_problem(pr.get('config'), extras, pr['name'])
+            if problem:  # чужой профиль бот не меняет — только предупреждает
+                log(f'⚠️ {problem}. Дополнение поставлено на ноду, но трафик в него не идёт, пока выхода нет в профиле')
+            if port:
+                setup_port(r, int(port), int(inbounds[0].get('port') or 443), log)
             panel.attach(node, pr, inbounds, squads, int(values['node_port']), log, tls=False)
 
     stage('check')
@@ -956,3 +1207,67 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
             (f': {st["lastStatusMessage"]}' if st.get('lastStatusMessage') else ''))
         time.sleep(check_every)
     raise StepError('нода установлена, но к панели так и не подключилась — проверьте порт API и фаервол')
+
+
+# ─────────────────────────────── Дополнения на уже работающей ноде ──
+
+def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
+                check_tries: int = 12, check_every: int = 10) -> str:
+    """Нода из панели: ставит Psiphon/WARP по SSH и переводит ноду в вариант её профиля с этими выходами;
+    по желанию — нестандартный порт (переадресация на ноде + порт хостов) и Final Mask на её хостах.
+    node: node_uuid, ip, name, domains, ssh_*, psiphon, warp, port ('' — оставить, 443 — стандартный), final_mask
+    (None — не трогать, False — убрать, dict — поставить)."""
+    panel = Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
+    pnode = next((n for n in panel.call('GET', '/api/nodes') if n['uuid'] == node['node_uuid']), None)
+    if not pnode:
+        raise StepError('ноды больше нет в панели')
+    node = {**node, 'ip': pnode['address']}
+    want_port = node.get('port')
+    need_ssh = bool(node.get('psiphon') or node.get('warp') or want_port)
+    extras, r = {}, None
+    if need_ssh:
+        stage('ssh')
+        r = Remote(node, logfile)
+        wait_ssh(r, log)
+        add_keys(r, prof.get('ssh_pubkey') or '', log)
+        stage('extras')
+        extras = install_extras(r, node, log)
+
+    stage('panel')
+    with PANEL_LOCK:
+        hosts = panel.node_hosts(pnode, set(node.get('domains') or []))
+        log(f'панель: хостов у ноды — {len(hosts)}' + (': ' + ', '.join(h['remark'] for h in hosts) if hosts else ''))
+        profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
+        cur = next((p for p in profiles if p['uuid'] == (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
+        if extras:
+            cur = panel.upgrade_node(pnode, extras, hosts, log)
+        if want_port is not None and want_port != '':
+            active = set((pnode.get('configProfile') or {}).get('activeInbounds') or [])
+            if extras:  # нода уже на inbound'ах варианта
+                active = {h['inbound']['configProfileInboundUuid'] for h in hosts} or active
+            ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)
+            target = int((ib or {}).get('port') or 443)
+            public = public_port(want_port, int(prof.get('node_port') or 2222)) or target
+            if public != target:
+                setup_port(r, public, target, log)
+            for h in hosts:
+                if h.get('port') != public:
+                    panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'port': public})
+            log(f'панель: порт хостов — {public}' + ('' if public == target else f' (на ноде → {target})'))
+        if node.get('final_mask') is not None:
+            mask = node['final_mask'] or None
+            for h in hosts:
+                panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'finalMask': mask})
+            log('панель: Final Mask ' + ('поставлен' if mask else 'убран') + f' на хостах ({len(hosts)})')
+
+    if extras:
+        stage('check')
+        for attempt in range(check_tries):
+            time.sleep(check_every)
+            st = panel.node_state(node['ip']) or {}
+            if st.get('isConnected'):
+                log('нода на связи с панелью ✓')
+                return 'готово'
+            log(f'жду, пока нода перезапустит Xray ({attempt + 1}/{check_tries})')
+        raise StepError('после смены профиля нода не вышла на связь с панелью — посмотрите её в панели')
+    return 'готово'

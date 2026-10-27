@@ -24,6 +24,7 @@ class World:
         self.nodes: list[dict] = []
         self.hosts: list[dict] = []
         self.reorders = 0
+        self.host_patches: list[dict] = []
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
         self.templates: list[dict] = []
@@ -230,7 +231,22 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     pr['config'] = b['config']
                     return self.send(200, {'response': pr})
                 if p == '/api/nodes':
-                    return self.send(200, {'response': {}})
+                    n = next((x for x in W.nodes if x['uuid'] == b['uuid']), None)
+                    if n and 'configProfile' in b:
+                        pr = next(x for x in W.profiles if x['uuid'] == b['configProfile']['activeConfigProfileUuid'])
+                        assert set(b['configProfile']['activeInbounds']) <= {i['uuid'] for i in pr['inbounds']}
+                        n['configProfile'] = b['configProfile']
+                    return self.send(200, {'response': n or {}})
+                if p == '/api/hosts':
+                    h = next(x for x in W.hosts if x['uuid'] == b['uuid'])
+                    if 'inbound' in b:
+                        pr = next(x for x in W.profiles if x['uuid'] == b['inbound']['configProfileUuid'])
+                        assert b['inbound']['configProfileInboundUuid'] in {i['uuid'] for i in pr['inbounds']}
+                    if 'port' in b:
+                        assert isinstance(b['port'], int)
+                    h.update({k: v for k, v in b.items() if k != 'uuid'})
+                    W.host_patches.append(b)
+                    return self.send(200, {'response': h})
                 if p == '/api/subscription-templates':
                     t = next(x for x in W.templates if x['uuid'] == b['uuid'])
                     t['templateJson'] = b['templateJson']
@@ -254,8 +270,11 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
 
     installed: set[str] = set()
     psiphon: set[str] = set()
+    warp: set[str] = set()
 
     class FakeRemote(engine.Remote):
+        warp_calls: list = []
+        ports: list = []
         calls: list = []
         post: list = []
         psiphon_calls: list = []
@@ -288,6 +307,18 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                     return 0, '\x1b[1;31mERROR:\x1b[0m docker is not installed\nPSI_RC=1\n'
                 psiphon.add(ip)
                 return 0, '==> waiting for the tunnel\nregion DE · exit 198.18.0.7\nPSI_RC=0\nPSI_ADDR=172.17.0.1 PSI_PORT=1080\n'
+            if cmd.startswith('ip rule 2>/dev/null'):
+                return 0, 'WARP_UP\n' if ip in warp else ''
+            if 'warp_install.sh' in cmd:
+                assert engine.WARP_SHA256 in cmd and f'/{engine.WARP_REF}/warp_install.sh' in cmd and '</dev/null' in cmd, cmd
+                FakeRemote.warp_calls.append(ip)
+                warp.add(ip)
+                return 0, '  ✔ WireGuard up\nWARP_RC=0\nWARP_UP\n'
+            if 'bnodes-port-' in cmd:
+                import re as _re
+                m = _re.search(r'--dport (\d+) -j REDIRECT --to-ports (\d+)', cmd)
+                FakeRemote.ports.append((ip, int(m.group(1)), int(m.group(2))))
+                return 0, 'PORT_OK\n'
             if '--check' in cmd:
                 return 0, 'rc=0\n'
             if cmd.startswith('ufw ') or cmd.startswith('docker ps'):

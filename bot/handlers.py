@@ -369,7 +369,8 @@ async def job_retry(c: CallbackQuery, store: Store, runner: Runner):
         return await c.answer('Повторить можно только задачу с ошибкой', show_alert=True)
     store.update_job(jid, status='queued', error='')
     runner.start(jid)
-    await c.answer('Запущено снова' + ('' if j['data'].get('server_id') else ' — будет новая покупка'))
+    rebuy = not j['data'].get('server_id') and j['data'].get('kind') != 'node'
+    await c.answer('Запущено снова' + (' — будет новая покупка' if rebuy else ''))
 
 
 @router.callback_query(F.data.regexp(r'^j:\d+:hide$'))

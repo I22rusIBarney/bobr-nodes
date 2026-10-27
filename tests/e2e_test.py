@@ -41,6 +41,11 @@ from tests import fakes  # noqa: E402
 fails = 0
 
 
+def job_text_of(j):
+    from bot.runner import job_text
+    return job_text(j)
+
+
 def ok(cond, label):
     global fails
     print(('PASS ' if cond else 'FAIL ') + label, flush=True)
@@ -135,7 +140,9 @@ async def main():
     secret = make_key()
     world = fakes.World(secret)
     # в панели уже есть ноды, поставленные вручную тем же установщиком: тег Vision-TLS занят
-    world.profiles.append({'uuid': '55555555-5555-5555-5555-555555555555', 'name': 'Manual nodes', 'config': {},
+    world.profiles.append({'uuid': '55555555-5555-5555-5555-555555555555', 'name': 'Manual nodes',
+                           'config': {'inbounds': [{'tag': 'Vision-TLS', 'port': 443, 'protocol': 'vless'}],
+                                      'outbounds': [{'tag': 'DIRECT', 'protocol': 'freedom'}], 'routing': {'rules': []}},
                            'inbounds': [{'uuid': '66666666-6666-6666-6666-666666666666', 'tag': 'Vision-TLS'}]})
     srv = fakes.make_server(world)
     base = f'http://127.0.0.1:{srv.server_port}'
@@ -171,6 +178,7 @@ async def main():
     dp.callback_query.outer_middleware(mw)
     dp.include_router(handlers.router)
     runner = Runner(store, bot, TMP / 'logs', deploy=functools.partial(engine.deploy, check_tries=1, check_every=0),
+                    update_node=functools.partial(engine.update_node, check_tries=1, check_every=0),
                     poll_every=0.05, edit_every=0)
     dp['store'], dp['runner'], dp['public_url'] = store, runner, 'https://nodes.test'
 
@@ -492,9 +500,9 @@ async def main():
     ok(len(psn) == 2 and all(n['configProfile']['activeConfigProfileUuid'] == psp[0]['uuid'] for n in psn),
        'ноды с Psiphon — в профиле «NV Vision Psiphon»')
     st, jv = await wapi(f'jobs/{pj[0]["id"]}')
-    ok('psiphon' in [x['code'] for x in jv['stages']], 'этап Psiphon в карточке задачи')
+    ok(('extras', 'Дополнения: Psiphon') in [(x['code'], x['label']) for x in jv['stages']], 'этап Psiphon в карточке задачи')
     st, jv = await wapi(f'jobs/{mj[0]["id"]}')
-    ok('psiphon' not in [x['code'] for x in jv['stages']], 'без Psiphon — этапа нет')
+    ok('extras' not in [x['code'] for x in jv['stages']], 'без дополнений — этапа нет')
     plog = (TMP / 'logs' / f'job-{pj[0]["id"]}.log').read_text()
     ok('Psiphon работает: SOCKS5 172.17.0.1:1080' in plog, 'журнал: Psiphon поднялся')
     st, meta = await wapi(f'profiles/{pid}/panel')
@@ -505,6 +513,100 @@ async def main():
     await runner.wait_all()
     ok(store.job(js['ids'][0])['status'] == 'done' and len([x for x in world.profiles if x['name'] == 'NV Vision Psiphon']) == 1,
        'следующая нода с Psiphon — в тот же профиль')
+
+    # WARP + Psiphon + нестандартный порт + Final Mask при установке
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'port': '22', 'items': [{'location': 'de', 'idx': 0, 'domains': ['wp0.example.net']}]})
+    ok(st == 400 and 'Порт' in js['detail'], 'порт 22 для клиентов отклонён')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'final_mask': True, 'final_mask_json': '{oops',
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['wp0.example.net']}]})
+    ok(st == 400 and 'Final Mask' in js['detail'], 'кривой JSON Final Mask отклонён')
+    hb, w0, p0 = len(world.hosts), len(fakes_remote.warp_calls), len(fakes_remote.ports)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'port': '8443', 'final_mask': True,
+                                           'psiphon': {'enabled': True}, 'warp': {'enabled': True, 'domains': 'geosite:tiktok'},
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['wp1.example.net']}]})
+    ok(st == 200, f'деплой с WARP, Psiphon, портом 8443 и Final Mask: {js}')
+    await runner.wait_all()
+    wj = store.job(js['ids'][0])
+    ok(wj['status'] == 'done', f'нода готова: {wj["error"]}')
+    ok(fakes_remote.warp_calls[w0:] == [wj['data']['ip']] and fakes_remote.ports[p0:] == [(wj['data']['ip'], 8443, 443)],
+       f'на ноде поставлен vps-warp и переадресация 8443 → 443: {fakes_remote.ports[p0:]}')
+    both = next((x for x in world.profiles if x['name'] == 'NV Vision Psiphon WARP'), None)
+    ok(both and [i['tag'] for i in both['inbounds']] == ['Vision-NV-PS-WP'], 'профиль «NV Vision Psiphon WARP», тег Vision-NV-PS-WP')
+    wo = next((o for o in both['config']['outbounds'] if o['tag'] == 'warp-out'), None) if both else None
+    ok(wo == {'tag': 'warp-out', 'protocol': 'freedom', 'settings': {'domainStrategy': 'ForceIPv4v6'}, 'streamSettings': {'sockopt': {'mark': 255}}}
+       and both['config']['routing']['rules'][-1] == {'type': 'field', 'domain': ['geosite:tiktok'], 'outboundTag': 'warp-out'}
+       and both['config']['routing']['rules'][-2]['outboundTag'] == 'psiphon-out', f'выход warp-out с меткой 255 и правила обоих дополнений: {wo}')
+    nh = world.hosts[hb:]
+    ok(len(nh) == 1 and nh[0]['port'] == 8443 and nh[0]['finalMask'] == engine.FINAL_MASK and nh[0]['sni'] == 'wp1.example.net',
+       f'хост: порт 8443 и Final Mask с фрагментацией ClientHello: {nh[0].get("port")}, {nh[0].get("finalMask")}')
+    st, jv = await wapi(f'jobs/{wj["id"]}')
+    ok(next(x['label'] for x in jv['stages'] if x['code'] == 'extras') == 'Дополнения: Psiphon, WARP, порт 8443', 'этап дополнений с подписью')
+
+    # дополнения на уже работающих нодах панели
+    st, nl = await wapi(f'profiles/{pid}/nodes')
+    plain = next(n for n in nl['nodes'] if n['address'] == mj[0]['data']['ip'])
+    ok(st == 200 and plain['bot'] and plain['profile'] == 'NV Vision' and plain['features'] == [] and nl['bot_key'].startswith('ssh-ed25519 '),
+       f'список нод панели: профиль, дополнения, ключ бота: {plain}')
+    ok(next(n for n in nl['nodes'] if n['address'] == wj['data']['ip'])['features'] == ['psiphon', 'warp'], 'у ноды с дополнениями они видны')
+    st, nd = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}')
+    ok([x['address'] for x in nd['hosts']] == [mj[0]['data']['domain']] and nd['ssh']['source'] == 'bot',
+       f'хосты ноды найдены по домену из задачи, доступ — пароль из покупки: {nd["hosts"]}, {nd["ssh"]}')
+    others = [n['uuid'] for n in world.nodes if n['configProfile']['activeConfigProfileUuid'] == next(x['uuid'] for x in world.profiles if x['name'] == 'NV Vision') and n['uuid'] != plain['uuid']]
+    w0, p0, hp0 = len(fakes_remote.warp_calls), len(fakes_remote.ports), len(world.host_patches)
+    st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST',
+                        {'warp': {'enabled': True}, 'port': '9443', 'final_mask': True})
+    ok(st == 200, f'дополнения на готовой ноде: {js}')
+    await runner.wait_all()
+    uj = store.job(js['id'])
+    ok(uj['status'] == 'done', f'задача по ноде выполнена: {uj["error"]}')
+    vw = next((x for x in world.profiles if x['name'] == 'NV Vision WARP'), None)
+    pn = next(n for n in world.nodes if n['uuid'] == plain['uuid'])
+    ok(vw and pn['configProfile'] == {'activeConfigProfileUuid': vw['uuid'], 'activeInbounds': [vw['inbounds'][0]['uuid']]}
+       and vw['inbounds'][0]['tag'] == 'Vision-NV-WP' and engine.warp_of(vw['config']),
+       'нода переведена в копию профиля «NV Vision WARP» с выходом warp-out')
+    ok(all(n['configProfile']['activeConfigProfileUuid'] != vw['uuid'] for n in world.nodes if n['uuid'] in others) and others,
+       'остальные ноды «NV Vision» не тронуты')
+    hh = next(h for h in world.hosts if h['address'] == mj[0]['data']['domain'])
+    ok(hh['inbound']['configProfileInboundUuid'] == vw['inbounds'][0]['uuid'] and hh['port'] == 9443 and hh['finalMask'] == engine.FINAL_MASK,
+       f'хост ноды: на inbound копии, порт 9443, Final Mask: {hh["port"]}')
+    ok(fakes_remote.warp_calls[w0:] == [pn['address']] and fakes_remote.ports[p0:] == [(pn['address'], 9443, 443)],
+       'на ноду по SSH поставлен WARP и переадресация 9443 → 443')
+    nv_in = next(x for x in world.profiles if x['name'] == 'NV Vision')['inbounds'][0]['uuid']
+    sq_old = {u for u, x in world.squads.items() if any(i['uuid'] == nv_in for i in x['inbounds'])}
+    sq_new = {u for u, x in world.squads.items() if any(i['uuid'] == vw['inbounds'][0]['uuid'] for i in x['inbounds'])}
+    ok(sq_old and sq_new == sq_old, f'inbound копии добавлен в те же сквады: {sq_new} / {sq_old}')
+    st, jv = await wapi(f'jobs/{uj["id"]}')
+    ok([x['code'] for x in jv['stages']] == ['ssh', 'extras', 'panel', 'check'] and 'Root-пароль' not in job_text_of(uj),
+       f'этапы задачи по ноде: {jv["stages"]}')
+    # тот же узел ещё раз: WARP уже есть — только Final Mask убрать, без SSH
+    st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST', {'final_mask': False})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'done' and next(h for h in world.hosts if h['uuid'] == hh['uuid'])['finalMask'] is None
+       and len(fakes_remote.warp_calls) == w0 + 1, 'Final Mask убран без входа по SSH')
+    # чужая нода (не от бота): без доступа SSH дополнения не запускаются, с паролем — профиль-копия «Manual nodes Psiphon»
+    man = next(x for x in world.profiles if x['name'] == 'Manual nodes')
+    world.nodes.append({'uuid': '33333333-3333-3333-3333-333333333333', 'name': 'manual-1', 'address': '198.51.100.250',
+                        'isConnected': True, 'port': 2222, 'countryCode': 'FI',
+                        'configProfile': {'activeConfigProfileUuid': man['uuid'], 'activeInbounds': [man['inbounds'][0]['uuid']]}})
+    world.hosts.append({'uuid': '44444444-4444-4444-4444-444444444444', 'remark': 'FI manual', 'address': '198.51.100.250', 'port': 443,
+                        'inbound': {'configProfileUuid': man['uuid'], 'configProfileInboundUuid': man['inbounds'][0]['uuid']},
+                        'xrayJsonTemplateUuid': None, 'isHidden': False, 'tags': [], 'viewPosition': 999})
+    mu = '33333333-3333-3333-3333-333333333333'
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/apply', 'POST', {'psiphon': {'enabled': True}})
+    ok(st == 400 and 'SSH' in js['detail'], 'без доступа по SSH дополнения на чужой ноде не запускаются')
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/ssh', 'POST', {'mode': 'password', 'user': 'root', 'port': 22, 'password': 'pw-123', 'ip': '198.51.100.250'})
+    ok(st == 200 and js['ok'], f'доступ по SSH сохранён и проверен: {js}')
+    st, js = await wapi(f'profiles/{pid}/nodes/{mu}/apply', 'POST', {'psiphon': {'enabled': True}})
+    await runner.wait_all()
+    mj2 = store.job(js['id'])
+    mp = next((x for x in world.profiles if x['name'] == 'Manual nodes Psiphon'), None)
+    ok(mj2['status'] == 'done' and mp and [i['tag'] for i in mp['inbounds']] == [man['inbounds'][0]['tag'] + '-PS']
+       and engine.psiphon_of(mp['config']) and mj2['data']['ssh'].get('password') == 'pw-123',
+       f'чужая нода: копия «Manual nodes Psiphon», вход по сохранённому паролю: {mj2["error"]}')
+    ok(next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['inbound']['configProfileUuid'] == mp['uuid'],
+       'её хост найден по IP и переведён на копию профиля')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')
@@ -632,6 +734,7 @@ async def main():
                                       'ip': None, 'password': 'Aa1aaaaaaaaaaaaaaaaa'})
     store.update_job(jid, status='buying')  # «упали» во время покупки
     runner2 = Runner(store, bot, TMP / 'logs', deploy=functools.partial(engine.deploy, check_tries=1, check_every=0),
+                    update_node=functools.partial(engine.update_node, check_tries=1, check_every=0),
                      poll_every=0.05, edit_every=0)
     await runner2.resume_all()
     await runner2.wait_all()

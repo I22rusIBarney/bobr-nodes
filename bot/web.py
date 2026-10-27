@@ -127,7 +127,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'script_profile': ((((store.script(p['script_id']) or {}).get('recipe') or {}).get('profile') or {}).get('mode')
                                    if p.get('script_id') else None),
                 'panel_profile_uuid': p.get('panel_profile_uuid') or '',
-                'servers': sum(1 for j in mine if j['status'] == 'done'),
+                'servers': sum(1 for j in mine if j['status'] == 'done' and j['data'].get('kind') != 'node'),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
 
@@ -291,6 +291,173 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         default = [x for x in re.split(r'[\s,]+', p.get('squads') or '') if x]
         return J({**meta, 'default_squads': default})
 
+    def parse_extras(b: dict) -> dict:
+        """{'psiphon': {region, domains}, 'warp': {domains}} из запроса; StepError — если что-то не так."""
+        out = {}
+        ps, wp = b.get('psiphon'), b.get('warp')
+        if isinstance(ps, dict) and ps.get('enabled'):
+            out['psiphon'] = {'region': engine.psiphon_regions(str(ps.get('region') or '')),
+                              'domains': engine.psiphon_rules(ps.get('domains') or '')}
+        if isinstance(wp, dict) and wp.get('enabled'):
+            out['warp'] = {'domains': engine.warp_rules(wp.get('domains') or '')}
+        return out
+
+    # ── ноды панели: дополнения на уже работающих нодах ──
+    def panel_of(p: dict) -> engine.Panel:
+        return engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', ''))
+
+    def bot_jobs_by_ip(pid: int) -> dict[str, dict]:
+        """IP → данные последней удачной задачи покупки (домен, пароль root) этой группы."""
+        out = {}
+        for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
+            d = j['data']
+            if j['profile_id'] == pid and d.get('ip') and d.get('kind') != 'node' and j['status'] == 'done':
+                out[d['ip']] = d
+        return out
+
+    def ssh_view(pid: int, uuid: str, ip: str) -> dict:
+        saved = runner.ssh_of(pid, uuid)
+        if saved.get('mode'):
+            return {'mode': saved['mode'], 'user': saved.get('user') or 'root', 'port': int(saved.get('port') or 22),
+                    'has_password': bool(saved.get('password')), 'source': 'saved'}
+        d = bot_jobs_by_ip(pid).get(ip)
+        if d:  # нода куплена ботом: root-пароль известен из задачи покупки
+            return {'mode': 'password', 'user': 'root', 'port': 22, 'has_password': True, 'source': 'bot'}
+        return {'mode': '', 'user': 'root', 'port': 22, 'has_password': False, 'source': ''}
+
+    def node_ssh(pid: int, uuid: str, ip: str) -> dict:
+        """Доступ для задачи: сохранённый, иначе — ключ бота и пароль из задачи покупки."""
+        saved = runner.ssh_of(pid, uuid)
+        if saved.get('mode'):
+            return saved
+        d = bot_jobs_by_ip(pid).get(ip)
+        return {'mode': 'password', 'user': 'root', 'port': 22, 'password': d.get('password', '')} if d else {}
+
+    @r.get('/api/profiles/{pid}/nodes')
+    async def panel_nodes(request):
+        p = profile_or_404(request.match_info['pid'])
+
+        def load():
+            pl = panel_of(p)
+            profiles = {x['uuid']: x for x in pl.call('GET', '/api/config-profiles')['configProfiles']}
+            return pl.call('GET', '/api/nodes'), profiles
+        try:
+            nodes, profiles = await asyncio.to_thread(load)
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        bot = bot_jobs_by_ip(p['id'])
+        out = []
+        for n in nodes:
+            pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
+            out.append({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
+                        'disabled': bool(n.get('isDisabled')), 'country': n.get('countryCode') or '',
+                        'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
+                        'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
+        return J({'nodes': out, 'bot_key': runner.bot_key()[1]})
+
+    @r.get('/api/profiles/{pid}/nodes/{uuid}')
+    async def panel_node(request):
+        p = profile_or_404(request.match_info['pid'])
+        uuid = request.match_info['uuid']
+
+        def load():
+            pl = panel_of(p)
+            n = next((x for x in pl.call('GET', '/api/nodes') if x['uuid'] == uuid), None)
+            if not n:
+                raise ApiError('Ноды нет в панели', 404)
+            pr = next((x for x in pl.call('GET', '/api/config-profiles')['configProfiles']
+                       if x['uuid'] == (n.get('configProfile') or {}).get('activeConfigProfileUuid')), {}) or {}
+            dom = (bot_jobs_by_ip(p['id']).get(n['address']) or {}).get('domain')
+            return n, pr, pl.node_hosts(n, {dom} if dom else set())
+        try:
+            n, pr, hosts = await asyncio.to_thread(load)
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        return J({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
+                  'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
+                  'inbound_port': next((i.get('port') for i in pr.get('inbounds', [])
+                                        if i['uuid'] in ((n.get('configProfile') or {}).get('activeInbounds') or [])), None),
+                  'hosts': [{'uuid': h['uuid'], 'remark': h.get('remark', ''), 'address': h.get('address', ''),
+                             'port': h.get('port'), 'final_mask': bool(h.get('finalMask')), 'hidden': bool(h.get('isHidden'))}
+                            for h in hosts],
+                  'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1]})
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/ssh')
+    async def panel_node_ssh(request):
+        """Сохранить доступ по SSH (mode key|password) и проверить вход."""
+        p = profile_or_404(request.match_info['pid'])
+        uuid, b = request.match_info['uuid'], await body(request)
+        cur = runner.ssh_of(p['id'], uuid)
+        mode = b.get('mode') if b.get('mode') in ('key', 'password') else 'password'
+        user = str(b.get('user') or 'root').strip()
+        if not re.fullmatch(r'[a-z_][a-z0-9_.-]{0,31}', user):
+            raise ApiError('Пользователь: латиница, например root')
+        try:
+            port = int(b.get('port') or 22)
+            assert 1 <= port <= 65535
+        except (ValueError, AssertionError):
+            raise ApiError('SSH-порт: число от 1 до 65535') from None
+        pw = b.get('password')
+        new = {'mode': mode, 'user': user, 'port': port,
+               'password': (str(pw) if pw else cur.get('password', '')) if mode == 'password' else ''}
+        if mode == 'password' and not new['password']:
+            raise ApiError('Введите пароль')
+        ip = str(b.get('ip') or '')
+        result = {'ok': True, 'message': 'Сохранено'}
+        if ip:
+            node = {'ip': ip, 'ssh_user': user, 'ssh_port': port}
+            if mode == 'key':
+                node['ssh_key'] = runner.bot_key()[0]
+            else:
+                node['ssh_password'] = new['password']
+
+            def check():
+                rr = engine.Remote(node, None)
+                rc, out = rr.run('id -u', 25)
+                return rc == 0 and out.strip().splitlines()[-1:] == ['0'], out
+            try:
+                good, out = await asyncio.to_thread(check)
+                result = {'ok': good, 'message': 'Вход по SSH работает, права root есть' if good else
+                          'Вход есть, но не под root — нужен root или sudo без пароля'}
+            except engine.StepError as e:
+                result = {'ok': False, 'message': f'SSH: {e}'}
+            except Exception as e:  # noqa: BLE001
+                result = {'ok': False, 'message': f'SSH: {type(e).__name__}: {e}'}
+        store.set(f'node_ssh:{p["id"]}:{uuid}', json.dumps(new))
+        return J(result)
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
+    async def panel_node_apply(request):
+        """Задача «дополнения на ноде»: Psiphon/WARP (с переводом ноды в вариант профиля), порт, Final Mask."""
+        p = profile_or_404(request.match_info['pid'])
+        uuid, b = request.match_info['uuid'], await body(request)
+        try:
+            extras = parse_extras(b)
+            port = b.get('port')
+            port = '' if port in (None, '') else (engine.public_port(port, int(p.get('node_port') or 2222)) or 443)
+            fm = b.get('final_mask')
+            fm = None if fm is None else (engine.final_mask(b.get('final_mask_json') or None) if fm else False)
+        except engine.StepError as e:
+            raise ApiError(str(e)) from None
+        if not extras and port == '' and fm is None:
+            raise ApiError('Нечего менять')
+        nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        ssh = node_ssh(p['id'], uuid, n['address'])
+        if (extras or port != '') and not ssh:
+            raise ApiError('Укажите доступ по SSH к ноде — без него Psiphon, WARP и порт не поставить')
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        data = {'kind': 'node', 'node_uuid': uuid, 'name': n['name'], 'ip': n['address'],
+                'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
+                'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
+                'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'port': port, 'final_mask': fm}
+        jid = store.add_job('node-' + uuid[:8], p['id'], int(request['user']['id']), data)
+        await runner.render(jid, force=True)
+        runner.start(jid)
+        return J({'id': jid})
+
     # ── развёртывание ──
     @r.get('/api/catalog')
     async def catalog(request):
@@ -343,14 +510,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         items = b.get('items') or [{'location': b.get('location'), 'idx': b.get('idx'), 'domains': b.get('domains') or []}]
         if not isinstance(items, list) or not items:
             raise ApiError('Не выбрано ни одной локации')
-        psiphon = None
-        ps = b.get('psiphon')
-        if isinstance(ps, dict) and ps.get('enabled'):
-            try:
-                psiphon = {'region': engine.psiphon_regions(str(ps.get('region') or '')),
-                           'domains': engine.psiphon_rules(ps.get('domains') or '')}
-            except engine.StepError as e:
-                raise ApiError(str(e)) from None
+        try:
+            extras = parse_extras(b)
+            mask = engine.final_mask(b.get('final_mask_json') or None) if b.get('final_mask') else None
+            port = engine.public_port(b.get('port'), int(p.get('node_port') or 2222))
+        except engine.StepError as e:
+            raise ApiError(str(e)) from None
         period = str(b.get('period') or '1m')
         all_domains = [d for it in items for d in (it.get('domains') or [])]
         if not 1 <= len(all_domains) <= 50:
@@ -388,11 +553,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             except engine.StepError as e:
                 raise ApiError(f'Панель: {e} — не получилось проверить порядок хостов') from None
             places = svc.host_places(order, {loc: doms for loc, _, doms in plan}, {x['uuid'] for x in meta['hosts']})
+        for host in hosts:
+            host.update({'final_mask': mask, 'port': port})
         ids = []
         for (loc, idx, doms), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
                                          squads, str(b.get('remark') or '')[:100], host,
-                                         'en' if b.get('remark_lang') == 'en' else 'ru', places, psiphon)
+                                         'en' if b.get('remark_lang') == 'en' else 'ru', places, extras)
         return J({'ids': ids})
 
     # ── мои скрипты ──
@@ -604,7 +771,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Повторить можно только задачу с ошибкой')
         store.update_job(j['id'], status='queued', error='')
         runner.start(j['id'])
-        return J({'ok': True, 'rebuy': not j['data'].get('server_id')})
+        return J({'ok': True, 'rebuy': not j['data'].get('server_id') and j['data'].get('kind') != 'node'})
 
     @r.post('/api/jobs/{jid}/hide')
     async def hide(request):

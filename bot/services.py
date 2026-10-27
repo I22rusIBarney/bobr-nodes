@@ -193,7 +193,7 @@ def host_places(order: list, domains_of: dict[str, list[str]], known: set[str]) 
 async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int,
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
                       host: dict | None = None, lang: str = 'ru', places: dict | None = None,
-                      psiphon: dict | None = None) -> list[int]:
+                      extras: dict | None = None) -> list[int]:
     q = quote(cat, location, idx, period, len(domains))
     loc, offer = q['loc'], q['offer']
     batch = secrets.token_hex(4)
@@ -207,7 +207,8 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
                 'remark': render_remark(remark, loc, name, dom, i, lang), 'password': gen_password(),
-                'host': host, 'squads': squads, 'place': (places or {}).get(dom), 'psiphon': psiphon, 'script_id': (store.profile(pid) or {}).get('script_id'),
+                'host': host, 'squads': squads, 'place': (places or {}).get(dom),
+                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'script_id': (store.profile(pid) or {}).get('script_id'),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)

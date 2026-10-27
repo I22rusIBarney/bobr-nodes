@@ -50,7 +50,7 @@ let ST = null, FIELDS = null;
 const rubK = kop => UI.rub(Math.round((kop || 0) / 100));
 const STATUS = { queued: ['В очереди', ''], buying: ['Покупка', 'accent'], provisioning: ['Создание сервера', 'accent'],
   deploying: ['Установка', 'accent'], done: ['Готово', 'ok'], failed: ['Ошибка', 'bad'] };
-const STAGE = { buy: 'Покупка', ip: 'Создание сервера', dns: 'DNS', ssh: 'SSH', install: 'Установка ноды', panel: 'Панель', check: 'Проверка' };
+const STAGE = { buy: 'Покупка', ip: 'Создание сервера', dns: 'DNS', ssh: 'SSH', install: 'Установка ноды', extras: 'Дополнения', panel: 'Панель', check: 'Проверка' };
 const badge = (text, cls) => h('span', { class: 'badge ' + (cls || '') }, text);
 const statusLine = () => h('div', { class: 'status-line', role: 'status' });
 function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.message; UI.haptic(r.ok ? 'success' : 'error'); }
@@ -274,8 +274,95 @@ function groupView(pid) {
     sub: st ? st.message.replace(/^Панель отвечает: /, '') : 'проверяю связь…',
     right: st ? badge(st.ok ? 'На связи' : 'Нет связи', st.ok ? 'ok' : 'bad') : null,
     onClick: () => { delete PS[pid]; UI.nav.refresh(); } });
-  v.insertBefore(group(null, [conn]), v.children[3] || null);
+  const nodesRow = row({ icon: 'stack', tile: '#5856D6', title: 'Ноды в панели', sub: 'Psiphon, WARP, порт и Final Mask на уже работающих нодах',
+    onClick: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); } });
+  v.insertBefore(group(null, [conn, nodesRow]), v.children[3] || null);
   v.append(group(null, [row({ icon: 'gear', tile: '#8E8E93', title: 'Настройки группы', sub: 'панель, клиент bcloud, Cloudflare, домены', onClick: () => { delete PS[pid]; openProfile(pid); } })]));
+  return v;
+}
+
+// ───────── ноды панели ─────────
+const NODES = {}, NODE = {};
+const FEAT = { psiphon: 'Psiphon', warp: 'WARP' };
+function nodesView(pid) {
+  const v = h('div', {}, ...title('Ноды в панели'));
+  const L = NODES[pid];
+  if (L === undefined) {
+    NODES[pid] = null;
+    api('profiles/' + pid + '/nodes').then(r => { NODES[pid] = r; UI.nav.refresh(); }).catch(e => { NODES[pid] = { error: e.message }; UI.nav.refresh(); });
+  }
+  if (!L) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+  if (L.error) { v.append(h('div', { class: 'notice' }, L.error)); return v; }
+  if (!L.nodes.length) { v.append(group(null, [row({ title: 'В панели нет нод' })])); return v; }
+  v.append(group('Ноды · ' + L.nodes.length, L.nodes.map(n => row({ title: n.name, cls: 'wrap',
+    sub: [n.address, n.profile, ...n.features.map(f => FEAT[f] || f), n.bot ? 'куплена ботом' : ''].filter(Boolean).join(' · '),
+    right: badge(n.disabled ? 'Выключена' : n.connected ? 'На связи' : 'Нет связи', n.disabled ? '' : n.connected ? 'ok' : 'bad'),
+    onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
+    'Выберите ноду, чтобы поставить на неё Psiphon или WARP, сменить порт или включить Final Mask на её хостах.'));
+  return v;
+}
+function nodeView(pid, uuid) {
+  let n = NODE[uuid];
+  const v = h('div', {}, ...title(n && n.name ? n.name : 'Нода'));
+  if (n === undefined) {
+    NODE[uuid] = null;
+    api(`profiles/${pid}/nodes/${uuid}`).then(r => {
+      r.E = extrasState(); r.mask = 'keep'; r.maskJson = lsGet('final_mask_json', MASK_DEF); r.portMode = 'keep'; r.port = lsGet('port', '8443');
+      r.sshForm = { mode: r.ssh.mode || 'password', user: r.ssh.user, port: String(r.ssh.port), password: '' };
+      NODE[uuid] = r; UI.nav.refresh();
+    }).catch(e => { NODE[uuid] = { error: e.message }; UI.nav.refresh(); });
+  }
+  if (!n) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+  if (n.error) { v.append(h('div', { class: 'notice' }, n.error)); return v; }
+  v.append(group(null, [
+    row({ title: 'Состояние', right: badge(n.connected ? 'На связи' : 'Нет связи', n.connected ? 'ok' : 'bad') }),
+    row({ title: 'Адрес', detail: n.address }),
+    row({ title: 'Профиль', detail: n.profile || '—' }),
+    row({ title: 'Дополнения', detail: n.features.map(f => FEAT[f] || f).join(', ') || 'нет' })]));
+
+  // SSH
+  const F = n.sshForm, sshSt = statusLine();
+  const srows = [h('div', { style: 'padding:12px 12px 4px' }, UI.segmented([{ value: 'password', label: 'Пароль' }, { value: 'key', label: 'Ключ бота' }], F.mode, x => { F.mode = x; UI.nav.refresh(); })),
+    h('label', { class: 'field' }, h('label', {}, 'Пользователь'), textIn(F.user, 'root', x => { F.user = x; })),
+    h('label', { class: 'field' }, h('label', {}, 'Порт SSH'), textIn(F.port, '22', x => { F.port = x; }))];
+  if (F.mode === 'password') srows.push(h('label', { class: 'field' }, h('label', {}, 'Пароль'),
+    h('input', { type: 'password', placeholder: n.ssh.has_password ? 'сохранён — оставьте пустым' : 'пароль', autocomplete: 'off', oninput: e => { F.password = e.target.value; } })));
+  else srows.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, n.bot_key || 'ssh-keygen недоступен'),
+    right: n.bot_key ? h('button', { class: 'btn tinted small', type: 'button', onclick: () => UI.copy(n.bot_key, 'Ключ') }, icon('copy')) : null }));
+  const save = h('button', { class: 'btn tinted small', type: 'button', style: 'margin:10px 16px 12px' }, 'Сохранить и проверить вход');
+  save.onclick = UI.busy(save, async () => {
+    try { const r = await api(`profiles/${pid}/nodes/${uuid}/ssh`, 'POST', { ...F, ip: n.address }); n.ssh = { ...n.ssh, mode: F.mode, has_password: n.ssh.has_password || !!F.password, source: 'saved' }; showStatus(sshSt, r); }
+    catch (e) { showStatus(sshSt, { ok: false, message: e.message }); }
+  });
+  srows.push(save, sshSt);
+  const sshNote = n.ssh.source === 'bot' ? 'Нода куплена ботом — root-пароль уже известен, вводить ничего не нужно.'
+    : n.ssh.source === 'saved' ? 'Доступ сохранён в боте.' : 'Нужен для Psiphon, WARP и смены порта. Для Final Mask не нужен.';
+  v.append(group('Доступ по SSH', srows, sshNote + (F.mode === 'key' ? ' Добавьте ключ бота в /root/.ssh/authorized_keys на ноде. На ноды, купленные ботом, он добавляется сам.' : '')));
+
+  // дополнения
+  v.append(group('Дополнения', extrasRows(n.E, n.features), EXTRAS_NOTE + ` Нода перейдёт в копию своего профиля с этими выходами («${n.profile} …»), её хосты и сквады — вместе с ней; остальные ноды профиля «${n.profile}» не меняются.`));
+
+  // хосты: порт и Final Mask
+  const hrows = n.hosts.length ? n.hosts.map(x => row({ title: x.remark, sub: `${x.address}:${x.port}` + (x.hidden ? ' · скрытый' : ''), right: x.final_mask ? badge('Final Mask', 'ok') : null }))
+    : [row({ cls: 'wrap', title: 'Хостов этой ноды не нашёл', sub: 'Хост считается хостом ноды, если он на её inbound и его адрес — её IP или домен с этим IP.' })];
+  const seg = (label, opts, val, on) => h('div', { style: 'padding:12px 12px 10px' }, h('div', { class: 'group-h', style: 'margin:0 4px 8px' }, label), UI.segmented(opts, val, on));
+  hrows.push(seg('Порт для клиентов', [{ value: 'keep', label: 'Не менять' }, { value: '443', label: '443' }, { value: 'custom', label: 'Другой' }], n.portMode, x => { n.portMode = x; UI.nav.refresh(); }));
+  if (n.portMode === 'custom') hrows.push(h('label', { class: 'field stack' }, h('label', {}, 'Порт'), textIn(n.port, '8443', x => { n.port = x.replace(/\D/g, ''); })));
+  hrows.push(seg('Final Mask (фрагментация ClientHello)', [{ value: 'keep', label: 'Не менять' }, { value: 'on', label: 'Включить' }, { value: 'off', label: 'Убрать' }], n.mask, x => { n.mask = x; UI.nav.refresh(); }));
+  if (n.mask === 'on') hrows.push(h('label', { class: 'field stack' }, h('label', {}, 'JSON Final Mask'), areaIn(n.maskJson, 12, x => { n.maskJson = x; }, jsonOk)));
+  v.append(group('Хосты ноды · ' + n.hosts.length, hrows, n.inbound_port ? `Xray слушает ${n.inbound_port}. Другой порт переадресуется на него на самой ноде, ${n.inbound_port} продолжит работать.` : ''));
+
+  const go = h('button', { class: 'btn', type: 'button' }, icon('bolt'), 'Применить');
+  go.onclick = UI.busy(go, async () => {
+    const ex = extrasPayload(n.E);
+    const body = { ...ex, port: n.portMode === 'keep' ? null : n.portMode === '443' ? 443 : n.port,
+      final_mask: n.mask === 'keep' ? null : n.mask === 'on', final_mask_json: n.mask === 'on' ? n.maskJson : undefined };
+    if (!ex.psiphon && !ex.warp && body.port === null && body.final_mask === null) { UI.toast('Нечего менять', true); return; }
+    const r = await UI.run(() => api(`profiles/${pid}/nodes/${uuid}/apply`, 'POST', body), 'Задача запущена');
+    if (!r) return;
+    delete GJ[pid]; delete NODES[pid]; delete NODE[uuid]; UI.nav.push(() => jobView(r.id));
+  });
+  v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f', style: 'margin:8px 0 0' }, 'Ход — в «Задачах» и сообщением в чате с ботом.')));
   return v;
 }
 
@@ -367,6 +454,35 @@ function profileView(p) {
 }
 
 // ───────── развёртывание ─────────
+// ───────── дополнения на ноде: Psiphon, WARP, Final Mask, порт ─────────
+const PSI_DEF = 'google.com\ngoogleapis.com\ngstatic.com\ngoogleusercontent.com', WARP_DEF = 'geosite:tiktok\ndomain:cloudflare.com';
+const MASK_DEF = JSON.stringify({ tcp: [{ type: 'fragment', settings: { length: '10-20', packets: 'tlshello', interval: '10-20' } }] }, null, 2);
+function lsGet(k, d) { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v === null ? d : v; } catch (e) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+function textIn(val, ph, on, mono) { const i = h('input', { type: 'text', placeholder: ph, autocapitalize: 'off', spellcheck: false, style: 'text-align:left' + (mono ? ';font-family:ui-monospace,monospace' : '') }); i.value = val == null ? '' : val; i.addEventListener('input', () => on(i.value)); return i; }
+function areaIn(val, rows, on, check) {
+  const ta = h('textarea', { class: 'wide', rows, spellcheck: false, autocapitalize: 'off', style: 'text-align:left;font-family:ui-monospace,monospace;font-size:13px' });
+  ta.value = val; ta.addEventListener('input', () => { on(ta.value); if (check) ta.style.outline = check(ta.value) ? '' : '2px solid var(--danger)'; });
+  return ta;
+}
+const jsonOk = t => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o); } catch (e) { return false; } };
+function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF }; }
+function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains }); }
+function extrasRows(E, have) {
+  have = have || [];
+  const rows = [];
+  const tog = (key, ic, tile, titleT, sub) => row({ icon: ic, tile, title: titleT, cls: 'wrap', sub: have.includes(key) ? 'уже в профиле ноды' : sub,
+    right: have.includes(key) ? badge('Есть', 'ok') : UI.toggle(E[key === 'psiphon' ? 'psi' : 'warp'], on => { E[key === 'psiphon' ? 'psi' : 'warp'] = on; UI.nav.refresh(); }, titleT) });
+  rows.push(tog('psiphon', 'globe', '#5856D6', 'Psiphon', 'выход для выбранных доменов (vps-psiphon)'));
+  if (E.psi) rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Psiphon: страна выхода'), textIn(E.region, 'авто — или DE, NL, FR…', x => { E.region = x.toUpperCase(); saveExtras(E); }, true)),
+    h('label', { class: 'field stack' }, h('label', {}, 'Домены через Psiphon'), areaIn(E.psiDomains, 4, x => { E.psiDomains = x; saveExtras(E); })));
+  rows.push(tog('warp', 'globe', '#FF9500', 'WARP', 'выход Cloudflare WARP, например для TikTok (vps-warp)'));
+  if (E.warp) rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Домены через WARP'), areaIn(E.warpDomains, 3, x => { E.warpDomains = x; saveExtras(E); })));
+  return rows;
+}
+function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined }; }
+const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
+
 let D = null;
 const PERIOD = { '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год' };
 const ACTIVE_ST = ['queued', 'buying', 'provisioning', 'deploying'];
@@ -512,6 +628,17 @@ function deployView(pid) {
       row({ title: 'Страна в названии', right: UI.segmented([{ value: 'ru', label: 'Русский' }, { value: 'en', label: 'English' }], D.lang,
         x => { D.lang = x; try { localStorage.setItem('remark_lang', x); } catch (e) {} setPrev(); }) })),
     prevEl));
+  // подключение клиентов: порт и Final Mask
+  if (D.mask === undefined) { D.mask = lsGet('final_mask', true); D.maskJson = lsGet('final_mask_json', MASK_DEF); }
+  if (!D.portMode) { D.portMode = lsGet('port_mode', 'std'); D.port = lsGet('port', '8443'); }
+  const crows = [row({ title: 'Порт для клиентов', right: UI.segmented([{ value: 'std', label: '443' }, { value: 'custom', label: 'Другой' }], D.portMode,
+    x => { D.portMode = x; lsSet('port_mode', x); UI.nav.refresh(); }) })];
+  if (D.portMode === 'custom') crows.push(h('label', { class: 'field stack' }, h('label', {}, 'Порт'), textIn(D.port, '8443', x => { D.port = x.replace(/\D/g, ''); lsSet('port', D.port); }, true)));
+  crows.push(row({ title: 'Final Mask', sub: 'фрагментация TLS ClientHello на клиенте', right: UI.toggle(D.mask, on => { D.mask = on; lsSet('final_mask', on); UI.nav.refresh(); }, 'Final Mask') }));
+  if (D.mask) crows.push(h('label', { class: 'field stack' }, h('label', {}, 'JSON Final Mask'), areaIn(D.maskJson, 12, x => { D.maskJson = x; lsSet('final_mask_json', x); }, jsonOk)));
+  v.append(group('Подключение клиентов', crows,
+    (D.portMode === 'custom' ? `Хосты получат порт ${D.port || '…'}, на ноде он переадресуется на порт Xray (443 тоже продолжит работать) — фаервол открывать не нужно. ` : '')
+    + 'У части российских операторов режут ClientHello на 443/TCP: помогает Final Mask (фрагментация), нестандартный порт или их сочетание.'));
   if (D.hostMode === 'normal') {
     v.append(group('Общий балансировщик', [h('label', { class: 'field stack' }, h('label', {}, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true))],
       'Хосты видимые, с тегом ' + (D.tags || 'NORMAL').toUpperCase() + ' — их подхватит ваш уже настроенный общий балансировщик. Шаблоны и хосты-балансировщики бот не создаёт.'));
@@ -534,24 +661,19 @@ function deployView(pid) {
   }
 
   // дополнения на ноде
-  if (!D.psi) { let saved = {}; try { saved = JSON.parse(localStorage.getItem('psiphon') || '{}'); } catch (e) {}
-    D.psi = { enabled: false, region: saved.region || '', domains: saved.domains || 'google.com\ngoogleapis.com\ngstatic.com\ngoogleusercontent.com' }; }
-  const savePsi = () => { try { localStorage.setItem('psiphon', JSON.stringify({ region: D.psi.region, domains: D.psi.domains })); } catch (e) {} };
-  const prows = [row({ icon: 'globe', tile: '#5856D6', title: 'Psiphon', sub: 'выход для выбранных доменов',
-    right: UI.toggle(D.psi.enabled, on => { D.psi.enabled = on; UI.nav.refresh(); }, 'Psiphon') })];
-  let pnote = 'Ставится на ноду вместе с ней: SOCKS5 только для этого сервера, вотчдог сам меняет плохие выходы. Нужен, когда Google (Gemini, YouTube…) не пускает с адреса сервера.';
-  if (D.psi.enabled) {
-    const ta = h('textarea', { class: 'wide', rows: 4, spellcheck: false, autocapitalize: 'off', style: 'text-align:left;font-family:ui-monospace,monospace' });
-    ta.value = D.psi.domains; ta.addEventListener('input', () => { D.psi.domains = ta.value; savePsi(); });
-    prows.push(h('label', { class: 'field stack' }, h('label', {}, 'Страна выхода'), input(D.psi.region, 'авто — или DE, NL, FR…', x => { D.psi.region = x.toUpperCase(); savePsi(); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Домены через Psiphon'), ta));
+  if (!D.E) D.E = extrasState();
+  const prows = extrasRows(D.E);
+  let pnote = EXTRAS_NOTE + ' Ноды с дополнениями попадают в общий профиль «NV Vision Psiphon», «NV Vision WARP» или «NV Vision Psiphon WARP»: он создаётся один раз, дальше правила берутся из него — менять их в панели.';
+  if (D.E.psi || D.E.warp) {
     const own = prof.script && prof.script_profile === 'existing';
     const gp = own && D.meta ? (D.meta.profiles || []).find(x => x.uuid === prof.panel_profile_uuid) : null;
-    pnote = own ? (gp && !gp.psiphon ? `⚠️ В профиле «${gp.name}» нет выхода psiphon-out — Psiphon встанет, но трафик в него не пойдёт. Добавьте в профиль outbound socks 172.17.0.1:1080 и правило для доменов.`
-        : 'Группа ставит ноды своим скриптом в готовый профиль панели — бот его не меняет, выход psiphon-out в профиле нужен свой.')
-      : 'Ноды с Psiphon попадут в общий профиль «NV Vision Psiphon»: в нём выход psiphon-out (172.17.0.1:1080) и правило для этих доменов (только TCP — UDP Psiphon не умеет). Профиль создаётся один раз; если он уже есть, правила берутся из него — менять их в панели.';
+    if (own) {
+      const miss = gp ? [D.E.psi && !gp.psiphon ? 'psiphon-out' : '', D.E.warp && !gp.warp ? 'warp-out' : ''].filter(Boolean) : [];
+      pnote = miss.length ? `⚠️ В профиле «${gp.name}» нет выхода ${miss.join(' и ')} — дополнение встанет на ноду, но трафик в него не пойдёт. Добавьте выход и правило в профиль в панели.`
+        : 'Группа ставит ноды своим скриптом в готовый профиль панели — бот его не меняет, выходы в профиле нужны свои.';
+    }
     const bad = D.items.filter(i => /^(ru|by)/i.test(i.loc));
-    if (bad.length) pnote = `⚠️ ${bad.map(i => L(i.loc).name).join(', ')}: Psiphon не ставят на сервер в стране, из которой обходят блокировки — его трафик заметен и сам блокируется. ` + pnote;
+    if (bad.length && D.E.psi) pnote = `⚠️ ${bad.map(i => L(i.loc).name).join(', ')}: Psiphon не ставят на сервер в стране, из которой обходят блокировки — его трафик заметен и сам блокируется. ` + pnote;
   }
   v.append(group('Дополнительно на ноде', prows, pnote));
 
@@ -626,7 +748,8 @@ function deployView(pid) {
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
       balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang,
       host_order: D.orderTouched && D.order ? D.order : undefined,
-      psiphon: D.psi && D.psi.enabled ? { enabled: true, region: D.psi.region, domains: D.psi.domains } : undefined }), 'Задачи запущены');
+      ...extrasPayload(D.E), port: D.portMode === 'custom' ? D.port : null,
+      final_mask: D.mask, final_mask_json: D.mask ? D.maskJson : undefined }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });

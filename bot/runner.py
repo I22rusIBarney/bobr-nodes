@@ -15,15 +15,29 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 STAGES = [('buy', 'Покупка в bcloud'), ('ip', 'Создание сервера'), ('dns', 'DNS в Cloudflare'),
-          ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('psiphon', 'Psiphon'), ('panel', 'Регистрация в панели'),
+          ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('extras', 'Дополнения на ноде'), ('panel', 'Регистрация в панели'),
           ('check', 'Проверка')]
 STAGE_ORDER = [s for s, _ in STAGES]
 
 
+def extras_label(d: dict) -> str:
+    port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
+    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + \
+        ([f'порт {port}'] if port not in (None, '', 443, '443') else [])
+    return ', '.join(parts)
+
+
 def stages_for(d: dict) -> list[tuple[str, str]]:
-    """Этапы задачи: Psiphon — только если его ставим."""
-    skip = set(d.get('skipped_stages') or []) | (set() if d.get('psiphon') else {'psiphon'})
-    return [(c, lbl) for c, lbl in STAGES if c not in skip]
+    """Этапы задачи с подписями. Дополнения — только если они есть; у задач по готовой ноде — без покупки и установки."""
+    extra = extras_label(d)
+    if d.get('kind') == 'node':
+        out = ([('ssh', 'Вход по SSH'), ('extras', 'Установка: ' + extra)] if extra else []) + \
+            [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') else [])
+        return out
+    skip = set(d.get('skipped_stages') or []) | (set() if extra else {'extras'})
+    return [(c, 'Дополнения: ' + extra if c == 'extras' else lbl) for c, lbl in STAGES if c not in skip]
+
+
 STATUS_ICON = {'queued': '🕓', 'buying': '⏳', 'provisioning': '⏳', 'deploying': '⏳', 'done': '✅', 'failed': '❌'}
 
 
@@ -50,10 +64,8 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
     lines = [head, '']
     cur = job['stage']
     cur_i = STAGE_ORDER.index(cur) if cur in STAGE_ORDER else -1
-    skip = {c for c, _ in STAGES} - {c for c, _ in stages_for(d)}
-    for i, (code, label) in enumerate(STAGES):
-        if code in skip:
-            continue
+    for code, label in stages_for(d):
+        i = STAGE_ORDER.index(code)
         if job['status'] == 'done' or i < cur_i:
             mark = '✅'
         elif i == cur_i:
@@ -68,14 +80,14 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
         lines += ['', f'<b>Ошибка:</b> {html.escape(job["error"][:600])}']
     elif job['status'] in ('provisioning', 'deploying', 'buying') and last:
         lines += ['', f'<i>{html.escape(last[:160])}</i>']
-    elif job['status'] == 'done':
+    elif job['status'] == 'done' and d.get('kind') != 'node':
         lines += ['', f'Root-пароль: <tg-spoiler><code>{html.escape(d.get("password", ""))}</code></tg-spoiler>']
     return '\n'.join(lines)
 
 
 class Runner:
     def __init__(self, store: Store, bot, logdir: str | Path = 'data/logs', *, deploy=engine.deploy,
-                 deploy_recipe=engine.deploy_recipe,
+                 deploy_recipe=engine.deploy_recipe, update_node=engine.update_node,
                  bcloud_factory=bcloud_from, poll_every: float = 10, ip_timeout: float = 20 * 60, edit_every: float = 3):
         self.store = store
         self.bot = bot
@@ -83,6 +95,8 @@ class Runner:
         self.logdir.mkdir(parents=True, exist_ok=True)
         self.deploy = deploy
         self.deploy_recipe = deploy_recipe
+        self.update_node = update_node
+        self.keydir = self.logdir.parent / 'ssh'
         self.bcloud_factory = bcloud_factory
         self.poll_every = poll_every
         self.ip_timeout = ip_timeout
@@ -99,6 +113,14 @@ class Runner:
         if self._sem is None or n != self._sem_n:
             self._sem, self._sem_n = asyncio.Semaphore(n), n
         return self._sem
+
+    def bot_key(self) -> tuple[str, str]:
+        from . import sshkey
+        return sshkey.ensure(self.keydir)
+
+    def pubkeys(self) -> str:
+        """Ключи для authorized_keys новой ноды: ваш (из настроек) и ключ бота."""
+        return '\n'.join(x for x in (self.store.get('ssh_pubkey'), self.bot_key()[1]) if x and x != '-')
 
     def log_path(self, jid: int) -> Path:
         return self.logdir / f'job-{jid}.log'
@@ -155,6 +177,47 @@ class Runner:
         self.store.update_job(jid, **fields)
         await self.render(jid, force='status' in fields)
 
+    def ssh_of(self, pid: int, node_uuid: str) -> dict:
+        """Как заходить на ноду панели: сохранённый доступ → пароль из задачи бота, купившей её → пусто."""
+        import json as _json
+        try:
+            saved = _json.loads(self.store.get(f'node_ssh:{pid}:{node_uuid}') or '{}')
+        except ValueError:
+            saved = {}
+        return saved
+
+    async def _run_node(self, jid: int, d: dict, prof: dict) -> None:
+        """Дополнения на уже работающей ноде панели (без покупки и установки)."""
+        loop = asyncio.get_running_loop()
+        ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
+        node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
+                'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
+                'port': d.get('port'), 'final_mask': d.get('final_mask'),
+                'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22)}
+        if ssh.get('mode') == 'key':
+            node['ssh_key'] = self.bot_key()[0]
+        else:
+            node['ssh_password'] = ssh.get('password', '')
+        pconf = {**prof, 'ssh_pubkey': self.pubkeys()}
+        self.last[jid] = 'ждём свободный слот'
+        await self.render(jid)
+        async with self.sem():
+            await self._set(jid, status='deploying', stage=stages_for(d)[0][0], error='')
+
+            def on_log(text: str) -> None:
+                self.last[jid] = text
+                lf.write(f'\n### {time.strftime("%H:%M:%S")} {text}\n')
+                lf.flush()
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            def on_stage(name: str) -> None:
+                self.store.update_job(jid, stage=name)
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            with open(self.log_path(jid), 'a', encoding='utf-8') as lf:
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} дополнения на ноде #{jid}: {d.get("name")} {d.get("ip")}\n')
+                await asyncio.to_thread(self.update_node, node, pconf, lf, on_log, on_stage)
+
     async def _run(self, jid: int) -> None:
         job = self.store.job(jid)
         if not job:
@@ -165,6 +228,10 @@ class Runner:
             prof = self.store.profile(job['profile_id'])
             if not prof:
                 raise Fail('группа удалена')
+            if d.get('kind') == 'node':
+                await self._run_node(jid, d, prof)
+                await self._set(jid, status='done', error='')
+                return
             bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
 
             if not d.get('server_id'):
@@ -200,10 +267,10 @@ class Runner:
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
                         'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
-                        'psiphon': d.get('psiphon'),
+                        'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
                         'traffic_control': prof.get('traffic_control', True)}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
-                         'ssh_pubkey': self.store.get('ssh_pubkey')}
+                         'ssh_pubkey': self.pubkeys()}
                 fn = self.deploy
                 sid = d.get('script_id', prof.get('script_id'))
                 if sid:
