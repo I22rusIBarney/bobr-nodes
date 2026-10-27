@@ -343,6 +343,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         items = b.get('items') or [{'location': b.get('location'), 'idx': b.get('idx'), 'domains': b.get('domains') or []}]
         if not isinstance(items, list) or not items:
             raise ApiError('Не выбрано ни одной локации')
+        psiphon = None
+        ps = b.get('psiphon')
+        if isinstance(ps, dict) and ps.get('enabled'):
+            try:
+                psiphon = {'region': engine.psiphon_regions(str(ps.get('region') or '')),
+                           'domains': engine.psiphon_rules(ps.get('domains') or '')}
+            except engine.StepError as e:
+                raise ApiError(str(e)) from None
         period = str(b.get('period') or '1m')
         all_domains = [d for it in items for d in (it.get('domains') or [])]
         if not 1 <= len(all_domains) <= 50:
@@ -372,14 +380,6 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                   '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
                                   str(b.get('balancer_remark') or ''), b.get('balancer_template'))
                  for loc, _, _ in plan]
-        psiphon = None
-        ps = b.get('psiphon')
-        if isinstance(ps, dict) and ps.get('enabled'):
-            try:
-                psiphon = {'region': engine.psiphon_regions(str(ps.get('region') or '')),
-                           'domains': engine.psiphon_rules(ps.get('domains') or '')}
-            except engine.StepError as e:
-                raise ApiError(str(e)) from None
         places = {}
         order = b.get('host_order')
         if isinstance(order, list) and order:

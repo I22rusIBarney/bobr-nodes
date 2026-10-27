@@ -16,4 +16,5 @@ def test_e2e():
                        timeout=600, cwd=ROOT, env={**os.environ, 'PYTHONPATH': os.pathsep.join(
                            x for x in (str(ROOT), os.environ.get('PYTHONPATH', '')) if x)})
     out = r.stdout + r.stderr
-    assert r.returncode == 0 and 'FAILS: 0' in out, out[-5000:]
+    fails = [x for x in out.splitlines() if x.startswith('FAIL ')]
+    assert r.returncode == 0 and 'FAILS: 0' in out, '\n'.join(fails) + '\n' + out[-3000:]
