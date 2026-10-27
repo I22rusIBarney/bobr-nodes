@@ -369,11 +369,19 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                   '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
                                   str(b.get('balancer_remark') or ''), b.get('balancer_template'))
                  for loc, _, _ in plan]
+        places = {}
+        order = b.get('host_order')
+        if isinstance(order, list) and order:
+            try:  # уже существующие хосты — чтобы не ставить «после» несуществующего
+                meta = await asyncio.to_thread(lambda: engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', '')).meta())
+            except engine.StepError as e:
+                raise ApiError(f'Панель: {e} — не получилось проверить порядок хостов') from None
+            places = svc.host_places(order, {loc: doms for loc, _, doms in plan}, {x['uuid'] for x in meta['hosts']})
         ids = []
         for (loc, idx, doms), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
                                          squads, str(b.get('remark') or '')[:100], host,
-                                         'en' if b.get('remark_lang') == 'en' else 'ru')
+                                         'en' if b.get('remark_lang') == 'en' else 'ru', places)
         return J({'ids': ids})
 
     # ── мои скрипты ──

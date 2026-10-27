@@ -23,6 +23,7 @@ class World:
         self.profiles: list[dict] = []
         self.nodes: list[dict] = []
         self.hosts: list[dict] = []
+        self.reorders = 0
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
         self.templates: list[dict] = []
@@ -151,7 +152,7 @@ def make_server(world: World) -> ThreadingHTTPServer:
             if p == '/api/nodes':
                 return self.send(200, {'response': W.nodes})
             if p == '/api/hosts':
-                return self.send(200, {'response': W.hosts})
+                return self.send(200, {'response': sorted(W.hosts, key=lambda x: x['viewPosition'])})
             if p == '/api/internal-squads':
                 return self.send(200, {'response': {'total': len(W.squads), 'internalSquads': [
                     dict(uuid=u, name=v['name'], info={'membersCount': 0, 'inboundsCount': len(v['inbounds'])}, inbounds=v['inbounds'])
@@ -200,9 +201,17 @@ def make_server(world: World) -> ThreadingHTTPServer:
                         assert b['securityLayer'] == 'DEFAULT' and 'alpn' not in b and 'sni' not in b
                     import re as _re
                     assert all(_re.fullmatch(r'[A-Z0-9_:]+', t) for t in b.get('tags', []))
-                    h = {'uuid': str(uuid.uuid4()), 'xrayJsonTemplateUuid': None, 'isHidden': False, 'tags': [], **b}
+                    h = {'uuid': str(uuid.uuid4()), 'xrayJsonTemplateUuid': None, 'isHidden': False, 'tags': [], **b,
+                         'viewPosition': max([x['viewPosition'] for x in W.hosts], default=0) + 1}
                     W.hosts.append(h)
                     return self.send(201, {'response': h})
+                if p == '/api/hosts/actions/reorder':
+                    by = {x['uuid']: x for x in W.hosts}
+                    for x in b['hosts']:
+                        assert set(x) == {'uuid', 'viewPosition'} and isinstance(x['viewPosition'], int)
+                        by[x['uuid']]['viewPosition'] = x['viewPosition']
+                    W.reorders += 1
+                    return self.send(200, {'response': {'isUpdated': True}})
             self.send(404, {})
 
         def do_PUT(self):

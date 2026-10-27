@@ -433,6 +433,31 @@ async def main():
     ok(len(nh) == 3 and all(not h['isHidden'] and h['tags'] == ['NORMAL'] and not h.get('xrayJsonTemplateUuid') for h in nh)
        and len(world.templates) == tb, 'режим NORMAL: хосты видимые с тегом NORMAL, шаблоны и балансировщики не создаются')
     ok({h['remark'] for h in nh} == {'🇩🇪 Германия 1', '🇩🇪 Германия 2', '🇳🇱 Нидерланды 1'}, f'названия хостов: {[h["remark"] for h in nh]}')
+    # порядок хостов: список панели в мастере, новые — в выбранные места
+    st, meta = await wapi(f'profiles/{pid}/panel')
+    cur = sorted(world.hosts, key=lambda x: x['viewPosition'])
+    ok([x['uuid'] for x in meta['hosts']] == [x['uuid'] for x in cur] and 'remark' in meta['hosts'][0],
+       'мастер видит текущие хосты панели по порядку')
+    first, others = meta['hosts'][0]['uuid'], [x['uuid'] for x in meta['hosts'][1:]]
+    st, d1 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 2, 'base': 'example.net'})
+    st, d2 = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'nl', 'count': 1, 'base': 'example.net', 'exclude': d1['domains']})
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    r0 = world.reorders
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'host_mode': 'normal', 'tags': 'NORMAL',
+                                           'host_order': ['#nl', first, '#de'] + others,
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': d1['domains']},
+                                                     {'location': 'nl', 'idx': 1, 'domains': d2['domains']}]})
+    ok(st == 200 and len(js['ids']) == 3, f'деплой с заданным порядком хостов: {js}')
+    await runner.wait_all()
+    order = [x['address'] for x in sorted(world.hosts, key=lambda x: x['viewPosition'])]
+    want = d2['domains'] + [cur[0]['address']] + d1['domains'] + [x['address'] for x in cur[1:]]
+    ok(order == want and world.reorders > r0, f'хосты встали на выбранные места: {order[:6]} …')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'host_order': ['#de', 'no-such-host'],
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['zz1.example.net']}]})
+    ok(st == 200, 'неизвестные хосты в порядке игнорируются')
+    await runner.wait_all()
+    ok(sorted(world.hosts, key=lambda x: x['viewPosition'])[0]['address'] == 'zz1.example.net', 'новый хост — в начало списка')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')

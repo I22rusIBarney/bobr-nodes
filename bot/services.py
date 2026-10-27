@@ -169,9 +169,30 @@ def host_options(location: str, mode: str = 'simple', tags: str | list | None = 
             'balancer': {'tag': tag, 'remark': balancer_remark or DEFAULT_BALANCER_REMARK, 'template': balancer_template}}
 
 
+def host_places(order: list, domains_of: dict[str, list[str]], known: set[str]) -> dict[str, dict]:
+    """order — желаемый список: UUID уже существующих хостов и '#<локация>' на месте новых.
+    Для каждого нового домена: after — UUID ближайшего существующего хоста выше ('' — начало списка),
+    before — новые домены, которые стоят между ним и этим доменом."""
+    places, anchor, between, seen = {}, '', [], set()
+    for tok in order:
+        if not isinstance(tok, str):
+            continue
+        if tok.startswith('#'):
+            loc = tok[1:]
+            if loc in seen:
+                continue
+            seen.add(loc)
+            for dom in domains_of.get(loc) or []:
+                places[dom] = {'after': anchor, 'before': list(between)}
+                between.append(dom)
+        elif tok in known:
+            anchor, between = tok, []
+    return places
+
+
 async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int,
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
-                      host: dict | None = None, lang: str = 'ru') -> list[int]:
+                      host: dict | None = None, lang: str = 'ru', places: dict | None = None) -> list[int]:
     q = quote(cat, location, idx, period, len(domains))
     loc, offer = q['loc'], q['offer']
     batch = secrets.token_hex(4)
@@ -185,7 +206,7 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
                 'remark': render_remark(remark, loc, name, dom, i, lang), 'password': gen_password(),
-                'host': host, 'squads': squads, 'script_id': (store.profile(pid) or {}).get('script_id'),
+                'host': host, 'squads': squads, 'place': (places or {}).get(dom), 'script_id': (store.profile(pid) or {}).get('script_id'),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)

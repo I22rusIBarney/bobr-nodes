@@ -372,7 +372,7 @@ const PERIOD = { '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 
 const ACTIVE_ST = ['queued', 'buying', 'provisioning', 'deploying'];
 function fetchCat() {
   const d = D;
-  Object.assign(d, { cat: null, err: null, meta: null, metaErr: null, squads: null, zones: null, zonesErr: '', items: [], domains: {}, picked: false });
+  Object.assign(d, { cat: null, err: null, meta: null, metaErr: null, squads: null, zones: null, zonesErr: '', items: [], domains: {}, picked: false, order: null, orderTouched: false, sel: null });
   api('catalog?pid=' + d.pid).then(c => {
     if (D !== d) return;
     d.cat = c;
@@ -533,6 +533,56 @@ function deployView(pid) {
     v.append(group(multi ? 'Балансировщики по странам' : 'Балансировщик', brows, note));
   }
 
+  // порядок хостов: текущий список панели, новые — блоками по локациям, их можно двигать
+  if (D.meta && D.meta.hosts) {
+    const locTok = D.items.map(i => '#' + i.loc);
+    if (!D.order) D.order = D.meta.hosts.map(x => x.uuid);
+    D.order = D.order.filter(t => t[0] !== '#' || locTok.includes(t));
+    locTok.forEach(t => { if (!D.order.includes(t)) D.order.push(t); });
+    if (D.sel && !D.order.includes(D.sel)) D.sel = null;
+    const byId = Object.fromEntries(D.meta.hosts.map(x => [x.uuid, x]));
+    const changed = () => { D.orderTouched = true; UI.haptic('select'); UI.nav.refresh(); };
+    const move = (t, d) => { const i = D.order.indexOf(t), j = i + d; if (j < 0 || j >= D.order.length) return; [D.order[i], D.order[j]] = [D.order[j], D.order[i]]; changed(); };
+    const putAfter = (t, after) => { D.order.splice(D.order.indexOf(t), 1); D.order.splice(after === null ? 0 : D.order.indexOf(after) + 1, 0, t); D.sel = null; changed(); };
+    const numOf = (it, n) => { const d = (D.domains[it.loc] || [])[n - 1]; const m = d && d.split('.')[0].match(/(\d+)$/); return m ? m[1] : String(n); };
+    const remarkOf = (it, n) => { const loc = L(it.loc), d = (D.domains[it.loc] || [])[n - 1] || it.loc + n + '.' + (D.zone || 'example.com');
+      return (D.remark || '{flag} {country} {n}').replace('{flag}', loc.flag).replace('{country}', countryOf(loc)).replace('{n}', numOf(it, n))
+        .replace('{name}', d.split('.')[0]).replace('{domain}', d).replace(/\s+/g, ' ').trim() || d; };
+    const mini = (ic, label, on, flip, pressed) => h('button', { class: 'btn tinted small', type: 'button', 'aria-label': label, 'aria-pressed': pressed === undefined ? undefined : String(pressed),
+      style: 'min-width:38px;padding:6px 8px' + (flip ? ';transform:scaleY(-1)' : ''), onclick: e => { e.stopPropagation(); on(); } }, icon(ic));
+    const rows = [];
+    if (D.sel) rows.push(row({ icon: 'arrowDown', tile: '#34C759', title: 'В самое начало', cls: 'accent', onClick: () => putAfter(D.sel, null) }));
+    const isHost = t => t[0] !== '#';
+    D.order.forEach((t, i) => {
+      if (isHost(t)) {
+        const x = byId[t];
+        if (!x) return;
+        const sub = [x.address, x.balancer ? 'балансировщик' : '', x.hidden ? 'скрытый' : '', x.disabled ? 'выключен' : '', (x.tags || []).join(' ')].filter(Boolean).join(' · ');
+        const hr = row({ title: x.remark || x.address, sub, onClick: D.sel ? () => putAfter(D.sel, t) : null, chevron: false,
+          right: D.sel ? h('span', { class: 'd' }, 'после него') : null });
+        if (x.disabled || x.hidden) hr.style.opacity = '.62';
+        rows.push(hr);
+        return;
+      }
+      const it = D.items.find(x => '#' + x.loc === t);
+      const names = it.count === 1 ? remarkOf(it, 1) : it.count === 2 ? remarkOf(it, 1) + ', ' + remarkOf(it, 2) : remarkOf(it, 1) + ' … ' + remarkOf(it, it.count);
+      const bal = D.hostMode === 'balancer' ? ' + балансировщик, если его ещё нет' : '';
+      const r = row({ cls: 'wrap', title: names, sub: `новые · ${it.count} ${UI.plural(it.count, 'хост', 'хоста', 'хостов')}${bal}`, chevron: false,
+        right: h('div', { style: 'display:flex;gap:6px' },
+          mini('arrowDown', 'Выше', () => move(t, -1), true), mini('arrowDown', 'Ниже', () => move(t, 1)),
+          mini('stack', 'Выбрать место в списке', () => { D.sel = D.sel === t ? null : t; UI.haptic('select'); UI.nav.refresh(); }, false, D.sel === t)) });
+      r.style.cssText += ';background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)';
+      rows.push(r);
+    });
+    const box = h('div', { class: 'list', style: 'max-height:440px;overflow:auto' }, rows);
+    const foot = D.sel ? 'Нажмите на хост — новые встанут сразу после него.'
+      : (D.meta.hosts.length ? `В панели ${D.meta.hosts.length} ${UI.plural(D.meta.hosts.length, 'хост', 'хоста', 'хостов')}. ` : 'В панели пока нет хостов. ')
+        + (D.orderTouched ? 'Новые встанут туда, где они сейчас в списке.' : 'По умолчанию новые идут в конец — двигайте стрелками или кнопкой выбора места.');
+    v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Порядок хостов'), box,
+      D.orderTouched ? h('button', { class: 'btn tinted small', type: 'button', style: 'margin:8px 16px 0', onclick: () => { D.order = null; D.orderTouched = false; D.sel = null; UI.nav.refresh(); } }, 'Сбросить — в конец') : null,
+      h('div', { class: 'group-f' }, foot)));
+  }
+
   // итог
   const per = D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 };
   const priceOf = it => { const o = L(it.loc).offers.find(x => x.idx === it.idx); return per.months <= 1 ? o.price_kop : Math.ceil(o.price_kop * per.months * (100 - per.pct) / 100 / 100) * 100; };
@@ -552,7 +602,8 @@ function deployView(pid) {
     const items = D.items.map(it => ({ location: it.loc, idx: it.idx, domains: D.domains[it.loc] || [] }));
     const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, items, period: D.period,
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
-      balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang }), 'Задачи запущены');
+      balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang,
+      host_order: D.orderTouched && D.order ? D.order : undefined }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });

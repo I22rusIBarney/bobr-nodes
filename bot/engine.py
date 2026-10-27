@@ -308,11 +308,47 @@ class Panel:
                      'inbounds': [{'uuid': i['uuid'], 'tag': i['tag'], 'port': i.get('port'), 'type': i.get('type'),
                                    'security': i.get('security')} for i in p.get('inbounds', [])]}
                     for p in self.call('GET', '/api/config-profiles')['configProfiles']]
-        return {'squads': squads, 'templates': tpls, 'profiles': profiles}
+        hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''),
+                  'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
+                  'balancer': bool(x.get('xrayJsonTemplateUuid'))}
+                 for x in sorted(self.call('GET', '/api/hosts'), key=lambda x: x.get('viewPosition', 0))]
+        return {'squads': squads, 'templates': tpls, 'profiles': profiles, 'hosts': hosts}
+
+    def place_hosts(self, mine: list[str], place: dict, log):
+        """Ставит только что созданные хосты (mine) после хоста place['after'] ('' — в самое начало).
+        Хосты с адресами из place['before'] — новые хосты той же установки, которые по плану идут раньше:
+        если они уже на месте, встаём за ними, поэтому порядок не зависит от того, какая нода готова первой."""
+        hosts = sorted(self.call('GET', '/api/hosts'), key=lambda x: x.get('viewPosition', 0))
+        ours = [x for x in hosts if x['uuid'] in mine]
+        rest = [x for x in hosts if x['uuid'] not in mine]
+        if not ours:
+            return
+        after = place.get('after')
+        if after:
+            idx = next((i for i, x in enumerate(rest) if x['uuid'] == after), None)
+            if idx is None:
+                log('панель: хоста, после которого ставить новые, больше нет — оставил в конце')
+                return
+        else:
+            idx = -1
+        before = set(place.get('before') or [])
+        while idx + 1 < len(rest) and rest[idx + 1].get('address') in before:
+            idx += 1
+        order = rest[:idx + 1] + ours + rest[idx + 1:]
+        positions = sorted(x.get('viewPosition', i) for i, x in enumerate(hosts))
+        if len(set(positions)) != len(positions):
+            positions = list(range(1, len(hosts) + 1))
+        changes = [{'uuid': x['uuid'], 'viewPosition': pos} for x, pos in zip(order, positions)
+                   if x.get('viewPosition') != pos]
+        if changes:
+            self.call('POST', '/api/hosts/actions/reorder', {'hosts': changes})
+        prev = rest[idx]['remark'] if idx >= 0 else None
+        log('панель: хосты поставлены ' + (f'после «{prev}»' if prev else 'в начало списка'))
 
     def ensure_balancer(self, tag: str, base_uuid: str | None, remark: str, prof: dict, inbound: dict,
-                        node: dict, log, tls: bool = True) -> str:
+                        node: dict, log, tls: bool = True) -> str | None:
         """Шаблон Balancer_<tag> (копия базового с подстановкой тега) и видимый хост-балансировщик с ним.
+        Возвращает UUID хоста-балансировщика, если он создан сейчас.
         Если они уже есть — ничего не меняем: новые скрытые хосты с тегом подхватятся сами."""
         tag = tag.upper()
         tpls = self.call('GET', '/api/subscription-templates')['templates']
@@ -334,11 +370,12 @@ class Panel:
         bh = next((h for h in hosts if h.get('xrayJsonTemplateUuid') == tpl['uuid']), None)
         if bh:
             log(f'панель: хост-балансировщик «{bh["remark"]}» уже есть')
+            new = None
         else:
-            self.call('POST', '/api/hosts', {**self.host_body(prof, inbound, node, tls), 'remark': remark[:100],
-                                             'xrayJsonTemplateUuid': tpl['uuid']})
+            new = self.call('POST', '/api/hosts', {**self.host_body(prof, inbound, node, tls), 'remark': remark[:100],
+                                                   'xrayJsonTemplateUuid': tpl['uuid']})['uuid']
             log(f'панель: хост-балансировщик «{remark}» создан')
-        return tpl['uuid']
+        return new  # UUID нового хоста-балансировщика или None, если он уже был
 
     def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log):
         # Один общий профиль на все ноды: тег Vision-NV (уникален в панели), сертификат — через ссылку CERT_LINK.
@@ -404,6 +441,7 @@ class Panel:
         hidden = bool(opts.get('hidden', balancer))
         tags = [t for t in (opts.get('tags') or []) if re.fullmatch(r'[A-Z0-9_:]{1,36}', t)]
         hosts = self.call('GET', '/api/hosts')
+        mine = []
         for n, inbound in enumerate(inbounds, 1):
             host = next((h for h in hosts if h['address'] == node['domain']
                          and h['inbound']['configProfileInboundUuid'] == inbound['uuid']
@@ -418,13 +456,20 @@ class Panel:
                 body['isHidden'] = True
             if tags:
                 body['tags'] = tags
-            self.call('POST', '/api/hosts', body)
+            mine.append(self.call('POST', '/api/hosts', body)['uuid'])
             extra = ', '.join(([] if not hidden else ['скрытый']) + ([f'теги {", ".join(tags)}'] if tags else []))
             log(f'панель: хост {inbound.get("tag", "")} создан' + (f' ({extra})' if extra else ''))
         if balancer:
             b = opts.get('balancer') or {}
-            self.ensure_balancer(b.get('tag') or (tags[0] if tags else 'PL'), b.get('template'),
-                                 b.get('remark') or node.get('remark') or node['name'], prof, inbounds[0], node, log, tls)
+            bh = self.ensure_balancer(b.get('tag') or (tags[0] if tags else 'PL'), b.get('template'),
+                                      b.get('remark') or node.get('remark') or node['name'], prof, inbounds[0], node, log, tls)
+            if bh:
+                mine.insert(0, bh)  # новый хост-балансировщик — над своими нодами
+        if mine and node.get('place') is not None:
+            try:
+                self.place_hosts(mine, node['place'], log)
+            except StepError as e:  # порядок — не повод ронять готовую ноду
+                log(f'панель: не удалось переставить хосты: {e}')
 
         for sq in squads:
             cur = self.call('GET', f'/api/internal-squads/{sq}')
