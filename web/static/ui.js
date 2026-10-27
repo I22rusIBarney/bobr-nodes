@@ -103,19 +103,23 @@
       return UI.h('section', { class: 'group' }, header ? UI.h('div', { class: 'group-h' }, header) : null,
         UI.h('div', { class: 'list' }, rows), footer ? UI.h('div', { class: 'group-f' }, footer) : null);
     },
-    /* Строка списка. status: [текст, 'ok'|'bad'|'warn'|'run'] — точка и слово справа; mono — detail машинным шрифтом;
+    /* Строка списка. status: [текст, 'ok'|'bad'|'warn'|'run', подпись] — точка и слово справа (без текста — одна точка); mono — detail машинным шрифтом;
        copy — значение, которое копируется кнопкой справа (IP, пароль, ключ). Иконки без цветных подложек. */
     row({ title, sub, detail, icon, flag, onClick, chevron, cls, right, label, status, mono, copy, copyLabel }) {
       const tap = !!onClick;
       const lead = icon ? UI.h('span', { class: 'icon-tile' }, UI.icon(icon))
         : flag ? UI.h('span', { class: 'flag-tile', 'aria-hidden': 'true' }, flag) : null;
-      if (status) right = UI.h('span', { class: 'st ' + (status[1] || '') }, status[0]);
+      // status без текста — только точка (успешно, на связи); третий элемент — подпись для экранного диктора
+      let dot = null;
+      if (status && !status[0]) dot = UI.h('span', { class: 'st dot ' + (status[1] || ''), role: 'img', 'aria-label': status[2] || '', title: status[2] || '' });
+      else if (status) right = UI.h('span', { class: 'st ' + (status[1] || '') }, status[0]);
       if (copy) right = UI.h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Скопировать ' + (copyLabel || title),
         onclick: e => { e.stopPropagation(); UI.copy(copy, copyLabel || title); } }, UI.icon('copy'));
       const n = UI.h(tap ? 'button' : 'div', {
         class: 'row' + (tap ? ' tap' : '') + (lead ? ' has-icon' : '') + (cls ? ' ' + cls : ''), onclick: onClick, type: tap ? 'button' : undefined, 'aria-label': label,
       }, lead,
         UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), sub ? UI.h('div', { class: 's' }, sub) : null),
+        dot,
         detail !== undefined && detail !== null ? UI.h('span', { class: 'd' + (mono ? ' mono' : ' num') }, detail) : null,
         right || null,
         (chevron !== undefined ? chevron : tap && !/accent|destructive/.test(cls || '')) ? UI.icon('chevron', 'chev') : null);

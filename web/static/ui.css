@@ -139,7 +139,8 @@ a { color: var(--accent-text); text-decoration: none; }
 .st.warn::before { background: var(--warn); }
 .st.run::before { background: var(--accent); }
 .st.bad { color: var(--danger); }
-.st.bare { font-size: 0; gap: 0; }
+.st.bare, .st.dot { font-size: 0; gap: 0; }
+.st.dot { padding: 0 2px; }
 
 /* ── Раскрывающиеся блоки (сложное — по запросу) ── */
 .fold { display: flex; align-items: center; gap: var(--s3); width: 100%; min-height: 48px; padding: 0 var(--s4); background: none; border: 0; text-align: left; cursor: pointer; position: relative; }

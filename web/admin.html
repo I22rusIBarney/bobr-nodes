@@ -112,9 +112,9 @@ function home() {
     row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } })]));
   const sec = ST.security || {}, hd = sec.hardened;
   const ok = k => s[k] && s[k].set;
-  const conn = (set, off) => set ? null : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
+  const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
   v.append(group('Сервер бота', [
-    row({ title: 'Безопасность', status: hd ? (hd.password_login ? ['вход по паролю', 'warn'] : null) : ['не защищён', 'bad'], onClick: () => UI.nav.push(securityView) }),
+    row({ title: 'Безопасность', status: hd ? (hd.password_login ? ['вход по паролю', 'warn'] : ['', 'ok', 'защищён']) : ['не защищён', 'bad'], onClick: () => UI.nav.push(securityView) }),
     row({ title: 'bcloud', status: conn(ok('bcloud_url') && ok('bcloud_token')), onClick: () => UI.nav.push(bcloudView) }),
     row({ title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ title: 'Gemini', status: conn(ok('gemini_key'), null), detail: ok('gemini_key') ? null : 'не задан', onClick: () => UI.nav.push(geminiView) }),
@@ -195,7 +195,7 @@ function scriptsView() {
   v.append(group('Скрипты', [
     row({ title: 'Nuvrion Vision', sub: 'VLESS TLS Vision', detail: 'встроенный' }),
     ...list.map(s => row({ title: s.title, sub: h('span', { class: 'mono' }, mid(`${s.repo}/${s.path}`, 34) + ' @' + s.sha.slice(0, 7)),
-      status: s.status === 'approved' ? null : (SST[s.status] || [s.status, '']), detail: s.used_by.length ? s.used_by.join(', ') : null,
+      status: s.status === 'approved' ? ['', 'ok', 'утверждён'] : (SST[s.status] || [s.status, '']), detail: s.used_by.length ? s.used_by.join(', ') : null,
       onClick: () => UI.nav.push(() => scriptView(s.id)) }))], 'Справа — группы, которые ставят этим скриптом.'));
   return v;
 }
@@ -308,7 +308,7 @@ function groupView(pid) {
 function jobRow(j) {
   const sub = j.status === 'failed' ? j.error : ACTIVE_ST.includes(j.status) ? (STAGE[j.stage] || STATUS[j.status][0]) : [j.loc_name, specText(j.spec)].filter(Boolean).join(', ');
   return row({ flag: j.flag || '·', title: mid(j.domain, 36), sub: (sub || '').slice(0, 120),
-    status: j.status === 'failed' ? ['ошибка', 'bad'] : ACTIVE_ST.includes(j.status) ? [STATUS[j.status][0].toLowerCase(), 'run'] : null,
+    status: j.status === 'failed' ? ['ошибка', 'bad'] : ACTIVE_ST.includes(j.status) ? [STATUS[j.status][0].toLowerCase(), 'run'] : j.status === 'done' ? ['', 'ok', 'готово'] : null,
     onClick: () => { delete JOB[j.id]; UI.nav.push(() => jobView(j.id)); } });
 }
 
@@ -459,10 +459,10 @@ function nodesView(pid) {
   v.append(h('div', { class: 'subtitle' }, `${L.nodes.length} ${UI.plural(L.nodes.length, 'нода', 'ноды', 'нод')}, онлайн ${total}`));
   v.append(group(null, L.nodes.map(n => row({ flag: flagOf(n.country), title: n.name,
     sub: [mid(n.address, 30), n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(', '),
-    status: n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : null,
+    status: n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : ['', 'ok', 'на связи'],
     detail: n.connected && !n.disabled && n.online != null ? String(n.online) : null,
     onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
-    'Справа — пользователи онлайн. Внутри ноды — Psiphon, WARP, порт, Final Mask, смена IP и SSH.'));
+    'Зелёная точка — нода на связи, число — пользователи онлайн. Внутри ноды — Psiphon, WARP, порт, Final Mask, смена IP и SSH.'));
   return v;
 }
 function nodeView(pid, uuid) {
