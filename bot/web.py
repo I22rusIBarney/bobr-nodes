@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from pathlib import Path
@@ -111,6 +112,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return web.json_response({'detail': str(e)}, status=e.status)
         except (ValueError, BcloudError, engine.StepError, sc.ScriptError) as e:
             return web.json_response({'detail': str(e)}, status=400)
+        except web.HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001 — показываем причину, а не «сервер не смог»
+            logging.getLogger(__name__).exception('api %s', request.path)
+            return web.json_response({'detail': f'Ошибка бота: {type(e).__name__}: {e}'[:300]}, status=500)
 
     app = web.Application(middlewares=[headers, guard], client_max_size=256 * 1024)
     r = web.RouteTableDef()
@@ -394,6 +400,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
             out.append({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                         'disabled': bool(n.get('isDisabled')), 'country': n.get('countryCode') or '',
+                        'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                         'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
         return J({'nodes': out, 'bot_key': runner.bot_key()[1]})
@@ -419,7 +426,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return J({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                   'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                   'inbound_port': next((i.get('port') for i in pr.get('inbounds', [])
-                                        if i['uuid'] in ((n.get('configProfile') or {}).get('activeInbounds') or [])), None),
+                                        if i['uuid'] in engine.active_inbounds(n)), None),
+                  'country': n.get('countryCode') or '', 'online': n.get('usersOnline'),
                   'hosts': [{'uuid': h['uuid'], 'remark': h.get('remark', ''), 'address': h.get('address', ''),
                              'port': h.get('port'), 'final_mask': bool(h.get('finalMask')), 'hidden': bool(h.get('isHidden'))}
                             for h in hosts],

@@ -424,6 +424,11 @@ def make_balancer_template(base: dict, tag: str) -> dict:
     return t
 
 
+def active_inbounds(pnode: dict) -> list[str]:
+    """UUID активных inbound ноды. В ответе панели это объекты {uuid, tag, port…}, в запросах — просто UUID."""
+    return [x.get('uuid') if isinstance(x, dict) else x for x in ((pnode.get('configProfile') or {}).get('activeInbounds') or [])]
+
+
 class Panel:
     def __init__(self, url: str, token: str, cookie: str = '', extra_headers: dict | None = None):
         self.url = url.rstrip('/')
@@ -577,7 +582,7 @@ class Panel:
 
     def node_hosts(self, pnode: dict, domains: set[str]) -> list[dict]:
         """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP."""
-        active = set((pnode.get('configProfile') or {}).get('activeInbounds') or [])
+        active = set(active_inbounds(pnode))
         names = {pnode['address']} | set(domains)
         out = []
         for h in self.call('GET', '/api/hosts'):
@@ -621,7 +626,7 @@ class Panel:
         by_tag = {i['tag']: i['uuid'] for i in prof['inbounds']}
         old_tag = {i['uuid']: i['tag'] for i in cur['inbounds']}
         umap = {u: by_tag[tmap[t]] for u, t in old_tag.items() if tmap.get(t) in by_tag}
-        active = [umap[u] for u in cp.get('activeInbounds') or [] if u in umap]
+        active = [umap[u] for u in active_inbounds(pnode) if u in umap]
         if not active:
             raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
         self.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'],
@@ -1261,7 +1266,7 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
         if extras:
             cur = panel.upgrade_node(pnode, extras, hosts, log)
         if want_port is not None and want_port != '':
-            active = set((pnode.get('configProfile') or {}).get('activeInbounds') or [])
+            active = set(active_inbounds(pnode))
             if extras:  # нода уже на inbound'ах варианта
                 active = {h['inbound']['configProfileInboundUuid'] for h in hosts} or active
             ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)

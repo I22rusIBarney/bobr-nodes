@@ -311,6 +311,7 @@ function securityView() {
 // ───────── ноды панели ─────────
 const NODES = {}, NODE = {};
 const FEAT = { psiphon: 'Psiphon', warp: 'WARP' };
+const flagOf = cc => /^[A-Za-z]{2}$/.test(cc || '') && cc.toUpperCase() !== 'XX' ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1A5 + c.charCodeAt(0))) : '🏳️';
 function nodesView(pid) {
   const v = h('div', {}, ...title('Ноды в панели'));
   const L = NODES[pid];
@@ -321,8 +322,9 @@ function nodesView(pid) {
   if (!L) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
   if (L.error) { v.append(h('div', { class: 'notice' }, L.error)); return v; }
   if (!L.nodes.length) { v.append(group(null, [row({ title: 'В панели нет нод' })])); return v; }
-  v.append(group('Ноды · ' + L.nodes.length, L.nodes.map(n => row({ title: n.name, cls: 'wrap',
-    sub: [n.address, n.profile, ...n.features.map(f => FEAT[f] || f), n.bot ? 'куплена ботом' : ''].filter(Boolean).join(' · '),
+  const total = L.nodes.reduce((a, n) => a + (n.online || 0), 0);
+  v.append(group(`Ноды · ${L.nodes.length} · онлайн ${total}`, L.nodes.map(n => row({ flag: flagOf(n.country), title: n.name, cls: 'wrap',
+    sub: [n.address, n.connected && n.online != null ? `онлайн ${n.online}` : '', n.profile, ...n.features.map(f => FEAT[f] || f), n.bot ? 'куплена ботом' : ''].filter(Boolean).join(' · '),
     right: badge(n.disabled ? 'Выключена' : n.connected ? 'На связи' : 'Нет связи', n.disabled ? '' : n.connected ? 'ok' : 'bad'),
     onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
     'Выберите ноду, чтобы поставить на неё Psiphon или WARP, сменить порт или включить Final Mask на её хостах.'));
@@ -330,7 +332,7 @@ function nodesView(pid) {
 }
 function nodeView(pid, uuid) {
   let n = NODE[uuid];
-  const v = h('div', {}, ...title(n && n.name ? n.name : 'Нода'));
+  const v = h('div', {}, ...title(n && n.name ? flagOf(n.country) + ' ' + n.name : 'Нода'));
   if (n === undefined) {
     NODE[uuid] = null;
     api(`profiles/${pid}/nodes/${uuid}`).then(r => {
@@ -343,6 +345,7 @@ function nodeView(pid, uuid) {
   if (n.error) { v.append(h('div', { class: 'notice' }, n.error)); return v; }
   v.append(group(null, [
     row({ title: 'Состояние', right: badge(n.connected ? 'На связи' : 'Нет связи', n.connected ? 'ok' : 'bad') }),
+    row({ title: 'Онлайн', detail: n.online == null ? '—' : String(n.online) }),
     row({ title: 'Адрес', detail: n.address }),
     row({ title: 'Профиль', detail: n.profile || '—' }),
     row({ title: 'Дополнения', detail: n.features.map(f => FEAT[f] || f).join(', ') || 'нет' })]));

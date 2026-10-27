@@ -588,7 +588,10 @@ async def main():
     ok(st == 200 and plain['bot'] and plain['profile'] == 'NV Vision' and plain['features'] == [] and nl['bot_key'].startswith('ssh-ed25519 '),
        f'список нод панели: профиль, дополнения, ключ бота: {plain}')
     ok(next(n for n in nl['nodes'] if n['address'] == wj['data']['ip'])['features'] == ['psiphon', 'warp'], 'у ноды с дополнениями они видны')
+    ok(plain['country'] == 'DE' and plain['online'] == 3, f'флаг страны и онлайн в списке: {plain["country"]}, {plain["online"]}')
     st, nd = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}')
+    ok(st == 200 and nd.get('online') == 3 and nd.get('inbound_port') is None,
+       f'страница ноды открывается (activeInbounds в панели — объекты): {st} {str(nd)[:200]}')
     ok([x['address'] for x in nd['hosts']] == [mj[0]['data']['domain']] and nd['ssh']['source'] == 'bot',
        f'хосты ноды найдены по домену из задачи, доступ — пароль из покупки: {nd["hosts"]}, {nd["ssh"]}')
     others = [n['uuid'] for n in world.nodes if n['configProfile']['activeConfigProfileUuid'] == next(x['uuid'] for x in world.profiles if x['name'] == 'NV Vision') and n['uuid'] != plain['uuid']]

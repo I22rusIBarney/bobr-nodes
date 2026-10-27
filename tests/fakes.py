@@ -150,8 +150,16 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 return self.send(200, {'response': {'secretKey': W.secret_key}})
             if p == '/api/config-profiles':
                 return self.send(200, {'response': {'total': len(W.profiles), 'configProfiles': W.profiles}})
-            if p == '/api/nodes':
-                return self.send(200, {'response': W.nodes})
+            if p == '/api/nodes':  # как в панели: activeInbounds — объекты inbound, а не UUID
+                out = []
+                for n in W.nodes:
+                    cp = n.get('configProfile') or {}
+                    ibs = {i['uuid']: i for x in W.profiles for i in x['inbounds']}
+                    out.append({**n, 'usersOnline': n.get('usersOnline', 3), 'configProfile': {
+                        'activeConfigProfileUuid': cp.get('activeConfigProfileUuid'),
+                        'activeInbounds': [{'uuid': u, 'tag': ibs.get(u, {}).get('tag', ''), 'port': ibs.get(u, {}).get('port'),
+                                            'profileUuid': cp.get('activeConfigProfileUuid')} for u in cp.get('activeInbounds') or []]}})
+                return self.send(200, {'response': out})
             if p == '/api/hosts':
                 return self.send(200, {'response': sorted(W.hosts, key=lambda x: x['viewPosition'])})
             if p == '/api/internal-squads':
