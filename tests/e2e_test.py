@@ -458,6 +458,53 @@ async def main():
     ok(st == 200, 'неизвестные хосты в порядке игнорируются')
     await runner.wait_all()
     ok(sorted(world.hosts, key=lambda x: x['viewPosition'])[0]['address'] == 'zz1.example.net', 'новый хост — в начало списка')
+
+    # Psiphon вместе с нодой: vps-psiphon на ноде, общий профиль «NV Vision Psiphon» с выходом psiphon-out
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'psiphon': {'enabled': True, 'region': 'germany'},
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['ps1.example.net']}]})
+    ok(st == 400 and 'двухбуквенный' in js['detail'], 'Psiphon: неверная страна выхода отклонена')
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    n0 = len(fakes_remote.psiphon_calls)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m',
+                                           'psiphon': {'enabled': True, 'region': 'de, nl', 'domains': 'google.com\ngeosite:youtube'},
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['ps1.example.net', 'ps2.example.net']}]})
+    ok(st == 200 and len(js['ids']) == 2, f'деплой с Psiphon: {js}')
+    await runner.wait_all()
+    pj = [store.job(i) for i in js['ids']]
+    ok(all(j['status'] == 'done' for j in pj), f'ноды с Psiphon готовы: {[j["error"] for j in pj]}')
+    calls = fakes_remote.psiphon_calls[n0:]
+    ok(len(calls) == 2 and all(a == ['--socks-port', '1080', '--no-http', '--region', 'DE,NL'] for _, a in calls),
+       f'vps-psiphon поставлен с закреплённого коммита, без HTTP-прокси, со страной выхода: {calls}')
+    psp = [x for x in world.profiles if x['name'] == 'NV Vision Psiphon']
+    ok(len(psp) == 1 and [i['tag'] for i in psp[0]['inbounds']] == ['Vision-NV-PS'], 'один общий профиль для нод с Psiphon, свой тег inbound')
+    cfg = psp[0]['config']
+    out = next((o for o in cfg['outbounds'] if o['tag'] == 'psiphon-out'), None)
+    ok(out == {'tag': 'psiphon-out', 'protocol': 'socks', 'settings': {'servers': [{'address': '172.17.0.1', 'port': 1080}]}},
+       f'выход psiphon-out на SOCKS5 ноды: {out}')
+    last = cfg['routing']['rules'][-1]
+    ok(last == {'type': 'field', 'domain': ['domain:google.com', 'geosite:youtube'], 'network': 'tcp', 'outboundTag': 'psiphon-out'}
+       and any(r.get('outboundTag') == 'BLOCK' and 'geoip:private' in r.get('ip', []) for r in cfg['routing']['rules'][:-1]),
+       f'правило Psiphon — последним, после блокировок: {last}')
+    ok(all('Vision-NV' not in json.dumps(r) or 'Vision-NV-PS' in json.dumps(r) for r in cfg['routing']['rules']),
+       'правила маршрутизации ссылаются на новый тег inbound')
+    psn = [n for n in world.nodes if n['address'] in {j['data']['ip'] for j in pj}]
+    ok(len(psn) == 2 and all(n['configProfile']['activeConfigProfileUuid'] == psp[0]['uuid'] for n in psn),
+       'ноды с Psiphon — в профиле «NV Vision Psiphon»')
+    st, jv = await wapi(f'jobs/{pj[0]["id"]}')
+    ok('psiphon' in [x['code'] for x in jv['stages']], 'этап Psiphon в карточке задачи')
+    st, jv = await wapi(f'jobs/{mj[0]["id"]}')
+    ok('psiphon' not in [x['code'] for x in jv['stages']], 'без Psiphon — этапа нет')
+    plog = (TMP / 'logs' / f'job-{pj[0]["id"]}.log').read_text()
+    ok('Psiphon работает: SOCKS5 172.17.0.1:1080' in plog, 'журнал: Psiphon поднялся')
+    st, meta = await wapi(f'profiles/{pid}/panel')
+    ok(next(x for x in meta['profiles'] if x['name'] == 'NV Vision Psiphon')['psiphon'] is True
+       and next(x for x in meta['profiles'] if x['name'] == 'NV Vision')['psiphon'] is False, 'мастер видит, в каком профиле есть psiphon-out')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'psiphon': {'enabled': True},
+                                           'items': [{'location': 'de', 'idx': 0, 'domains': ['ps3.example.net']}]})
+    await runner.wait_all()
+    ok(store.job(js['ids'][0])['status'] == 'done' and len([x for x in world.profiles if x['name'] == 'NV Vision Psiphon']) == 1,
+       'следующая нода с Psiphon — в тот же профиль')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')

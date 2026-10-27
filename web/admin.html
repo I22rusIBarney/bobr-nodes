@@ -533,6 +533,28 @@ function deployView(pid) {
     v.append(group(multi ? 'Балансировщики по странам' : 'Балансировщик', brows, note));
   }
 
+  // дополнения на ноде
+  if (!D.psi) { let saved = {}; try { saved = JSON.parse(localStorage.getItem('psiphon') || '{}'); } catch (e) {}
+    D.psi = { enabled: false, region: saved.region || '', domains: saved.domains || 'google.com\ngoogleapis.com\ngstatic.com\ngoogleusercontent.com' }; }
+  const savePsi = () => { try { localStorage.setItem('psiphon', JSON.stringify({ region: D.psi.region, domains: D.psi.domains })); } catch (e) {} };
+  const prows = [row({ icon: 'globe', tile: '#5856D6', title: 'Psiphon', sub: 'выход для выбранных доменов',
+    right: UI.toggle(D.psi.enabled, on => { D.psi.enabled = on; UI.nav.refresh(); }, 'Psiphon') })];
+  let pnote = 'Ставится на ноду вместе с ней: SOCKS5 только для этого сервера, вотчдог сам меняет плохие выходы. Нужен, когда Google (Gemini, YouTube…) не пускает с адреса сервера.';
+  if (D.psi.enabled) {
+    const ta = h('textarea', { class: 'wide', rows: 4, spellcheck: false, autocapitalize: 'off', style: 'text-align:left;font-family:ui-monospace,monospace' });
+    ta.value = D.psi.domains; ta.addEventListener('input', () => { D.psi.domains = ta.value; savePsi(); });
+    prows.push(h('label', { class: 'field stack' }, h('label', {}, 'Страна выхода'), input(D.psi.region, 'авто — или DE, NL, FR…', x => { D.psi.region = x.toUpperCase(); savePsi(); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Домены через Psiphon'), ta));
+    const own = prof.script && prof.script_profile === 'existing';
+    const gp = own && D.meta ? (D.meta.profiles || []).find(x => x.uuid === prof.panel_profile_uuid) : null;
+    pnote = own ? (gp && !gp.psiphon ? `⚠️ В профиле «${gp.name}» нет выхода psiphon-out — Psiphon встанет, но трафик в него не пойдёт. Добавьте в профиль outbound socks 172.17.0.1:1080 и правило для доменов.`
+        : 'Группа ставит ноды своим скриптом в готовый профиль панели — бот его не меняет, выход psiphon-out в профиле нужен свой.')
+      : 'Ноды с Psiphon попадут в общий профиль «NV Vision Psiphon»: в нём выход psiphon-out (172.17.0.1:1080) и правило для этих доменов (только TCP — UDP Psiphon не умеет). Профиль создаётся один раз; если он уже есть, правила берутся из него — менять их в панели.';
+    const bad = D.items.filter(i => /^(ru|by)/i.test(i.loc));
+    if (bad.length) pnote = `⚠️ ${bad.map(i => L(i.loc).name).join(', ')}: Psiphon не ставят на сервер в стране, из которой обходят блокировки — его трафик заметен и сам блокируется. ` + pnote;
+  }
+  v.append(group('Дополнительно на ноде', prows, pnote));
+
   // порядок хостов: текущий список панели, новые — блоками по локациям, их можно двигать
   if (D.meta && D.meta.hosts) {
     const locTok = D.items.map(i => '#' + i.loc);
@@ -603,7 +625,8 @@ function deployView(pid) {
     const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, items, period: D.period,
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
       balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang,
-      host_order: D.orderTouched && D.order ? D.order : undefined }), 'Задачи запущены');
+      host_order: D.orderTouched && D.order ? D.order : undefined,
+      psiphon: D.psi && D.psi.enabled ? { enabled: true, region: D.psi.region, domains: D.psi.domains } : undefined }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });

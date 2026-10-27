@@ -15,7 +15,7 @@ from aiohttp import web
 
 from . import engine, forms, naming, scripts as sc, services as svc
 from .bcloud import BcloudError
-from .runner import STAGES, Runner, bcloud_from, buyer_of
+from .runner import Runner, bcloud_from, buyer_of, stages_for
 from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
@@ -124,6 +124,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
                 'name_pattern': p.get('name_pattern') or naming.DEFAULT_PATTERN,
                 'script': ((store.script(p['script_id']) or {}).get('recipe') or {}).get('title') if p.get('script_id') else '',
+                'script_profile': ((((store.script(p['script_id']) or {}).get('recipe') or {}).get('profile') or {}).get('mode')
+                                   if p.get('script_id') else None),
+                'panel_profile_uuid': p.get('panel_profile_uuid') or '',
                 'servers': sum(1 for j in mine if j['status'] == 'done'),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
@@ -369,6 +372,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                   '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
                                   str(b.get('balancer_remark') or ''), b.get('balancer_template'))
                  for loc, _, _ in plan]
+        psiphon = None
+        ps = b.get('psiphon')
+        if isinstance(ps, dict) and ps.get('enabled'):
+            try:
+                psiphon = {'region': engine.psiphon_regions(str(ps.get('region') or '')),
+                           'domains': engine.psiphon_rules(ps.get('domains') or '')}
+            except engine.StepError as e:
+                raise ApiError(str(e)) from None
         places = {}
         order = b.get('host_order')
         if isinstance(order, list) and order:
@@ -381,7 +392,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         for (loc, idx, doms), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
                                          squads, str(b.get('remark') or '')[:100], host,
-                                         'en' if b.get('remark_lang') == 'en' else 'ru', places)
+                                         'en' if b.get('remark_lang') == 'en' else 'ru', places, psiphon)
         return J({'ids': ids})
 
     # ── мои скрипты ──
@@ -555,7 +566,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                'ip': d.get('ip'), 'created_at': j['created_at'], 'updated_at': j['updated_at'],
                'profile': (store.profile(j['profile_id']) or {}).get('name', ''), 'profile_id': j['profile_id']}
         if full:
-            out['stages'] = [{'code': c, 'label': lbl} for c, lbl in STAGES]
+            out['stages'] = [{'code': c, 'label': lbl} for c, lbl in stages_for(d)]
             out['last'] = runner.last.get(j['id'], '')
             out['password'] = d.get('password', '') if j['status'] == 'done' else ''
             out['server_id'] = d.get('server_id')

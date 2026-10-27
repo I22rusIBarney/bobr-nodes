@@ -25,6 +25,12 @@ import pexpect
 DEFAULT_REF = '93297a689100a666e5d49d20750c5ede3713dad2'
 DEFAULT_SHA256 = '0daa9b3887ff9d9157a7348b7025980028f153cd6fc0743d005059d455eca123'
 RAW = 'https://raw.githubusercontent.com/nuvrion-kvn/Nuvrion-Vision-Installer'
+# vps-psiphon — выход через Psiphon для части трафика (по умолчанию Google), закреплённый коммит
+PSI_RAW = 'https://raw.githubusercontent.com/Chara-Freedom/vps-psiphon'
+PSI_REF = 'c28177d18a5337419616137400ed0462cf43eb51'
+PSI_SHA256 = 'e41b9aeed9f5f11a2a6f1fe2103a74e075f1703a01bc4d1e5cf734e8cf30f4f3'
+PSI_TAG = 'psiphon-out'
+PSI_DOMAINS = ['domain:google.com', 'domain:googleapis.com', 'domain:gstatic.com', 'domain:googleusercontent.com']
 INBOUND_TAG = 'Vision-TLS'
 YN = r'[^\n]*\[Д/Н; Enter — Н\]'
 
@@ -213,6 +219,52 @@ def retag(config, old: str, new: str):
     return config
 
 
+def psiphon_rules(raw) -> list[str]:
+    """Список доменов для Psiphon: «google.com» → «domain:google.com»; geosite:/full:/keyword: — как есть."""
+    items = re.split(r'[\s,]+', raw) if isinstance(raw, str) else list(raw or [])
+    out = []
+    for x in items:
+        x = str(x).strip().lower()
+        if not x:
+            continue
+        if not re.match(r'(domain|full|keyword|geosite):', x):
+            x = 'domain:' + x
+        if not re.fullmatch(r'(domain|full|keyword|geosite):[a-z0-9][a-z0-9._@!-]{0,200}', x):
+            raise StepError(f'Psiphon: непонятный домен «{x}»')
+        if x not in out:
+            out.append(x)
+    return out or list(PSI_DOMAINS)
+
+
+def psiphon_regions(raw) -> str:
+    rs = [x.upper() for x in re.split(r'[\s,]+', raw or '') if x]
+    if not all(re.fullmatch(r'[A-Z]{2}', x) for x in rs):
+        raise StepError('Psiphon: страна выхода — двухбуквенный код (DE, NL…), можно несколько через запятую')
+    return ','.join(rs)
+
+
+def add_psiphon(config: dict, out: dict, domains: list[str]) -> dict:
+    """Копия профиля Xray с выходом psiphon-out (локальный SOCKS5 Psiphon) и правилом для доменов — в конце,
+    после блокировок (реклама и приватные адреса так и остаются заблокированными). Psiphon не умеет UDP — только tcp."""
+    cfg = json.loads(json.dumps(config))
+    cfg['outbounds'] = [o for o in cfg.get('outbounds', []) if o.get('tag') != PSI_TAG] + [
+        {'tag': PSI_TAG, 'protocol': 'socks', 'settings': {'servers': [{'address': out['address'], 'port': int(out['port'])}]}}]
+    routing = cfg.setdefault('routing', {})
+    routing['rules'] = [r for r in routing.get('rules', []) if r.get('outboundTag') != PSI_TAG] + [
+        {'type': 'field', 'domain': list(domains), 'network': 'tcp', 'outboundTag': PSI_TAG}]
+    return cfg
+
+
+def psiphon_of(config) -> dict | None:
+    """Куда профиль шлёт трафик Psiphon: {'address', 'port'} или None, если выхода psiphon-out нет."""
+    for o in (config or {}).get('outbounds', []) if isinstance(config, dict) else []:
+        if o.get('tag') == PSI_TAG:
+            st = o.get('settings') or {}
+            srv = (st.get('servers') or [st])[0]
+            return {'address': srv.get('address'), 'port': int(srv.get('port') or 0)}
+    return None
+
+
 def balancer_tag_of(template_json) -> str | None:
     """Тег, хосты с которым подтягивает шаблон-балансировщик (remnawave.injectHosts tagRegex ^TAG$), или None."""
     try:
@@ -306,7 +358,8 @@ class Panel:
                 tpls.append({'uuid': t['uuid'], 'name': t['name'], 'balancer_tag': balancer_tag_of(t.get('templateJson'))})
         profiles = [{'uuid': p['uuid'], 'name': p['name'],
                      'inbounds': [{'uuid': i['uuid'], 'tag': i['tag'], 'port': i.get('port'), 'type': i.get('type'),
-                                   'security': i.get('security')} for i in p.get('inbounds', [])]}
+                                   'security': i.get('security')} for i in p.get('inbounds', [])],
+                     'psiphon': psiphon_of(p.get('config')) is not None}
                     for p in self.call('GET', '/api/config-profiles')['configProfiles']]
         hosts = [{'uuid': x['uuid'], 'remark': x.get('remark', ''), 'address': x.get('address', ''),
                   'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
@@ -377,18 +430,31 @@ class Panel:
             log(f'панель: хост-балансировщик «{remark}» создан')
         return new  # UUID нового хоста-балансировщика или None, если он уже был
 
-    def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log):
+    def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log,
+                 psiphon: dict | None = None):
         # Один общий профиль на все ноды: тег Vision-NV (уникален в панели), сертификат — через ссылку CERT_LINK.
+        # Ноды с Psiphon — в своём общем профиле: в нём есть выход psiphon-out, которого на остальных нодах нет.
         tag, pname = SHARED_TAG, SHARED_PROFILE
         profile_config = shared_profile(profile_config, node['domain'])
+        if psiphon:
+            tag, pname = SHARED_TAG + '-PS', SHARED_PROFILE + ' Psiphon'
+            profile_config = add_psiphon(retag(profile_config, SHARED_TAG, tag), psiphon['out'], psiphon['domains'])
         profiles = self.call('GET', '/api/config-profiles')['configProfiles']
         prof = next((p for p in profiles if p['name'] == pname), None)
         if prof:
             # не перезаписываем: изменение профиля перезапускает Xray на всех нодах сразу
             log(f'панель: общий профиль «{pname}» уже есть')
+            if psiphon:
+                have = psiphon_of(prof.get('config'))
+                if have is None:
+                    raise StepError(f'в профиле «{pname}» нет выхода {PSI_TAG} — добавьте его в панели или удалите профиль, бот создаст заново')
+                if have != {'address': psiphon['out']['address'], 'port': int(psiphon['out']['port'])}:
+                    raise StepError(f'Psiphon на ноде слушает {psiphon["out"]["address"]}:{psiphon["out"]["port"]}, '
+                                    f'а профиль «{pname}» ведёт на {have["address"]}:{have["port"]}')
         else:
             prof = self.call('POST', '/api/config-profiles', {'name': pname, 'config': profile_config})
-            log(f'панель: общий профиль «{pname}» создан')
+            log(f'панель: общий профиль «{pname}» создан' +
+                (f', Psiphon для: {", ".join(psiphon["domains"])}' if psiphon else ''))
         inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
             raise StepError(f'в профиле нет inbound {tag}')
@@ -622,6 +688,33 @@ def drive_installer(child, a: dict, log) -> int:
 
 # ─────────────────────────────── Нода целиком ────────────────────────
 
+def install_psiphon(r: 'Remote', opts: dict, log) -> dict:
+    """Ставит vps-psiphon с закреплённого коммита (или берёт уже работающий). Возвращает {'address', 'port'} SOCKS5."""
+    region = psiphon_regions(opts.get('region') or '')
+    env = 'test -r /etc/default/vps-psiphon && . /etc/default/vps-psiphon && echo "PSI_ADDR=$BIND PSI_PORT=$SOCKS_PORT"'
+    _, out = r.run(f'systemctl is-active --quiet vps-psiphon && {env}; true')
+    m = re.search(r'PSI_ADDR=(\S+) PSI_PORT=(\d+)', out)
+    if m and opts.get('reuse', True):
+        log(f'Psiphon уже работает на ноде: {m.group(1)}:{m.group(2)}')
+        return {'address': m.group(1), 'port': int(m.group(2))}
+    args = ' --socks-port 1080 --no-http' + (f' --region {region}' if region else '')
+    log(f'ставлю vps-psiphon @ {PSI_REF[:12]}' + (f', страна выхода {region}' if region else ', страна выхода — авто'))
+    rc, out = r.run(
+        'd=$(mktemp -d /root/psiphon.XXXXXX) && cd "$d" && '
+        f'curl -fsSL -o p.sh {PSI_RAW}/{PSI_REF}/psiphon_install.sh && '
+        f'echo "{PSI_SHA256}  p.sh" | sha256sum -c --quiet && bash ./p.sh{args}; echo "PSI_RC=$?"; {env}; true', 900)
+    text = strip_ansi(out)
+    for line in [x.strip() for x in text.splitlines() if x.strip()][-12:]:
+        if not line.startswith('PSI_'):
+            log('psiphon: ' + line[:200])
+    rcm, m = re.search(r'PSI_RC=(\d+)', text), re.search(r'PSI_ADDR=(\S+) PSI_PORT=(\d+)', text)
+    if not rcm or rcm.group(1) != '0' or not m:
+        tail = ' / '.join([x.strip() for x in text.splitlines() if x.strip() and not x.startswith('PSI_')][-3:])
+        raise StepError('установка Psiphon не удалась' + (f': {tail[-300:]}' if tail else ''))
+    log(f'Psiphon работает: SOCKS5 {m.group(1)}:{m.group(2)}')
+    return {'address': m.group(1), 'port': int(m.group(2))}
+
+
 def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
            check_tries: int = 12, check_every: int = 20) -> str:
     """Разворачивает одну ноду. node: name, ip, domain, country, remark, ssh_user/ssh_port/ssh_password/ssh_key,
@@ -675,6 +768,10 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
             raise StepError(f'установщик завершился с кодом {rc}')
         log(f'установщик завершён, код {rc}' + (' (ждёт профиль из панели)' if rc == 2 else ''))
 
+    psi = None
+    if node.get('psiphon'):
+        stage('psiphon')
+        psi = {'out': install_psiphon(r, node['psiphon'], log), 'domains': psiphon_rules(node['psiphon'].get('domains'))}
     if panel is None:
         return 'установлено, панель пропущена'
     stage('panel')
@@ -693,7 +790,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         squads = [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x] \
             if isinstance(prof.get('squads'), str) else list(prof.get('squads') or [])
     with PANEL_LOCK:
-        panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log)
+        panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, psi)
 
     stage('check')
     for attempt in range(check_tries):
@@ -805,6 +902,11 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
             if rc != 0:
                 raise StepError(f'команда после установки завершилась с кодом {rc}: {strip_ansi(out).strip()[-200:]}')
 
+    psi = None
+    if node.get('psiphon'):
+        stage('psiphon')
+        psi = {'out': install_psiphon(r, node['psiphon'], log), 'domains': psiphon_rules(node['psiphon'].get('domains'))}
+
     stage('panel')
     squads = list(node['squads']) if node.get('squads') is not None else \
         [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x]
@@ -818,6 +920,8 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
             pname = re.sub(r'[^A-Za-z0-9_ -]', '-', f'NV {node["name"]}')[:30]
             new_tag = f'{tag}-{node["name"]}'[:60]
             cfg = retag(cfg, tag, new_tag)  # теги inbound в панели уникальны
+            if psi:
+                cfg = add_psiphon(cfg, psi['out'], psi['domains'])
             profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
             pr = next((p for p in profiles if p['name'] == pname), None) or \
                 panel.call('POST', '/api/config-profiles', {'name': pname, 'config': cfg})
@@ -828,6 +932,14 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
                 raise StepError('в группе не выбран профиль панели для этого скрипта (Настройки группы → Скрипт установки)')
             pr, inbounds = panel.existing_profile(prof['panel_profile_uuid'], prof.get('panel_inbounds') or [])
             log(f'панель: профиль «{pr["name"]}», inbound: {", ".join(i["tag"] for i in inbounds)}')
+            if psi:  # чужой профиль бот не меняет — только предупреждает
+                have = psiphon_of(pr.get('config'))
+                if have is None:
+                    log(f'⚠️ в профиле «{pr["name"]}» нет выхода {PSI_TAG}: Psiphon поставлен, но трафик в него не идёт — '
+                        f'добавьте outbound socks {psi["out"]["address"]}:{psi["out"]["port"]} в профиль')
+                elif have != psi['out']:
+                    log(f'⚠️ профиль ведёт {PSI_TAG} на {have["address"]}:{have["port"]}, '
+                        f'а Psiphon на ноде слушает {psi["out"]["address"]}:{psi["out"]["port"]}')
             panel.attach(node, pr, inbounds, squads, int(values['node_port']), log, tls=False)
 
     stage('check')

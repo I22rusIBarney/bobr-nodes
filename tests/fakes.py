@@ -253,10 +253,12 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
     import pexpect
 
     installed: set[str] = set()
+    psiphon: set[str] = set()
 
     class FakeRemote(engine.Remote):
         calls: list = []
         post: list = []
+        psiphon_calls: list = []
 
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
@@ -276,6 +278,16 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                 import runtime  # настоящий генератор профиля установщика
                 return 0, json.dumps(runtime.profile({'domain': self.n['domain'], 'node_port': 2222,
                                                       'panel_ips': '203.0.113.10', 'email': 'a@b.cd'}))
+            if cmd.startswith('systemctl is-active --quiet vps-psiphon'):
+                return 0, 'PSI_ADDR=172.17.0.1 PSI_PORT=1080\n' if ip in psiphon else ''
+            if 'psiphon_install.sh' in cmd:
+                assert engine.PSI_SHA256 in cmd and f'/{engine.PSI_REF}/psiphon_install.sh' in cmd and 'sha256sum -c' in cmd, cmd
+                args = cmd.split('bash ./p.sh', 1)[1].split(';', 1)[0].split()
+                FakeRemote.psiphon_calls.append((ip, args))
+                if behaviour.get(f'psi-{ip}') == 'fail':
+                    return 0, '\x1b[1;31mERROR:\x1b[0m docker is not installed\nPSI_RC=1\n'
+                psiphon.add(ip)
+                return 0, '==> waiting for the tunnel\nregion DE · exit 198.18.0.7\nPSI_RC=0\nPSI_ADDR=172.17.0.1 PSI_PORT=1080\n'
             if '--check' in cmd:
                 return 0, 'rc=0\n'
             if cmd.startswith('ufw ') or cmd.startswith('docker ps'):

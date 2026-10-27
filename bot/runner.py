@@ -15,9 +15,15 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 STAGES = [('buy', 'Покупка в bcloud'), ('ip', 'Создание сервера'), ('dns', 'DNS в Cloudflare'),
-          ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('panel', 'Регистрация в панели'),
+          ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('psiphon', 'Psiphon'), ('panel', 'Регистрация в панели'),
           ('check', 'Проверка')]
 STAGE_ORDER = [s for s, _ in STAGES]
+
+
+def stages_for(d: dict) -> list[tuple[str, str]]:
+    """Этапы задачи: Psiphon — только если его ставим."""
+    skip = set(d.get('skipped_stages') or []) | (set() if d.get('psiphon') else {'psiphon'})
+    return [(c, lbl) for c, lbl in STAGES if c not in skip]
 STATUS_ICON = {'queued': '🕓', 'buying': '⏳', 'provisioning': '⏳', 'deploying': '⏳', 'done': '✅', 'failed': '❌'}
 
 
@@ -44,7 +50,7 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
     lines = [head, '']
     cur = job['stage']
     cur_i = STAGE_ORDER.index(cur) if cur in STAGE_ORDER else -1
-    skip = set(d.get('skipped_stages') or [])
+    skip = {c for c, _ in STAGES} - {c for c, _ in stages_for(d)}
     for i, (code, label) in enumerate(STAGES):
         if code in skip:
             continue
@@ -194,6 +200,7 @@ class Runner:
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
                         'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
+                        'psiphon': d.get('psiphon'),
                         'traffic_control': prof.get('traffic_control', True)}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
                          'ssh_pubkey': self.store.get('ssh_pubkey')}
