@@ -97,7 +97,9 @@ wait_ready() {
 }
 
 # ───────── защита сервера (как bcloud harden; если bcloud на этом же сервере — дополняем, не перетираем) ─────────
-ssh_port() { sshd -T 2>/dev/null | awk '/^port /{print $2; exit}'; }
+# sshd -T падает без /run/sshd (Ubuntu 24.04: SSH запускается по сокету, папка появляется при первом входе)
+sshd_conf() { mkdir -p /run/sshd 2>/dev/null || true; sshd -T 2>/dev/null || true; }
+ssh_port() { sshd_conf | awk '/^port /{print $2; exit}'; }
 
 harden() {
   command -v apt-get >/dev/null || die "Поддерживаются Ubuntu и Debian"
@@ -208,6 +210,7 @@ EOF
       echo "PermitRootLogin prohibit-password"
     fi
   } > /etc/ssh/sshd_config.d/00-bnodes.conf
+  mkdir -p /run/sshd 2>/dev/null || true
   if sshd -t 2>/dev/null; then
     systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
     ok "SSH усилен"; [[ "$pw_off" == "yes" ]] && ok "Вход по паролю отключён — только по ключу"
@@ -215,7 +218,7 @@ EOF
     rm -f /etc/ssh/sshd_config.d/00-bnodes.conf
     warn "Проверка конфигурации SSH не прошла — SSH оставлен как был"
   fi
-  local pw_now; pw_now="$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')"
+  local pw_now; pw_now="$(sshd_conf | awk '/^passwordauthentication /{print $2}')"
 
   # 5. автообновления безопасности и сетевой стек (rp_filter не трогаем, если тут стоит vps-warp: ему нужен loose)
   printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgrade "1";\n' > /etc/apt/apt.conf.d/20auto-upgrades
@@ -252,8 +255,8 @@ security_status() {
   say; say "${C_B}fail2ban (SSH)${C_0}"
   if command -v fail2ban-client >/dev/null; then fail2ban-client status sshd 2>/dev/null | grep -E 'Currently|Total' || warn "fail2ban не запущен"; else warn "fail2ban не установлен — bnodes harden"; fi
   say; say "${C_B}SSH${C_0}"
-  sshd -T 2>/dev/null | grep -E '^(port|passwordauthentication|permitrootlogin|maxauthtries) ' || true
-  [[ "$(sshd -T 2>/dev/null | awk '/^passwordauthentication /{print $2}')" == "yes" ]] && warn "Вход по паролю разрешён: настройте SSH-ключ и запустите bnodes harden"
+  sshd_conf | grep -E '^(port|passwordauthentication|permitrootlogin|maxauthtries) ' || true
+  [[ "$(sshd_conf | awk '/^passwordauthentication /{print $2}')" == "yes" ]] && warn "Вход по паролю разрешён: настройте SSH-ключ и запустите bnodes harden"
   say; say "${C_B}Обновления безопасности${C_0}"
   grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null && ok "Автообновления включены" || warn "Автообновления выключены"
   say; say "${C_B}Бот${C_0}"

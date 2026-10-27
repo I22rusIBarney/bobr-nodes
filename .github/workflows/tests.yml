@@ -43,6 +43,12 @@ jobs:
           node --check web/static/ui.js
           bash -n install.sh
           shellcheck -S error install.sh tests/mock_installer.sh
+      - name: bnodes harden и security не обрываются молча
+        run: |
+          sudo rm -rf /run/sshd   # как на свежей Ubuntu 24.04: SSH по сокету, папки ещё нет — sshd -T падает
+          out=$(sudo ./install.sh harden </dev/null 2>&1) || { echo "$out"; exit 1; }
+          echo "$out" | grep -q 'Защита сервера Bobr Nodes' && echo "$out" | grep -q 'Отменено' || { echo "$out"; exit 1; }
+          sudo ./install.sh security >/dev/null
       - name: Тесты
         env:
           BCLOUD_DIR: ${{ github.workspace }}/_deps/bobr-cloud
