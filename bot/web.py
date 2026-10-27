@@ -362,7 +362,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         out = {}
         for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
             d = j['data']
-            if j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done':
+            if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done'
+                    and not d.get('removed')):
                 d = {**d, '_job': j['id']}
                 out[d['ip']] = d
                 if d.get('domain'):

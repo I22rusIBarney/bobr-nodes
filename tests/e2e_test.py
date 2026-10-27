@@ -687,6 +687,31 @@ async def main():
     ok(store.job(js['id'])['status'] == 'done' and next(n for n in world.nodes if n['uuid'] == mu)['address'] == '198.51.100.251'
        and next(h for h in world.hosts if h['uuid'] == '44444444-4444-4444-4444-444444444444')['address'] == '198.51.100.251',
        f'чужая нода: адрес и хост на новом IP: {store.job(js["id"])["error"]}')
+
+    # сервер удалён в bcloud → нода и хосты из панели, A-запись из Cloudflare, сервер из списка бота; профиль остаётся
+    bal_hosts = {h['address']: h for h in world.hosts if h.get('xrayJsonTemplateUuid')}
+    gone = next(j for j in sorted(store.jobs(500), key=lambda x: x['id'])
+                if j['status'] == 'done' and j['data'].get('server_id') and j['data'].get('domain') in bal_hosts)
+    gd = gone['data']
+    gn = next(n for n in world.nodes if n['address'] in (gd['domain'], gd['ip']))
+    profs0 = len(world.profiles)
+    ok(await runner.sync_bcloud() == [], 'сверка с bcloud: пока ничего не удалено')
+    async with BD.session() as s_:
+        srow = await s_.get(BD.Server, int(gd['server_id']))
+        srow.status = 'deleted'
+        await s_.commit()
+    n0 = len(sess.sent)
+    ok(await runner.sync_bcloud() == [gone['id']], 'сверка с bcloud: удалённый сервер найден')
+    ok(all(n['uuid'] != gn['uuid'] for n in world.nodes) and ('nodes', gn['uuid']) in world.deleted, 'нода удалена из панели')
+    ok(not any(h['address'] == gd['domain'] and not h.get('xrayJsonTemplateUuid') for h in world.hosts), 'хосты ноды удалены')
+    ok(bal_hosts[gd['domain']]['uuid'] in {h['uuid'] for h in world.hosts}, 'общий хост-балансировщик страны остался')
+    ok(len(world.profiles) == profs0, 'профили не тронуты')
+    ok(not [r for r in world.records if r['name'] == gd['domain'] and r['type'] == 'A'], 'A-запись домена удалена')
+    gj = store.job(gone['id'])
+    ok(gj['data'].get('removed') and gj['hidden'] and gone['id'] not in [j['id'] for j in store.jobs(500)], 'сервер убран из списка бота')
+    ok(any('удалён в bcloud' in getattr(m, 'text', '') for name, m in sess.sent[n0:] if name == 'SendMessage'), 'админу пришло сообщение')
+    ok(gd['domain'] not in store.used_domains(), 'домен снова свободен для новых нод')
+    ok(await runner.sync_bcloud() == [], 'повторная сверка ничего не трогает')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [
         {'location': 'de', 'idx': 0, 'domains': ['q1.example.net']}, {'location': 'nl', 'idx': 0, 'domains': ['q1.example.net']}]})
     ok(st == 400 and 'повторяются' in js['detail'], 'один домен в двух локациях отклонён')

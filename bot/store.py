@@ -135,7 +135,10 @@ class Store:
     def used_domains(self) -> set[str]:
         out = set()
         for r in self._q("SELECT data FROM jobs WHERE status != 'failed' OR json_extract(data, '$.server_id') IS NOT NULL"):
-            d = json.loads(r['data']).get('domain')
+            data = json.loads(r['data'])
+            if data.get('removed'):  # сервер удалён, A-запись снята — имя снова свободно
+                continue
+            d = data.get('domain')
             if d:
                 out.add(d.lower())
         return out

@@ -144,6 +144,55 @@ class Runner:
             return
         self.tasks[jid] = asyncio.create_task(self._run(jid))
 
+    # ── серверы, удалённые в bcloud ──
+    async def sync_bcloud(self) -> list[int]:
+        """Готовые ноды, чей сервер удалён в bcloud (вручную или по окончании срока): нода и хосты — из панели,
+        A-запись — из Cloudflare, сервер — из списка бота. Профиль остаётся. Возвращает id таких задач."""
+        done = []
+        for j in self.store.jobs(5000):
+            d = j['data']
+            if j['status'] != 'done' or d.get('kind') in ('node', 'reip') or not d.get('server_id') or d.get('removed'):
+                continue
+            prof = self.store.profile(j['profile_id'])
+            if not prof:
+                continue
+            try:
+                srv = await self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof)).server(int(d['server_id']))
+            except BcloudError as e:  # 404 — сервер передан другому клиенту или bcloud недоступен: ничего не удаляем
+                log.info('sync bcloud job %s: %s', j['id'], e)
+                continue
+            if srv.get('status') != 'deleted':
+                continue
+            lines: list[str] = []
+            pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+            try:
+                res = await asyncio.to_thread(engine.remove_node, pconf, d.get('ip', ''), d.get('domain', ''), lines.append)
+            except engine.StepError as e:
+                log.warning('remove node job %s: %s', j['id'], e)
+                continue  # панель недоступна — попробуем в следующий раз
+            with open(self.log_path(j['id']), 'a', encoding='utf-8') as lf:
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} сервер удалён в bcloud\n' +
+                         ''.join(f'### {x}\n' for x in lines))
+            self.store.patch_job_data(j['id'], removed=True, removed_at=int(time.time()))
+            self.store.update_job(j['id'], hidden=1)
+            done.append(j['id'])
+            try:
+                await self.bot.send_message(j['chat_id'], (
+                    f'🗑 <b>Сервер {html.escape(d.get("domain") or d.get("name", ""))} удалён в bcloud</b>\n\n'
+                    f'Из панели «{html.escape(prof.get("name", ""))}» убраны нода и хосты: {res["nodes"]} / {res["hosts"]}'
+                    + (', A-запись в Cloudflare удалена' if res['dns'] else '') + '. Профиль не тронут.'), parse_mode='HTML')
+            except Exception as e:  # noqa: BLE001
+                log.info('notify removed %s: %s', j['id'], e)
+        return done
+
+    async def sync_loop(self, every: float = 300) -> None:
+        while True:
+            await asyncio.sleep(every)
+            try:
+                await self.sync_bcloud()
+            except Exception:  # noqa: BLE001 — сверка не должна ронять бота
+                log.exception('sync bcloud')
+
     async def resume_all(self) -> int:
         jobs = self.store.active_jobs()
         for j in jobs:

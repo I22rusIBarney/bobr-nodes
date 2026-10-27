@@ -70,6 +70,7 @@ async def main():
 
     watch = Watch(store, bot, admins, data_dir)
     watch_task = asyncio.create_task(watch.run())  # входы по SSH и блокировки fail2ban на сервере бота
+    sync_task = asyncio.create_task(runner.sync_loop())  # серверы, удалённые в bcloud, — убрать из панели
     app = build_web(store, runner, token, admins, public_url, me.username, security=watch)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
@@ -83,6 +84,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         watch_task.cancel()
+        sync_task.cancel()
 
 
 if __name__ == '__main__':

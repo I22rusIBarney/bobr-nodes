@@ -25,6 +25,7 @@ class World:
         self.hosts: list[dict] = []
         self.reorders = 0
         self.host_patches: list[dict] = []
+        self.deleted: list[tuple[str, str]] = []
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
         self.templates: list[dict] = []
@@ -227,7 +228,19 @@ def make_server(world: World) -> ThreadingHTTPServer:
             return self.cf('PUT')
 
         def do_DELETE(self):
-            return self.cf('DELETE')
+            if self.path.startswith('/client/v4'):
+                return self.cf('DELETE')
+            if not self.guard():
+                return
+            with W.lock:
+                kind, _, u = self.path[len('/api/'):].partition('/')
+                lst = {'nodes': W.nodes, 'hosts': W.hosts}.get(kind)
+                item = next((x for x in lst or [] if x['uuid'] == u), None)
+                if item is None:
+                    return self.send(404, {'message': 'not found'})
+                lst.remove(item)
+                W.deleted.append((kind, u))
+                return self.send(200, {'response': {'isDeleted': True}})
 
         def do_PATCH(self):
             if not self.guard():

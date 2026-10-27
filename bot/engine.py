@@ -159,6 +159,18 @@ class Cloudflare:
         zid = self.zone_for(domain)
         return self.call('GET', f'/zones/{zid}/dns_records?' + urllib.parse.urlencode({'name': domain}))
 
+    def delete_a(self, domain: str, ip: str, log) -> int:
+        """Удаляет A-записи домена, которые указывают на ip (на чужие адреса не трогает). Возвращает, сколько удалено."""
+        zid = self.zone_for(domain)
+        n = 0
+        for r in self.records(domain):
+            if r['type'] == 'A' and r['content'] == ip:
+                self.call('DELETE', f'/zones/{zid}/dns_records/{r["id"]}')
+                n += 1
+        if n:
+            log(f'Cloudflare: A-запись {domain} → {ip} удалена')
+        return n
+
     def upsert_a(self, domain: str, ip: str, log):
         zid = self.zone_for(domain)
         records = self.records(domain)
@@ -1382,3 +1394,39 @@ def reip(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Cal
         log(f'жду подключения ноды ({attempt + 1}/{check_tries})')
         time.sleep(check_every)
     raise StepError('нода не вышла на связь с панелью на новом IP — проверьте её в панели')
+
+
+# ─────────────────────────────── Сервер удалён в bcloud ──
+
+def remove_node(prof: dict, ip: str, domain: str, log: Callable[[str], None]) -> dict:
+    """Сервер удалён (в bcloud или истёк): нода и её хосты — из панели, A-запись домена — из Cloudflare.
+    Профиль, шаблоны и общие хосты-балансировщики остаются: ими пользуются другие ноды."""
+    panel = Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
+    names = {ip, domain} - {''}
+    removed = {'nodes': 0, 'hosts': 0, 'dns': 0}
+    with PANEL_LOCK:
+        nodes = [n for n in panel.call('GET', '/api/nodes') if n['address'] in names]
+        hosts = {}
+        for n in nodes:
+            for h in panel.node_hosts(n, {domain} - {''}, {ip} - {''}):
+                hosts[h['uuid']] = h
+        for h in panel.call('GET', '/api/hosts'):
+            if h.get('address') in names:
+                hosts[h['uuid']] = h
+        for h in hosts.values():
+            if h.get('xrayJsonTemplateUuid'):  # хост-балансировщик страны общий — оставляем
+                log(f'панель: хост-балансировщик «{h.get("remark", "")}» оставлен (общий для страны)')
+                continue
+            panel.call('DELETE', f'/api/hosts/{h["uuid"]}')
+            removed['hosts'] += 1
+            log(f'панель: хост «{h.get("remark", "")}» удалён')
+        for n in nodes:
+            panel.call('DELETE', f'/api/nodes/{n["uuid"]}')
+            removed['nodes'] += 1
+            log(f'панель: нода «{n["name"]}» удалена')
+    if domain and prof.get('cf_token'):
+        try:
+            removed['dns'] = Cloudflare(prof['cf_token']).delete_a(domain, ip, log)
+        except StepError as e:
+            log(f'Cloudflare: {e}')
+    return removed
