@@ -192,6 +192,27 @@ def wait_dns(domain: str, ip: str, log, timeout=600, every=15):
 TAG_RE = re.compile(r'^[A-Z0-9_]{1,30}$')
 
 
+SHARED_PROFILE = 'NV Vision'
+SHARED_TAG = 'Vision-NV'          # свой тег: Vision-TLS обычно уже занят нодами, поставленными вручную
+CERT_LINK = '/etc/letsencrypt/nv-node'  # на каждой ноде — ссылка на live/<её домен>; путь одинаковый у всех
+
+
+def shared_profile(config: dict, domain: str) -> dict:
+    """Профиль ноды → общий для всех нод: свой тег inbound и путь к сертификату через ссылку CERT_LINK."""
+    cfg = retag(config, INBOUND_TAG, SHARED_TAG)
+    raw = json.dumps(cfg, ensure_ascii=False).replace(f'/etc/letsencrypt/live/{domain}/', CERT_LINK + '/')
+    return json.loads(raw)
+
+
+def retag(config, old: str, new: str):
+    """Копия конфига, где тег inbound old заменён на new (в inbounds и в правилах маршрутизации)."""
+    if isinstance(config, dict):
+        return {k: (new if k in ('tag',) and v == old else retag(v, old, new)) for k, v in config.items()}
+    if isinstance(config, list):
+        return [new if x == old else retag(x, old, new) for x in config]
+    return config
+
+
 def balancer_tag_of(template_json) -> str | None:
     """Тег, хосты с которым подтягивает шаблон-балансировщик (remnawave.injectHosts tagRegex ^TAG$), или None."""
     try:
@@ -319,18 +340,20 @@ class Panel:
         return tpl['uuid']
 
     def register(self, node: dict, profile_config: dict, squads: list[str], node_port: int, log):
-        pname = re.sub(r'[^A-Za-z0-9_ -]', '-', f'NV {node["name"]}')[:30]
+        # Один общий профиль на все ноды: тег Vision-NV (уникален в панели), сертификат — через ссылку CERT_LINK.
+        tag, pname = SHARED_TAG, SHARED_PROFILE
+        profile_config = shared_profile(profile_config, node['domain'])
         profiles = self.call('GET', '/api/config-profiles')['configProfiles']
         prof = next((p for p in profiles if p['name'] == pname), None)
         if prof:
-            prof = self.call('PATCH', '/api/config-profiles', {'uuid': prof['uuid'], 'config': profile_config})
-            log(f'панель: профиль «{pname}» обновлён')
+            # не перезаписываем: изменение профиля перезапускает Xray на всех нодах сразу
+            log(f'панель: общий профиль «{pname}» уже есть')
         else:
             prof = self.call('POST', '/api/config-profiles', {'name': pname, 'config': profile_config})
-            log(f'панель: профиль «{pname}» создан')
-        inbound = next((i for i in prof['inbounds'] if i['tag'] == INBOUND_TAG), None)
+            log(f'панель: общий профиль «{pname}» создан')
+        inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
-            raise StepError(f'в профиле нет inbound {INBOUND_TAG}')
+            raise StepError(f'в профиле нет inbound {tag}')
         cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [inbound['uuid']]}
 
         nodes = self.call('GET', '/api/nodes')
@@ -578,6 +601,11 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
     if panel is None:
         return 'установлено, панель пропущена'
     stage('panel')
+    # одинаковый путь к сертификату на всех нодах — для общего профиля
+    rc, out = r.run(f'ln -sfn live/{node["domain"]} {CERT_LINK} && test -s {CERT_LINK}/fullchain.pem && echo LINK_OK')
+    if 'LINK_OK' not in out:
+        raise StepError(f'не нашёл сертификат /etc/letsencrypt/live/{node["domain"]} — установка выпустила его?')
+    log(f'ссылка {CERT_LINK} → live/{node["domain"]}')
     rc, raw = r.run('cat /opt/remnanode/vision-config-profile.json')
     if rc != 0 or '{' not in raw:
         raise StepError('не удалось прочитать vision-config-profile.json')

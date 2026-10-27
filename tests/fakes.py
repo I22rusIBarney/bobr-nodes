@@ -130,9 +130,14 @@ def make_server(world: World) -> ThreadingHTTPServer:
             b, p = self.body(), self.path
             with W.lock:
                 if p == '/api/config-profiles':
-                    assert 'Vision-TLS' in json.dumps(b['config'])
+                    tags = [i['tag'] for i in b['config'].get('inbounds', [])]
+                    taken = {i['tag'] for x in W.profiles for i in x['inbounds']}
+                    if set(tags) & taken:  # как в настоящей панели: теги inbound уникальны
+                        return self.send(409, {'message': 'Inbounds with same tag already exists in database. Inbound tags must be unique.'})
+                    if any(x['name'] == b['name'] for x in W.profiles):
+                        return self.send(409, {'message': 'Config profile with this name already exists'})
                     pr = dict(uuid=str(uuid.uuid4()), name=b['name'], config=b['config'],
-                              inbounds=[dict(uuid=str(uuid.uuid4()), tag='Vision-TLS')])
+                              inbounds=[dict(uuid=str(uuid.uuid4()), tag=t) for t in tags])
                     W.profiles.append(pr)
                     return self.send(201, {'response': pr})
                 if p == '/api/nodes':
@@ -204,8 +209,15 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                 return 0, ''
             if 'NV_DONE' in cmd:
                 return 0, 'NV_DONE\n' if ip in installed else ''
+            if cmd.startswith('ln -sfn live/'):
+                assert cmd.split()[2] == f'live/{self.n["domain"]}', cmd
+                return 0, 'LINK_OK\n'
             if cmd.startswith('cat /opt/remnanode/vision-config-profile.json'):
-                return 0, json.dumps({'inbounds': [{'tag': 'Vision-TLS', 'port': 443}], 'domain': self.n['domain']})
+                import sys
+                sys.path.insert(0, os.environ['NV_SRC'])
+                import runtime  # настоящий генератор профиля установщика
+                return 0, json.dumps(runtime.profile({'domain': self.n['domain'], 'node_port': 2222,
+                                                      'panel_ips': '203.0.113.10', 'email': 'a@b.cd'}))
             if '--check' in cmd:
                 return 0, 'rc=0\n'
             raise AssertionError(cmd)

@@ -134,6 +134,9 @@ def upd_cb(data, msg_id=1):
 async def main():
     secret = make_key()
     world = fakes.World(secret)
+    # в панели уже есть ноды, поставленные вручную тем же установщиком: тег Vision-TLS занят
+    world.profiles.append({'uuid': '55555555-5555-5555-5555-555555555555', 'name': 'Manual nodes', 'config': {},
+                           'inbounds': [{'uuid': '66666666-6666-6666-6666-666666666666', 'tag': 'Vision-TLS'}]})
     srv = fakes.make_server(world)
     base = f'http://127.0.0.1:{srv.server_port}'
     engine.Cloudflare.API = base + '/client/v4'
@@ -298,7 +301,13 @@ async def main():
     ok({n['name'] for n in world.nodes} == {'de2', 'de3'} and all(n['countryCode'] == 'DE' for n in world.nodes),
        'ноды в панели: имена и страна')
     ok(len(world.hosts) == 2 and {h['address'] for h in world.hosts} == {'de2.example.com', 'de3.example.com'}, 'хосты созданы')
-    ok(len(world.squads['11111111-1111-1111-1111-111111111111']['inbounds']) == 2, 'inbound обеих нод добавлены в сквад')
+    nv = [x for x in world.profiles if x['name'] == 'NV Vision']
+    ok(len(nv) == 1 and [i['tag'] for i in nv[0]['inbounds']] == ['Vision-NV'], 'один общий профиль «NV Vision» с тегом Vision-NV (Vision-TLS занят)')
+    certs = nv[0]['config']['inbounds'][0]['streamSettings']['tlsSettings']['certificates'][0]
+    ok(certs['certificateFile'] == '/etc/letsencrypt/nv-node/fullchain.pem' and 'de2' not in json.dumps(nv[0]['config']),
+       'в общем профиле путь к сертификату через ссылку, без домена ноды')
+    ok(world.squads['11111111-1111-1111-1111-111111111111']['inbounds'] == [{'uuid': nv[0]['inbounds'][0]['uuid']}],
+       'общий inbound добавлен в сквад один раз')
     ok(sorted(m.get('renamed') for m in astra.made.values()) == ['de2', 'de3'], 'серверы переименованы в bcloud')
     ok(all(m['os'] == 'debian12' for m in astra.made.values()), 'выбрана Debian 12 (Ubuntu 24.04 в каталоге нет)')
     card = sess.messages[jobs[0]['msg_id']]
@@ -385,7 +394,7 @@ async def main():
     ok(len(bal_hosts) == 1 and bal_hosts[0]['xrayJsonTemplateUuid'] == detpl['uuid'] and not bal_hosts[0]['isHidden']
        and bal_hosts[0]['remark'] == '🇩🇪 Германия', f'один видимый хост-балансировщик: {[(h["remark"]) for h in bal_hosts]}')
     prem = world.squads['22222222-2222-2222-2222-222222222222']['inbounds']
-    ok(len(prem) == 2, 'inbound нод добавлены в выбранный сквад')
+    ok(len(prem) == 1 and len([x for x in world.profiles if x['name'].startswith('NV')]) == 1, 'общий inbound в выбранном скваде, новых профилей нет')
     # ещё одна нода в DE: шаблон и балансировщик переиспользуются
     st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 1})
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'de', 'idx': 0, 'period': '1m', 'domains': dj['domains'],
