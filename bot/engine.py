@@ -230,7 +230,7 @@ class Cloudflare:
 
     def xhttp_rules(self, host: str, port: int, log, add: bool = True) -> bool:
         """Origin Rule (клиент на 443 → нода на port) и Config Rule (SSL Full: сертификат ноды выпущен на её домен,
-        а не на cdn-имя) — только для этого имени. True — клиенты ходят на 443, False — на сам port."""
+        а не на cdn-имя) — только для этого имени. True — Origin Rule есть и клиенты ходят на 443, False — на сам port."""
         zid = self.zone_for(host)
         ok = True
         for phase, action, params, what, perm in (
@@ -240,7 +240,7 @@ class Cloudflare:
                 self._host_rule(zid, phase, host, add, action, params)
                 log(f'Cloudflare: {what} для {host} ' + ('поставлено' if add else 'убрано'))
             except StepError as e:
-                ok = False
+                ok = ok and phase != 'http_request_origin'  # без Origin Rule клиенты идут через CDN прямо на port
                 log(f'⚠️ Cloudflare: {what} не {"поставлено" if add else "убрано"} ({e}). '
                     f'Добавьте токену право «Zone → {perm}»' + (f' — пока клиенты ходят через CDN на порт {port}' if add and phase == 'http_request_origin' else ''))
         return ok

@@ -90,6 +90,7 @@ def make_server(world: World) -> ThreadingHTTPServer:
                         r.setdefault('id', uuid.uuid4().hex)
                     W.rulesets[key] = rules
                     return ok({'rules': rules})
+            with W.lock:
                 if method == 'GET' and parts[-1] == 'dns_records':
                     return ok([r for r in W.records if r['name'] == q.get('name')])
                 if method == 'POST':
