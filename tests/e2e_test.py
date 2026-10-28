@@ -658,6 +658,37 @@ async def main():
     await runner.wait_all()
     ok(store.job(js['id'])['status'] == 'done' and next(h for h in world.hosts if h['uuid'] == hh['uuid'])['finalMask'] is None
        and len(fakes_remote.warp_calls) == w0 + 1, 'Final Mask убран без входа по SSH')
+    # запасной XHTTP: свой inbound на 2083, хост напрямую и через Cloudflare CDN (443 → 2083 по Origin Rule)
+    dom = mj[0]['data']['domain']
+    st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST', {'xhttp': {'enabled': True}})
+    await runner.wait_all()
+    xj = store.job(js['id'])
+    vx = next((x for x in world.profiles if x['name'] == 'NV Vision WARP XHTTP'), None)
+    ok(xj['status'] == 'done' and vx and [i['tag'] for i in vx['inbounds']] == ['Vision-NV-WP-XH', 'XHTTP-Vision-NV-WP-XH'],
+       f'XHTTP: нода в копии «NV Vision WARP XHTTP» с двумя inbound: {xj["error"]}')
+    xin = vx['inbounds'][1]['uuid']
+    pn = next(n for n in world.nodes if n['uuid'] == plain['uuid'])
+    ok(set(pn['configProfile']['activeInbounds']) == {i['uuid'] for i in vx['inbounds']} and plain['uuid'] in world.restarts,
+       'XHTTP: оба inbound активны на ноде, нода перезапущена')
+    xh = {h['address']: h for h in world.hosts if h['inbound']['configProfileInboundUuid'] == xin}
+    path = engine.xhttp_of(vx['config'])['path']
+    ok(set(xh) == {dom, 'cdn-' + dom} and xh[dom]['port'] == 2083 and xh['cdn-' + dom]['port'] == 443
+       and all(h['path'] == path and h['sni'] == a for a, h in xh.items()),
+       f'XHTTP: хосты напрямую ({dom}:2083) и через CDN (cdn-{dom}:443): {[(a, h["port"]) for a, h in xh.items()]}')
+    rec = [r for r in world.records if r['name'] == 'cdn-' + dom]
+    rules = {ph: rs for (z, ph), rs in world.rulesets.items()}
+    ok(len(rec) == 1 and rec[0]['proxied'] and rec[0]['content'] == mj[0]['data']['ip']
+       and rules['http_request_origin'][0]['action_parameters'] == {'origin': {'port': 2083}}
+       and f'"cdn-{dom}"' in rules['http_config_settings'][0]['expression'],
+       'XHTTP: cdn-запись с оранжевым облаком, Origin Rule 443 → 2083 и SSL Full только для неё')
+    ok(any(i['uuid'] == xin for x in world.squads.values() for i in x['inbounds']), 'XHTTP: inbound в сквадах')
+    # «Убрать дополнения»: хосты XHTTP, cdn-запись и имя в правилах Cloudflare — тоже убираются
+    st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/rollback', 'POST', {})
+    await runner.wait_all()
+    ok(store.job(js['id'])['status'] == 'done' and not [h for h in world.hosts if h['inbound']['configProfileInboundUuid'] == xin]
+       and not [r for r in world.records if r['name'] == 'cdn-' + dom]
+       and all(not rs for rs in world.rulesets.values()),
+       f'XHTTP убран: хосты, cdn-запись и правила Cloudflare: {store.job(js["id"])["error"]}')
     # чужая нода (не от бота): без доступа SSH дополнения не запускаются, с паролем — профиль-копия «Manual nodes Psiphon»
     man = next(x for x in world.profiles if x['name'] == 'Manual nodes')
     world.nodes.append({'uuid': '33333333-3333-3333-3333-333333333333', 'name': 'manual-1', 'address': '198.51.100.250',

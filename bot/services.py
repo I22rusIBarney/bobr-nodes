@@ -210,7 +210,7 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
                 'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
                 'remark': render_remark(remark, loc, name, dom, i, lang), 'password': gen_password(),
                 'host': host, 'squads': squads, 'place': (places or {}).get(dom),
-                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'script_id': (store.profile(pid) or {}).get('script_id'),
+                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id'),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)

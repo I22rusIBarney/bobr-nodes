@@ -510,7 +510,7 @@ function securityView() {
 
 // ───────── ноды панели ─────────
 const NODES = {}, NODE = {};
-const FEAT = { psiphon: 'Psiphon', warp: 'WARP' };
+const FEAT = { psiphon: 'Psiphon', warp: 'WARP', xhttp: 'XHTTP' };
 const flagOf = cc => /^[A-Za-z]{2}$/.test(cc || '') && cc.toUpperCase() !== 'XX' ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1A5 + c.charCodeAt(0))) : '🏳️';
 function nodesView(pid) {
   const L = NODES[pid];
@@ -634,7 +634,7 @@ function nodeView(pid, uuid) {
     const ex = extrasPayload(n.E);
     const body = { ...ex, port: n.portMode === 'keep' ? null : n.portMode === '443' ? 443 : n.port,
       final_mask: n.mask === 'keep' ? null : n.mask === 'on', final_mask_json: n.mask === 'on' ? n.maskJson : undefined };
-    if (!ex.psiphon && !ex.warp && body.port === null && body.final_mask === null) { UI.toast('Нечего менять', true); return; }
+    if (!ex.psiphon && !ex.warp && !ex.xhttp && body.port === null && body.final_mask === null) { UI.toast('Нечего менять', true); return; }
     const r = await UI.run(() => api(`profiles/${pid}/nodes/${uuid}/apply`, 'POST', body), 'Задача запущена');
     if (r) done(r.id);
   });
@@ -742,19 +742,25 @@ function areaIn(val, rows, on, check) {
   return ta;
 }
 const jsonOk = t => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o); } catch (e) { return false; } };
-function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF }; }
+function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false }; }
 function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains }); }
-function extrasRows(E, have) {
-  have = have || [];
+function extrasRows(E, have, opts) {
+  have = have || []; opts = opts || {};
   const rows = [];
   const tog = (key, titleT, sub) => row({ title: titleT, cls: 'wrap', sub: have.includes(key) ? null : sub,
     status: have.includes(key) ? ['в профиле', 'ok'] : null,
-    right: have.includes(key) ? null : UI.toggle(E[key === 'psiphon' ? 'psi' : 'warp'], on => { E[key === 'psiphon' ? 'psi' : 'warp'] = on; UI.nav.refresh(); }, titleT) });
+    right: have.includes(key) ? null : UI.toggle(E[EK[key]], on => { E[EK[key]] = on; UI.nav.refresh(); }, titleT) });
+  const EK = { psiphon: 'psi', warp: 'warp', xhttp: 'xh' };
   rows.push(tog('psiphon', 'Psiphon', 'выход для выбранных доменов'));
   if (E.psi) rows.push(h('label', { class: 'field' }, h('label', {}, 'Страна выхода'), textIn(E.region, 'авто, или DE, NL', x => { E.region = x.toUpperCase(); saveExtras(E); }, true, 'right')),
     h('label', { class: 'field stack' }, h('label', {}, 'Домены через Psiphon'), areaIn(E.psiDomains, 4, x => { E.psiDomains = x; saveExtras(E); })));
   rows.push(tog('warp', 'WARP', 'выход Cloudflare WARP, например для TikTok'));
   if (E.warp) rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Домены через WARP'), areaIn(E.warpDomains, 3, x => { E.warpDomains = x; saveExtras(E); })));
+  if (!opts.noXhttp) {
+    rows.push(tog('xhttp', 'Запасной XHTTP', 'второй вход на порту 2083 и через Cloudflare CDN'));
+    if (E.xh) rows.push(h('div', { class: 'in-note' }, 'Появятся два хоста: «… XHTTP» — напрямую на домен ноды, порт 2083, и «… CDN» — через Cloudflare. '
+      + 'Через CDN подключение идёт к адресам Cloudflare, поэтому переживает и бан IP ноды. Для 443 через CDN токену Cloudflare нужны права «Origin Rules: Edit» и «Config Rules: Edit», иначе клиенты пойдут через CDN на 2083.'));
+  }
   return rows;
 }
 // действие внутри списка — строка цвета акцента; пока идёт запрос, повторные нажатия игнорируются
@@ -765,7 +771,7 @@ function act(text, fn, cls) {
   } });
   return r;
 }
-function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined }; }
+function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true } : undefined }; }
 const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
 
 let D = null;
@@ -948,7 +954,8 @@ function deployView(pid) {
 
   // дополнения на ноде
   if (!D.E) D.E = extrasState();
-  const prows = extrasRows(D.E);
+  if (prof.script && D.E.xh) D.E.xh = false;
+  const prows = extrasRows(D.E, [], { noXhttp: !!prof.script });
   let pnote = 'Ставятся по SSH со сверкой SHA-256. Ноды с дополнениями попадают в общий профиль «NV Vision Psiphon», «NV Vision WARP» или «NV Vision Psiphon WARP»: он создаётся один раз, правила потом меняются в панели.', pwarn = '';
   if (D.E.psi || D.E.warp) {
     const own = prof.script && prof.script_profile === 'existing';
@@ -962,7 +969,7 @@ function deployView(pid) {
     if (bad.length && D.E.psi) pwarn = `${bad.map(i => L(i.loc).name).join(', ')}: Psiphon не ставят на сервер в стране, из которой обходят блокировки — его трафик заметен и сам блокируется. ` + pwarn;
   }
   prows.push(h('div', { class: 'in-note' }, pnote));
-  const exOn = [D.E.psi && 'Psiphon', D.E.warp && 'WARP'].filter(Boolean);
+  const exOn = [D.E.psi && 'Psiphon', D.E.warp && 'WARP', D.E.xh && 'XHTTP'].filter(Boolean);
   adv.push(...UI.fold({ title: 'Дополнения', summary: exOn.length ? exOn.join(' и ') : 'нет', key: 'd-extras', body: prows }));
 
   // порядок хостов: текущий список панели, новые — блоками по локациям, их можно двигать

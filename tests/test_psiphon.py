@@ -52,3 +52,29 @@ def test_warp_mask_port():
     for bad in ('22', '2222', 'x', '70000'):
         with pytest.raises(e.StepError):
             e.public_port(bad)
+
+
+def _vision():
+    return {'inbounds': [{'tag': 'Vision-NV', 'port': 443, 'protocol': 'vless', 'sniffing': {'enabled': True},
+                          'streamSettings': {'network': 'tcp', 'security': 'tls', 'tlsSettings': {
+                              'minVersion': '1.3', 'certificates': [{'certificateFile': '/c/fullchain.pem', 'keyFile': '/c/privkey.pem'}]}}}],
+            'outbounds': [], 'routing': {'rules': []}}
+
+
+def test_xhttp_inbound_and_variant():
+    cfg = e.add_xhttp(_vision())
+    x = e.xhttp_of(cfg)
+    ib = cfg['inbounds'][-1]
+    assert x['tag'] == 'XHTTP-Vision-NV' and x['port'] == e.XHTTP_PORT and len(x['path']) == 17
+    assert ib['streamSettings']['network'] == 'xhttp' and ib['streamSettings']['tlsSettings']['certificates'][0]['keyFile'] == '/c/privkey.pem'
+    assert e.features_of(cfg) == {'xhttp'}
+    # повтор и вариант с ещё одним дополнением: путь тот же (подписки клиентов не ломаются), inbound не дублируется
+    again = e.add_xhttp(cfg)
+    assert e.xhttp_of(again)['path'] == x['path'] and len(again['inbounds']) == 2
+    name, tmap = e.variant('NV Vision XHTTP', ['Vision-NV-XH', 'XHTTP-Vision-NV-XH'], {'xhttp', 'warp'})
+    assert name == 'NV Vision WARP XHTTP' and tmap == {'Vision-NV-XH': 'Vision-NV-WP-XH', 'XHTTP-Vision-NV-XH': 'XHTTP-Vision-NV-WP-XH'}
+    assert e._strip_extras('NV Vision WARP XHTTP', ['Vision-NV-WP-XH', 'XHTTP-Vision-NV-WP-XH']) == ('NV Vision', ['Vision-NV', 'XHTTP-Vision-NV'])
+    with pytest.raises(e.StepError):  # у Reality нет своего сертификата
+        e.add_xhttp({'inbounds': [{'tag': 'R', 'port': 443, 'streamSettings': {'security': 'reality'}}]})
+    with pytest.raises(e.StepError):
+        e.add_xhttp(_vision(), port=443)

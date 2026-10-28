@@ -27,6 +27,8 @@ class World:
         self.host_patches: list[dict] = []
         self.deleted: list[tuple[str, str]] = []
         self.restarts: list[str] = []
+        self.rulesets: dict[tuple[str, str], list[dict]] = {}  # (зона, фаза) → правила Cloudflare
+        self.cf_rules_denied = False  # токен без прав Origin/Config Rules
         self.moves: list[tuple[str, bool]] = []  # (нода, были ли новые inbound уже в сквадах в момент смены профиля)
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
@@ -73,7 +75,21 @@ def make_server(world: World) -> ThreadingHTTPServer:
                 z = W.zones.get(q.get('name', ''))
                 return ok([{'id': z, 'name': q['name']}] if z else [])
             parts = p.strip('/').split('/')
-            with W.lock:
+            if 'rulesets' in parts:  # /zones/<z>/rulesets/phases/<phase>/entrypoint
+                if W.cf_rules_denied:
+                    return self.send(403, {'success': False, 'errors': [{'code': 10000, 'message': 'Authentication error'}]})
+                key = (parts[1], parts[4])
+                with W.lock:
+                    if method == 'GET':
+                        if key not in W.rulesets:
+                            return self.send(404, {'success': False, 'errors': [{'message': 'not found'}]})
+                        return ok({'rules': W.rulesets[key], 'phase': parts[4]})
+                    rules = self.body()['rules']
+                    for r in rules:
+                        assert r['action'] in ('route', 'set_config') and r['expression'].startswith('(http.host in {'), r
+                        r.setdefault('id', uuid.uuid4().hex)
+                    W.rulesets[key] = rules
+                    return ok({'rules': rules})
                 if method == 'GET' and parts[-1] == 'dns_records':
                     return ok([r for r in W.records if r['name'] == q.get('name')])
                 if method == 'POST':
@@ -308,6 +324,7 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
 
     class FakeRemote(engine.Remote):
         warp_calls: list = []
+        xhttp_ports: list = []
         ports: list = []
         calls: list = []
         post: list = []
@@ -345,6 +362,9 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                 if behaviour.get(f'xray-{ip}') == 'down':
                     return 0, '@@@\nFailed to start: main: failed to load config files > infra/conf: unknown geosite\n'
                 return 0, 'LISTEN 0 4096 *:443 *:*\n@@@\n'
+            if cmd.startswith('L=$(ss -ltnpH "sport = :'):  # порт запасного XHTTP
+                FakeRemote.xhttp_ports.append(ip)
+                return 0, 'XH_BUSY\n' if behaviour.get(f'xh-{ip}') == 'busy' else 'XH_OK\n'
             if cmd.startswith('ip rule 2>/dev/null'):
                 return 0, 'WARP_UP\n' if ip in warp else ''
             if 'warp_install.sh' in cmd:

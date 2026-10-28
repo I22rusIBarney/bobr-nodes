@@ -13,6 +13,7 @@ import copy
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import threading
@@ -43,7 +44,13 @@ WARP_DOMAINS = ['geosite:tiktok', 'domain:cloudflare.com']
 # Final Mask хоста: фрагментация TLS ClientHello на клиенте (часть операторов режет его на 443/TCP)
 FINAL_MASK = {'tcp': [{'type': 'fragment', 'settings': {'length': '10-20', 'packets': 'tlshello', 'interval': '10-20'}}]}
 # дополнения ноды: ключ, название в имени профиля, код в теге inbound
-EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP')]
+EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP'), ('xhttp', 'XHTTP', 'XH')]
+# запасной вход XHTTP: свой inbound на порту, который проксирует Cloudflare, с сертификатом ноды;
+# напрямую — домен ноды:порт, через CDN — cdn-<домен ноды> (Cloudflare на 443 → нода на порт по Origin Rule)
+XHTTP_PORT = 2083
+XHTTP_PREFIX = 'XHTTP-'      # тег inbound: XHTTP-<тег основного inbound>
+CDN_PREFIX = 'cdn-'
+CF_RULE = 'Bobr Nodes XHTTP'  # описание правил Cloudflare (Origin Rule и Config Rule), которыми бот управляет сам
 INBOUND_TAG = 'Vision-TLS'
 YN = r'[^\n]*\[Д/Н; Enter — Н\]'
 
@@ -171,10 +178,10 @@ class Cloudflare:
             log(f'Cloudflare: A-запись {domain} → {ip} удалена')
         return n
 
-    def upsert_a(self, domain: str, ip: str, log):
+    def upsert_a(self, domain: str, ip: str, log, proxied: bool = False):
         zid = self.zone_for(domain)
         records = self.records(domain)
-        body = {'type': 'A', 'name': domain, 'content': ip, 'ttl': 60, 'proxied': False, 'comment': 'nv-deploy'}
+        body = {'type': 'A', 'name': domain, 'content': ip, 'ttl': 1 if proxied else 60, 'proxied': proxied, 'comment': 'nv-deploy'}
         a = [r for r in records if r['type'] == 'A']
         for r in records:
             if r['type'] == 'CNAME':
@@ -186,14 +193,57 @@ class Cloudflare:
             log(f'удалена лишняя A-запись {r["content"]}')
         if a:
             r = a[0]
-            if r['content'] == ip and not r.get('proxied'):
-                log(f'DNS: A {domain} → {ip} уже есть')
+            if r['content'] == ip and bool(r.get('proxied')) == proxied:
+                log(f'DNS: A {domain} → {ip} уже есть' + (' (через Cloudflare)' if proxied else ''))
                 return
             self.call('PUT', f'/zones/{zid}/dns_records/{r["id"]}', body)
             log(f'DNS: A {domain} обновлена → {ip} (было {r["content"]}, proxied={r.get("proxied")})')
         else:
             self.call('POST', f'/zones/{zid}/dns_records', body)
-            log(f'DNS: A {domain} → {ip} создана')
+            log(f'DNS: A {domain} → {ip} создана' + (' (через Cloudflare)' if proxied else ''))
+
+    RULE_KEYS = ('id', 'ref', 'description', 'expression', 'action', 'action_parameters', 'enabled', 'logging')
+
+    def _host_rule(self, zid: str, phase: str, host: str, add: bool, action: str, params: dict) -> None:
+        """Своё правило в фазе Rulesets зоны: список хостов в выражении; чужие правила фазы не трогаем."""
+        code, data = http('GET', f'{self.API}/zones/{zid}/rulesets/phases/{phase}/entrypoint', self.h)
+        if code == 404:
+            rules = []
+        elif code >= 300 or not data.get('success'):
+            raise StepError(f'{code} {data.get("errors") or data}')
+        else:
+            rules = data['result'].get('rules') or []
+        mine = next((r for r in rules if r.get('description') == CF_RULE), None)
+        hosts = re.findall(r'"([^"]+)"', (mine or {}).get('expression', ''))
+        hosts = sorted((set(hosts) | {host}) if add else (set(hosts) - {host}))
+        keep = [{k: r[k] for k in self.RULE_KEYS if k in r} for r in rules if r is not mine]
+        if hosts:
+            rule = {k: mine[k] for k in ('id', 'ref') if mine and k in mine}
+            rule.update({'description': CF_RULE, 'expression': '(http.host in {' + ' '.join(f'"{x}"' for x in hosts) + '})',
+                         'action': action, 'action_parameters': params, 'enabled': True})
+            keep.append(rule)
+        if mine is None and not add:
+            return
+        code, data = http('PUT', f'{self.API}/zones/{zid}/rulesets/phases/{phase}/entrypoint', self.h, {'rules': keep})
+        if code >= 300 or not data.get('success'):
+            raise StepError(f'{code} {data.get("errors") or data}')
+
+    def xhttp_rules(self, host: str, port: int, log, add: bool = True) -> bool:
+        """Origin Rule (клиент на 443 → нода на port) и Config Rule (SSL Full: сертификат ноды выпущен на её домен,
+        а не на cdn-имя) — только для этого имени. True — клиенты ходят на 443, False — на сам port."""
+        zid = self.zone_for(host)
+        ok = True
+        for phase, action, params, what, perm in (
+                ('http_request_origin', 'route', {'origin': {'port': port}}, f'Origin Rule 443 → {port}', 'Origin Rules: Edit'),
+                ('http_config_settings', 'set_config', {'ssl': 'full'}, 'Config Rule «SSL: Full»', 'Config Rules: Edit')):
+            try:
+                self._host_rule(zid, phase, host, add, action, params)
+                log(f'Cloudflare: {what} для {host} ' + ('поставлено' if add else 'убрано'))
+            except StepError as e:
+                ok = False
+                log(f'⚠️ Cloudflare: {what} не {"поставлено" if add else "убрано"} ({e}). '
+                    f'Добавьте токену право «Zone → {perm}»' + (f' — пока клиенты ходят через CDN на порт {port}' if add and phase == 'http_request_origin' else ''))
+        return ok
 
 
 def doh_a(domain: str) -> list[list[str]]:
@@ -341,9 +391,51 @@ def warp_of(config) -> bool:
     return isinstance(config, dict) and any(o.get('tag') == WARP_TAG for o in config.get('outbounds', []))
 
 
+def _main_tls(config) -> dict | None:
+    """Основной inbound с TLS (его сертификат берёт XHTTP)."""
+    for i in (config or {}).get('inbounds', []) if isinstance(config, dict) else []:
+        st = i.get('streamSettings') or {}
+        if st.get('security') == 'tls' and st.get('network') != 'xhttp' and not str(i.get('tag', '')).startswith(XHTTP_PREFIX):
+            return i
+    return None
+
+
+def xhttp_of(config) -> dict | None:
+    """Запасной XHTTP-inbound профиля: {'tag', 'port', 'path'} или None."""
+    for i in (config or {}).get('inbounds', []) if isinstance(config, dict) else []:
+        if str(i.get('tag', '')).startswith(XHTTP_PREFIX):
+            st = i.get('streamSettings') or {}
+            return {'tag': i['tag'], 'port': int(i.get('port') or XHTTP_PORT), 'path': (st.get('xhttpSettings') or {}).get('path') or '/'}
+    return None
+
+
+def add_xhttp(config: dict, port: int = XHTTP_PORT) -> dict:
+    """Копия профиля с запасным VLESS XHTTP+TLS на port: сертификат и sniffing — как у основного inbound,
+    путь — случайный (сохраняется, если XHTTP уже был: клиенты не теряют подписку)."""
+    cfg = json.loads(json.dumps(config))
+    main = _main_tls(cfg)
+    if not main:
+        raise StepError('XHTTP: в профиле нет inbound с TLS-сертификатом (у Reality своего сертификата нет)')
+    if int(main.get('port') or 443) == port:
+        raise StepError(f'XHTTP: порт {port} уже занят основным inbound')
+    old = xhttp_of(cfg)
+    tls = (main.get('streamSettings') or {}).get('tlsSettings') or {}
+    ib = {'tag': XHTTP_PREFIX + main['tag'], 'port': port, 'listen': '0.0.0.0', 'protocol': 'vless',
+          'settings': {'clients': [], 'decryption': 'none'},
+          'sniffing': json.loads(json.dumps(main.get('sniffing') or {'enabled': True, 'routeOnly': True, 'destOverride': ['http', 'tls']})),
+          'streamSettings': {'network': 'xhttp', 'security': 'tls',
+                             'xhttpSettings': {'path': old['path'] if old else '/' + secrets.token_hex(8), 'mode': 'auto'},
+                             'tlsSettings': {'alpn': ['h2', 'http/1.1'], 'minVersion': tls.get('minVersion', '1.2'),
+                                             'certificates': json.loads(json.dumps(tls.get('certificates') or [])),
+                                             'rejectUnknownSni': False}}}
+    cfg['inbounds'] = [i for i in cfg['inbounds'] if not str(i.get('tag', '')).startswith(XHTTP_PREFIX)] + [ib]
+    return cfg
+
+
 def features_of(config) -> set[str]:
     """Какие дополнения уже прописаны в профиле."""
-    return {k for k, f in (('psiphon', psiphon_of(config) is not None), ('warp', warp_of(config))) if f}
+    return {k for k, f in (('psiphon', psiphon_of(config) is not None), ('warp', warp_of(config)),
+                           ('xhttp', xhttp_of(config) is not None)) if f}
 
 
 def apply_extras(config: dict, extras: dict) -> dict:
@@ -351,6 +443,8 @@ def apply_extras(config: dict, extras: dict) -> dict:
         config = add_psiphon(config, extras['psiphon']['out'], extras['psiphon']['domains'])
     if 'warp' in extras:
         config = add_warp(config, extras['warp']['domains'])
+    if 'xhttp' in extras:
+        config = add_xhttp(config, int(extras['xhttp'].get('port') or XHTTP_PORT))
     return config
 
 
@@ -365,6 +459,8 @@ def extras_problem(config, extras: dict, pname: str) -> str:
                     f'а профиль «{pname}» ведёт на {have["address"]}:{have["port"]}')
     if 'warp' in extras and not warp_of(config):
         return f'в профиле «{pname}» нет выхода {WARP_TAG} — добавьте его в панели или удалите профиль, бот создаст заново'
+    if 'xhttp' in extras and not xhttp_of(config):
+        return f'в профиле «{pname}» нет inbound {XHTTP_PREFIX}… — удалите профиль в панели, бот создаст заново'
     return ''
 
 
@@ -609,12 +705,15 @@ class Panel:
         inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
             raise StepError(f'в профиле нет inbound {tag}')
-        self.attach(node, prof, [inbound], squads, node_port, log, tls=True)
+        xin = [i for i in prof['inbounds'] if i['tag'] == XHTTP_PREFIX + tag]
+        self.attach(node, prof, [inbound], squads, node_port, log, tls=True, also=xin)
+        return prof
 
     def node_hosts(self, pnode: dict, domains: set[str], ips: set[str] = frozenset()) -> list[dict]:
         """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP."""
         active = set(active_inbounds(pnode))
         names = {pnode['address']} | set(domains)
+        names |= {CDN_PREFIX + d for d in names if d and not is_ip(d)}  # хост запасного XHTTP через Cloudflare
         out = []
         for h in self.call('GET', '/api/hosts'):
             if (h.get('inbound') or {}).get('configProfileInboundUuid') not in active:
@@ -667,13 +766,19 @@ class Panel:
         active = [umap[u] for u in active_inbounds(pnode) if u in umap]
         if not active:
             raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
+        xh = next((i['uuid'] for i in prof['inbounds'] if i['tag'].startswith(XHTTP_PREFIX)), None)
+        if xh and xh not in active:  # запасной XHTTP — тоже на ноде
+            active.append(xh)
         # Сначала сквады: панель собирает пользователей ноды из сквадов в момент смены профиля.
         # Если inbound в сквады попадёт позже, нода поднимется с новым профилем без пользователей —
         # и подключиться к ней нельзя, пока её не перезапустят.
         if squads:
+            targets = set(umap.values())
             for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
                 ids = [i['uuid'] for i in sq.get('inbounds', [])]
                 add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
+                if xh and xh not in ids and xh not in add and (add or any(u in umap or u in targets for u in ids)):
+                    add.append(xh)
                 if add:
                     self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
                     log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
@@ -689,6 +794,50 @@ class Panel:
                 h['inbound'] = {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}
         log(f'панель: хосты ноды ({len(hosts)}) — на inbound «{vname}»')
         self.restart_node(pnode, log)
+
+    def xhttp_publish(self, prof: dict, domain: str, ip: str, remark: str, cf: 'Cloudflare | None', log) -> None:
+        """Хосты запасного XHTTP: напрямую (домен ноды:порт) и через Cloudflare CDN (cdn-домен, оранжевое облако)."""
+        x = xhttp_of(prof.get('config'))
+        xin = next((i for i in prof['inbounds'] if x and i['tag'] == x['tag']), None)
+        if not x or not xin:
+            raise StepError(f'в профиле «{prof["name"]}» нет запасного XHTTP')
+        cdn, cdn_port = CDN_PREFIX + domain, x['port']
+        if cf is None:
+            log('⚠️ нет токена Cloudflare — хост через CDN не создан, только прямой')
+        else:
+            cf.upsert_a(cdn, ip, log, proxied=True)
+            if cf.xhttp_rules(cdn, x['port'], log):
+                cdn_port = 443
+        hosts = self.call('GET', '/api/hosts')
+        for addr, port, label in ((domain, x['port'], 'XHTTP'), *(((cdn, cdn_port, 'CDN'),) if cf else ())):
+            body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': xin['uuid']},
+                    'remark': f'{remark} {label}'[:100], 'address': addr, 'port': port, 'path': x['path'], 'sni': addr, 'host': addr,
+                    'alpn': 'h2,http/1.1', 'fingerprint': 'chrome', 'securityLayer': 'TLS'}
+            have = next((h for h in hosts if h.get('address') == addr
+                         and str(((h.get('inbound') or {}).get('configProfileInboundUuid')) or '') == xin['uuid']), None)
+            if have:
+                self.call('PATCH', '/api/hosts', {'uuid': have['uuid'], 'port': port, 'path': x['path']})
+                log(f'панель: хост «{have.get("remark", addr)}» обновлён ({addr}:{port})')
+            else:
+                self.call('POST', '/api/hosts', body)
+                log(f'панель: хост «{body["remark"]}» создан ({addr}:{port})')
+
+    def xhttp_unpublish(self, cur: dict, domain: str, ip: str, cf: 'Cloudflare | None', log) -> None:
+        """Убрать запасной XHTTP ноды: её хосты на XHTTP-inbound профиля cur, запись cdn-домена и правила Cloudflare."""
+        x = xhttp_of(cur.get('config'))
+        xin = next((i['uuid'] for i in cur.get('inbounds', []) if x and i['tag'] == x['tag']), None)
+        cdn = CDN_PREFIX + domain if domain else ''
+        if xin:
+            for h in self.call('GET', '/api/hosts'):
+                if ((h.get('inbound') or {}).get('configProfileInboundUuid') == xin and h.get('address') in {domain, cdn, ip} - {''}):
+                    self.call('DELETE', f'/api/hosts/{h["uuid"]}')
+                    log(f'панель: хост «{h.get("remark", "")}» удалён (запасной XHTTP)')
+        if cf and cdn:
+            try:
+                cf.delete_a(cdn, ip, log)
+                cf.xhttp_rules(cdn, (x or {}).get('port', XHTTP_PORT), log, add=False)
+            except StepError as e:
+                log(f'⚠️ Cloudflare: {e}')
 
     def restart_node(self, pnode: dict, log) -> None:
         """Перезапуск ноды из панели: Xray получает актуальный профиль и список пользователей."""
@@ -749,15 +898,16 @@ class Panel:
         return body
 
     def attach(self, node: dict, prof: dict, inbounds: list[dict], squads: list[str], node_port: int, log,
-               tls: bool = True):
-        """Нода с профилем и inbound'ами, хосты (обычные/скрытые с тегами/балансировщик), сквады."""
-        cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [i['uuid'] for i in inbounds]}
+               tls: bool = True, also: list[dict] = ()):
+        """Нода с профилем и inbound'ами, хосты (обычные/скрытые с тегами/балансировщик), сквады.
+        also — ещё inbound'ы ноды без обычных хостов (запасной XHTTP: его хосты ставит xhttp_publish)."""
+        cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [i['uuid'] for i in [*inbounds, *also]]}
         # сквады — до ноды: пользователей нода получает из сквадов при запуске с профилем;
         # inbound, добавленный в сквад позже, до перезапуска ноды остаётся без пользователей
         for sq in squads:
             cur = self.call('GET', f'/api/internal-squads/{sq}')
             ids = [i['uuid'] for i in cur.get('inbounds', [])]
-            new = [i['uuid'] for i in inbounds if i['uuid'] not in ids]
+            new = [i['uuid'] for i in [*inbounds, *also] if i['uuid'] not in ids]
             if new:
                 self.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + new})
                 log(f'панель: inbound добавлен в сквад «{cur.get("name", sq)}»')
@@ -1068,7 +1218,23 @@ def install_extras(r: 'Remote', node: dict, log) -> dict:
     if node.get('warp'):
         install_warp(r, node['warp'], log)
         extras['warp'] = {'domains': warp_rules(node['warp'].get('domains'))}
+    if node.get('xhttp'):
+        extras['xhttp'] = {'port': open_xhttp_port(r, XHTTP_PORT, log)}
     return extras
+
+
+def open_xhttp_port(r: 'Remote', port: int, log) -> int:
+    """Порт запасного XHTTP на ноде: свободен (или его уже слушает Xray) и открыт в ufw, если тот включён."""
+    rc, out = r.run(f'L=$(ss -ltnpH "sport = :{port}" 2>/dev/null); '
+                    f'if [ -n "$L" ] && ! echo "$L" | grep -q xray; then echo XH_BUSY; exit 0; fi; '
+                    f'if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow {port}/tcp >/dev/null && echo XH_UFW; fi; '
+                    'echo XH_OK')
+    if 'XH_BUSY' in out:
+        raise StepError(f'порт {port} на ноде занят другой программой — запасной XHTTP не поставить')
+    if 'XH_OK' not in out:
+        raise StepError(f'не удалось проверить порт {port}: {strip_ansi(out).strip()[-200:]}')
+    log(f'порт {port} для XHTTP свободен' + (', открыт в ufw' if 'XH_UFW' in out else ''))
+    return port
 
 
 def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
@@ -1122,7 +1288,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
 
     port = (node.get('host') or {}).get('port')
     extras = {}
-    if node.get('psiphon') or node.get('warp') or port:
+    if node.get('psiphon') or node.get('warp') or node.get('xhttp') or port:
         stage('extras')
         extras = install_extras(r, node, log)
         if port:
@@ -1145,7 +1311,10 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         squads = [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x] \
             if isinstance(prof.get('squads'), str) else list(prof.get('squads') or [])
     with PANEL_LOCK:
-        panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, extras)
+        pprof = panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, extras)
+        if 'xhttp' in extras:
+            panel.xhttp_publish(pprof, node['domain'], node['ip'], node.get('remark') or node['name'],
+                                Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log)
 
     stage('check')
     for attempt in range(check_tries):
@@ -1340,11 +1509,26 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
     if not pnode:
         raise StepError('ноды больше нет в панели')
     node = {**node, 'ip': node.get('ip') or pnode['address']}
+    domain = next(iter(node.get('domains') or []), '') or ('' if is_ip(pnode['address']) else pnode['address'])
+    cf = Cloudflare(prof['cf_token']) if prof.get('cf_token') else None
+
+    def ipv4() -> str:  # для A-записи cdn-домена нужен сам IP, а адрес ноды в панели — часто домен
+        if is_ip(node['ip']):
+            return node['ip']
+        try:
+            return socket.getaddrinfo(node['ip'], None, socket.AF_INET)[0][4][0]
+        except (OSError, IndexError):
+            raise StepError(f'не узнал IP ноды по {node["ip"]}') from None
+
     if node.get('rollback'):  # убрать дополнения: нода и хосты — обратно в исходный профиль
         stage('panel')
         with PANEL_LOCK:
             hosts = panel.node_hosts(pnode, set(node.get('domains') or []), {node['ip']} if is_ip(node['ip']) else set())
+            was = next((p for p in panel.call('GET', '/api/config-profiles')['configProfiles']
+                        if p['uuid'] == (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
             base = panel.downgrade_node(pnode, hosts, log)
+            if was and xhttp_of(was.get('config')):
+                panel.xhttp_unpublish(was, domain, ipv4(), cf, log)
         stage('check')
         for attempt in range(check_tries):
             time.sleep(check_every)
@@ -1353,7 +1537,9 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
                 return 'готово'
         raise StepError('после возврата профиля нода не вышла на связь — посмотрите её в панели')
     want_port = node.get('port')
-    need_ssh = bool(node.get('psiphon') or node.get('warp') or want_port)
+    if node.get('xhttp') and not domain:
+        raise StepError('для запасного XHTTP нужен домен ноды: сертификат на ноде выпущен на домен, а не на IP')
+    need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or want_port)
     extras, r = {}, None
     if need_ssh:
         stage('ssh')
@@ -1372,6 +1558,11 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
         before = cur
         if extras:
             cur = panel.upgrade_node(pnode, extras, hosts, log)
+        if 'xhttp' in extras:
+            main_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if not i['tag'].startswith(XHTTP_PREFIX)}
+            remark = next((h['remark'] for h in hosts if (h.get('inbound') or {}).get('configProfileInboundUuid') in main_in
+                           and h.get('address') == domain), None) or pnode['name']
+            panel.xhttp_publish(cur, domain, ipv4(), remark, cf, log)
         if want_port is not None and want_port != '':
             active = set(active_inbounds(pnode))
             ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)
@@ -1391,8 +1582,12 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
 
     if extras and r is not None:
         stage('check')
-        port = next((int(i['port']) for i in (cur or {}).get('inbounds', []) if i['uuid'] in active_inbounds(pnode) and i.get('port')), 443)
+        port = next((int(i['port']) for i in (cur or {}).get('inbounds', []) if i['uuid'] in active_inbounds(pnode) and i.get('port')
+                     and not i['tag'].startswith(XHTTP_PREFIX)), 443)
         problem = xray_problem(r, port, log, tries=check_tries, every=check_every)
+        xh = xhttp_of((cur or {}).get('config'))
+        if not problem and xh:
+            problem = xray_problem(r, xh['port'], log, tries=max(3, check_tries // 2), every=check_every)
         if problem:  # Xray не поднялся с новым профилем — сразу возвращаем ноду, чтобы клиенты не остались без связи
             log(f'⚠️ {problem} — возвращаю ноду в профиль «{before["name"]}»')
             if before and cur and before['uuid'] != cur['uuid']:
@@ -1401,6 +1596,8 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
                 with PANEL_LOCK:
                     panel.move_node(pnode, cur, before, {i['tag']: back[base(i['tag'])] for i in cur['inbounds']
                                                         if base(i['tag']) in back}, hosts, log, squads=False)
+                    if xh and not xhttp_of(before.get('config')):
+                        panel.xhttp_unpublish(cur, domain, ipv4(), cf, log)
             raise StepError(f'{problem}. Нода возвращена в профиль «{before["name"]}», клиенты снова подключаются. '
                             'Строки ошибок Xray — в журнале задачи')
     if extras:

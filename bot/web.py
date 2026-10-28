@@ -432,6 +432,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                               'domains': engine.psiphon_rules(ps.get('domains') or '')}
         if isinstance(wp, dict) and wp.get('enabled'):
             out['warp'] = {'domains': engine.warp_rules(wp.get('domains') or '')}
+        xh = b.get('xhttp')
+        if isinstance(xh, dict) and xh.get('enabled'):
+            out['xhttp'] = {'port': engine.XHTTP_PORT}
         return out
 
     # ── ноды панели: дополнения на уже работающих нодах ──
@@ -696,12 +699,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Ноды нет в панели', 404)
         ssh = node_ssh(p['id'], uuid, n['address'])
         if (extras or port != '') and not ssh:
-            raise ApiError('Укажите доступ по SSH к ноде — без него Psiphon, WARP и порт не поставить')
+            raise ApiError('Укажите доступ по SSH к ноде — без него Psiphon, WARP, XHTTP и порт не поставить')
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
         data = {'kind': 'node', 'node_uuid': uuid, 'name': n['name'], 'ip': bd.get('ip') or n['address'],
                 'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
                 'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
-                'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'port': port, 'final_mask': fm}
+                'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'xhttp': extras.get('xhttp'),
+                'port': port, 'final_mask': fm}
         jid = store.add_job('node-' + uuid[:8], p['id'], int(request['user']['id']), data)
         await runner.render(jid, force=True)
         runner.start(jid)
@@ -808,6 +812,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             port = engine.public_port(b.get('port'), int(p.get('node_port') or 2222))
         except engine.StepError as e:
             raise ApiError(str(e)) from None
+        if extras.get('xhttp') and p.get('script_id'):
+            raise ApiError('Запасной XHTTP ставится только встроенным установщиком — у группы свой скрипт')
+        if extras.get('xhttp') and port == engine.XHTTP_PORT:
+            raise ApiError(f'Порт {engine.XHTTP_PORT} занят запасным XHTTP — выберите другой порт для клиентов')
         period = str(b.get('period') or '1m')
         all_domains = [d for it in items for d in (it.get('domains') or [])]
         if not 1 <= len(all_domains) <= 50:

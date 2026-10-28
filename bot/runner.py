@@ -22,7 +22,7 @@ STAGE_ORDER = [s for s, _ in STAGES]
 
 def extras_label(d: dict) -> str:
     port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
-    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + \
+    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + (['XHTTP'] if d.get('xhttp') else []) + \
         ([f'порт {port}'] if port not in (None, '', 443, '443') else [])
     return ', '.join(parts)
 
@@ -40,7 +40,7 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
         return [('panel', 'Исходный профиль в панели'), ('check', 'Нода на связи')]
     if d.get('kind') == 'node':
         out = ([('ssh', 'Вход по SSH'), ('extras', 'Установка: ' + extra)] if extra else []) + \
-            [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') else [])
+            [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') or d.get('xhttp') else [])
         return out
     skip = set(d.get('skipped_stages') or []) | (set() if extra else {'extras'})
     return [(c, 'Дополнения: ' + extra if c == 'extras' else lbl) for c, lbl in STAGES if c not in skip]
@@ -314,7 +314,7 @@ class Runner:
         loop = asyncio.get_running_loop()
         ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
-                'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
+                'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                 'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'),
                 'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22),
                 'known_hosts': self.known_hosts()}
@@ -322,7 +322,7 @@ class Runner:
             node['ssh_key'] = self.bot_key()[0]
         else:
             node['ssh_password'] = ssh.get('password', '')
-        pconf = {**prof, 'ssh_pubkey': self.pubkeys()}
+        pconf = {**prof, 'ssh_pubkey': self.pubkeys(), 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
         self.last[jid] = 'ждём свободный слот'
         await self.render(jid)
         async with self.sem():
@@ -407,7 +407,7 @@ class Runner:
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
                         'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
-                        'psiphon': d.get('psiphon'), 'warp': d.get('warp'),
+                        'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                         'traffic_control': prof.get('traffic_control', True), 'known_hosts': self.known_hosts()}
                 pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
                          'ssh_pubkey': self.pubkeys()}
