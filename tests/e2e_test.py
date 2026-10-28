@@ -647,6 +647,9 @@ async def main():
     sq_old = {u for u, x in world.squads.items() if any(i['uuid'] == nv_in for i in x['inbounds'])}
     sq_new = {u for u, x in world.squads.items() if any(i['uuid'] == vw['inbounds'][0]['uuid'] for i in x['inbounds'])}
     ok(sq_old and sq_new == sq_old, f'inbound копии добавлен в те же сквады: {sq_new} / {sq_old}')
+    mv = [ok_ for u, ok_ in world.moves if u == plain['uuid']]
+    ok(mv and all(mv) and plain['uuid'] in world.restarts,
+       f'inbound копии в сквадах раньше смены профиля, нода перезапущена — пользователи на месте: {mv}, {world.restarts}')
     st, jv = await wapi(f'jobs/{uj["id"]}')
     ok([x['code'] for x in jv['stages']] == ['ssh', 'extras', 'panel', 'check'] and 'Root-пароль' not in job_text_of(uj),
        f'этапы задачи по ноде: {jv["stages"]}')

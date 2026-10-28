@@ -667,6 +667,16 @@ class Panel:
         active = [umap[u] for u in active_inbounds(pnode) if u in umap]
         if not active:
             raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
+        # Сначала сквады: панель собирает пользователей ноды из сквадов в момент смены профиля.
+        # Если inbound в сквады попадёт позже, нода поднимется с новым профилем без пользователей —
+        # и подключиться к ней нельзя, пока её не перезапустят.
+        if squads:
+            for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
+                ids = [i['uuid'] for i in sq.get('inbounds', [])]
+                add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
+                if add:
+                    self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
+                    log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
         self.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'],
                                           'configProfile': {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': active}})
         pnode['configProfile'] = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': active}
@@ -678,14 +688,15 @@ class Panel:
                     'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}})
                 h['inbound'] = {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': umap[u]}
         log(f'панель: хосты ноды ({len(hosts)}) — на inbound «{vname}»')
-        if not squads:
-            return
-        for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
-            ids = [i['uuid'] for i in sq.get('inbounds', [])]
-            add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
-            if add:
-                self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
-                log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
+        self.restart_node(pnode, log)
+
+    def restart_node(self, pnode: dict, log) -> None:
+        """Перезапуск ноды из панели: Xray получает актуальный профиль и список пользователей."""
+        try:
+            self.call('POST', f'/api/nodes/{pnode["uuid"]}/actions/restart', {})
+            log(f'панель: нода «{pnode["name"]}» перезапущена — пользователи профиля подтянуты')
+        except StepError as e:
+            log(f'⚠️ панель: не удалось перезапустить ноду ({e}) — если к ней не подключиться, перезапустите её в панели')
 
     def downgrade_node(self, pnode: dict, hosts: list[dict], log) -> dict:
         """Обратно: нода и её хосты — в исходный профиль (без Psiphon/WARP). Профиль-копия остаётся для других нод."""
@@ -741,6 +752,15 @@ class Panel:
                tls: bool = True):
         """Нода с профилем и inbound'ами, хосты (обычные/скрытые с тегами/балансировщик), сквады."""
         cp = {'activeConfigProfileUuid': prof['uuid'], 'activeInbounds': [i['uuid'] for i in inbounds]}
+        # сквады — до ноды: пользователей нода получает из сквадов при запуске с профилем;
+        # inbound, добавленный в сквад позже, до перезапуска ноды остаётся без пользователей
+        for sq in squads:
+            cur = self.call('GET', f'/api/internal-squads/{sq}')
+            ids = [i['uuid'] for i in cur.get('inbounds', [])]
+            new = [i['uuid'] for i in inbounds if i['uuid'] not in ids]
+            if new:
+                self.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + new})
+                log(f'панель: inbound добавлен в сквад «{cur.get("name", sq)}»')
 
         nodes = self.call('GET', '/api/nodes')
         existing = next((n for n in nodes if n['address'] in (node['ip'], node['domain'])), None)
@@ -791,13 +811,6 @@ class Panel:
             except StepError as e:  # порядок — не повод ронять готовую ноду
                 log(f'панель: не удалось переставить хосты: {e}')
 
-        for sq in squads:
-            cur = self.call('GET', f'/api/internal-squads/{sq}')
-            ids = [i['uuid'] for i in cur.get('inbounds', [])]
-            new = [i['uuid'] for i in inbounds if i['uuid'] not in ids]
-            if new:
-                self.call('PATCH', '/api/internal-squads', {'uuid': sq, 'inbounds': ids + new})
-                log(f'панель: inbound добавлен в сквад «{cur.get("name", sq)}»')
 
 
 # ─────────────────────────────── SSH ─────────────────────────────────

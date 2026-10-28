@@ -26,6 +26,8 @@ class World:
         self.reorders = 0
         self.host_patches: list[dict] = []
         self.deleted: list[tuple[str, str]] = []
+        self.restarts: list[str] = []
+        self.moves: list[tuple[str, bool]] = []  # (нода, были ли новые inbound уже в сквадах в момент смены профиля)
         self.squads = {'11111111-1111-1111-1111-111111111111': {'name': 'Default', 'inbounds': []},
                        '22222222-2222-2222-2222-222222222222': {'name': 'Premium', 'inbounds': []}}
         self.templates: list[dict] = []
@@ -219,6 +221,9 @@ def make_server(world: World) -> ThreadingHTTPServer:
                          'viewPosition': max([x['viewPosition'] for x in W.hosts], default=0) + 1}
                     W.hosts.append(h)
                     return self.send(201, {'response': h})
+                if p.startswith('/api/nodes/') and p.endswith('/actions/restart'):
+                    W.restarts.append(p.split('/')[3])
+                    return self.send(200, {'response': {'eventSent': True}})
                 if p == '/api/hosts/actions/reorder':
                     by = {x['uuid']: x for x in W.hosts}
                     for x in b['hosts']:
@@ -260,6 +265,8 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     if n and 'configProfile' in b:
                         pr = next(x for x in W.profiles if x['uuid'] == b['configProfile']['activeConfigProfileUuid'])
                         assert set(b['configProfile']['activeInbounds']) <= {i['uuid'] for i in pr['inbounds']}
+                        in_sq = {x['uuid'] for v in W.squads.values() for x in v['inbounds']}
+                        W.moves.append((n['uuid'], set(b['configProfile']['activeInbounds']) <= in_sq))
                         n['configProfile'] = b['configProfile']
                     if n and 'address' in b:
                         n['address'] = b['address']
