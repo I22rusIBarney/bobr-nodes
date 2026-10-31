@@ -1522,7 +1522,9 @@ async def main():
 
     class FakeYK:
         configured = True; enabled = True; calls = []
-        async def create_payment(s, **kw): s.calls.append(kw); return {'id': 'yk-1', 'confirmation': {'confirmation_url': 'https://yoomoney.test/pay/1'}}
+        async def create_payment(s, **kw):  # id платежа у провайдера уникален — как у ЮKassa
+            s.calls.append(kw); n = len(s.calls)
+            return {'id': f'yk-{n}', 'confirmation': {'confirmation_url': f'https://yoomoney.test/pay/{n}'}}
         async def close(s): pass
     bctx.yk = FakeYK()
     st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 700})
