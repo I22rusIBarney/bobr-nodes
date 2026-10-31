@@ -36,7 +36,7 @@ BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации'
 SKIP_DEFAULT = 'АВТО-ВЫБОР, АВТОВЫБОР, AUTO-SELECT, NORMAL'  # общий балансировщик: его ноды проверяются и так
 DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest', 'mon_skip': SKIP_DEFAULT,
             'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
-            'mon_old': 'panel', 'mon_max_buys': 2}
+            'mon_old': 'panel', 'mon_max_buys': 2, 'mon_quiet': False, 'mon_mute': []}
 FAILS_TO_ALERT = 3
 RECOVER_CYCLES = 2
 
@@ -45,6 +45,8 @@ def settings_of(prof: dict) -> dict:
     out = {k: prof[k] if prof.get(k) is not None else v for k, v in DEFAULTS.items()}
     out['mon_steps'] = list(dict.fromkeys(x for x in (out['mon_steps'] or []) if x in STEPS))  # порядок — как задан
     out['mon_buy'] = list(out['mon_buy'] or [])
+    out['mon_quiet'] = bool(out['mon_quiet'])
+    out['mon_mute'] = [str(x) for x in (out['mon_mute'] or []) if x][:500]
     return out
 
 
@@ -66,6 +68,8 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
         out['mon_steps'] = list(steps)  # включённые шаги в заданном порядке
     if raw.get('mon_buy') is not None:
         out['mon_buy'] = clean_buy(raw['mon_buy'])
+    if raw.get('mon_quiet') is not None:
+        out['mon_quiet'] = bool(raw['mon_quiet'])
     if raw.get('mon_skip') is not None:
         out['mon_skip'] = ', '.join(w.strip() for w in str(raw['mon_skip']).split(',') if w.strip())[:300]
     if raw.get('mon_buy_last') is not None:
@@ -448,7 +452,15 @@ class Monitor:
     def recipients(self, prof: dict) -> list[int]:
         return self.access.recipients(prof) if self.access is not None else sorted(self.admins)
 
-    async def say(self, prof: dict, text: str, markup=None) -> None:
+    @staticmethod
+    def muted(prof: dict, st: dict | None = None) -> bool:
+        """Уведомления выключены для всей группы или для этой ноды (мониторинг и починка работают, сообщений нет)."""
+        cfg = settings_of(prof)
+        return cfg['mon_quiet'] or bool(st and (st.get('addr') or '') in cfg['mon_mute'])
+
+    async def say(self, prof: dict, text: str, markup=None, st: dict | None = None) -> None:
+        if self.muted(self.store.profile(prof['id']) or prof, st):
+            return
         for uid in self.recipients(prof):
             try:
                 await self.bot.send_message(uid, text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
@@ -468,26 +480,26 @@ class Monitor:
             if st.get('total'):
                 text += f'\nИз {st["total"]} выходов хоста не прошёл ни один.'
             return await self.say(prof, text + '\n\nЭто хост без ноды (свой xray.json) — бот его не чинит.',
-                                  kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]))
+                                  kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]), st=st)
         steps = [STEP_LABEL[s] for s in cfg['mon_steps']]
         if cfg['mon_mode'] == 'auto':
             text += '\n\nЧиню по шагам: ' + (', '.join(steps) if steps else 'шагов не выбрано') + '.'
-            return await self.say(prof, text)
+            return await self.say(prof, text, st=st)
         if cfg['mon_mode'] == 'ask':
             text += '\n\nШаги починки: ' + (', '.join(steps) if steps else 'не выбраны') + '.'
             rows = [[('🛠 Починить', f'mon:f:{st["tok"]}')]] if steps else []
             if 'replace' in cfg['mon_steps']:
                 rows.append([('🆕 Сразу новая нода', f'mon:r:{st["tok"]}')])
             rows.append([('🙈 Не трогать', f'mon:i:{st["tok"]}')])
-            return await self.say(prof, text, kb(*rows))
-        await self.say(prof, text)
+            return await self.say(prof, text, kb(*rows), st=st)
+        await self.say(prof, text, st=st)
 
     async def recovered(self, prof: dict, st: dict) -> None:
         if settings_of(prof)['mon_mode'] == 'watch':
             return
         done = st.get('steps_done') or []
         how = f' после шага «{STEP_LABEL[done[-1]]}»' if done and st.get('status') == 'repairing' else ''
-        await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.')
+        await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.', st=st)
 
     # ───────── починка ─────────
     def find(self, tok: str) -> tuple[dict, str, dict] | None:
@@ -534,15 +546,15 @@ class Monitor:
             try:
                 jid, note = await self.run_step(prof, st, step, cfg)
             except (ValueError, engine.StepError, BcloudError) as e:
-                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}» пропущен: {html.escape(str(e))}')
+                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}» пропущен: {html.escape(str(e))}', st=st)
                 continue
             st.update(step=step, job=jid, job_done=False, fails=0)
             self.store.set_mon(key, st)
-            await self.say(prof, f'🛠 {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}»: {html.escape(note)}')
+            await self.say(prof, f'🛠 {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}»: {html.escape(note)}', st=st)
             return f'Шаг: {STEP_LABEL[step]}'
         st.update(status='gave_up', step=None, job=None)
         self.store.set_mon(key, st)
-        await self.say(prof, f'❌ {self.head(prof, st)}\nвсе шаги починки испробованы — нода всё ещё недоступна. Посмотрите её сами.')
+        await self.say(prof, f'❌ {self.head(prof, st)}\nвсе шаги починки испробованы — нода всё ещё недоступна. Посмотрите её сами.', st=st)
         return 'Шагов больше нет'
 
     async def drive(self, prof: dict, st: dict) -> None:
@@ -557,7 +569,7 @@ class Monitor:
             st.update(job_done=True, fails=0)
             if job['status'] == 'failed':
                 self.store.set_mon(key, st)
-                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[st["step"]]}» не удался: {html.escape(job["error"][:200])}')
+                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[st["step"]]}» не удался: {html.escape(job["error"][:200])}', st=st)
                 await self.next_step(prof, st)
                 return
             if st['step'] == 'replace':
@@ -755,7 +767,7 @@ class Monitor:
         st.update(status='replaced', step=None, job=None, replaced_by=job['data'].get('domain'))
         self.store.set_mon(key, st)
         await self.say(prof, f'✅ {self.head(prof, st)}\nзаменена новой нодой <code>{html.escape(job["data"].get("domain", ""))}</code>; '
-                       f'{html.escape(what)}.')
+                       f'{html.escape(what)}.', st=st)
 
     # ───────── для админки ─────────
     def view(self) -> dict:

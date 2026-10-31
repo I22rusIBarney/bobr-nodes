@@ -1412,6 +1412,31 @@ async def main():
     await monitor.tick()
     ok(store.mon(okey)['status'] == 'ok' and any('🟢' in m.text for name, m in sess.sent[n3:] if name == 'SendMessage'),
        'нода ожила — сообщение и обычное состояние')
+    # уведомления: выключены у ноды — проверка идёт, сообщений нет; у всей группы — так же
+    oaddr = store.mon(okey)['addr']
+    st, js = await wapi(f'profiles/{pid}/monitor/notify', 'POST', {'addr': oaddr, 'mute': True})
+    ok(st == 200 and oaddr in js['mute'], 'уведомления ноды выключены')
+    blocked.add(other['address'])
+    n4 = len(sess.sent)
+    for _ in range(3):
+        await monitor.tick()
+    blocked.discard(other['address'])
+    await monitor.tick()
+    ok(not any(('🔴' in m.text or '🟢' in m.text) and other['name'] in m.text for name, m in sess.sent[n4:] if name == 'SendMessage')
+       and store.mon(okey)['status'] == 'ok', 'нода без уведомлений: упала и ожила молча')
+    st, js = await wapi(f'profiles/{pid}/monitor/notify', 'POST', {'clear': True})
+    ok(js['mute'] == [], 'уведомления всех нод включаются разом')
+    st, js = await wapi(f'profiles/{pid}/monitor/notify', 'POST', {'quiet': True})
+    mg = next(g for g in (await wapi('monitor'))[1]['groups'] if g['id'] == pid)
+    ok(st == 200 and js['quiet'] and mg['mon_quiet'] and mg['mon_mute'] == [], 'уведомления группы выключены и видны в мониторинге')
+    blocked.add(other['address'])
+    n4 = len(sess.sent)
+    for _ in range(3):
+        await monitor.tick()
+    blocked.discard(other['address'])
+    await monitor.tick()
+    ok(not any('🔴' in m.text or '🟢' in m.text for name, m in sess.sent[n4:] if name == 'SendMessage'), 'группа без уведомлений: молчит')
+    await wapi(f'profiles/{pid}/monitor/notify', 'POST', {'quiet': False})
     # чекер, у которого не проходит ничего, не голосует (лежит его сеть)
     blocked |= {(h['address'], '192.0.2.52') for h in world.hosts} | {(other['address'], '192.0.2.51')}
     for _ in range(3):

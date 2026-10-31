@@ -493,6 +493,12 @@ function monPoll() {  // пока ставится чекер или идёт п
 }
 const ago = ts => { if (!ts) return 'ещё не было'; const m = Math.round((Date.now() / 1000 - ts) / 60); return m < 1 ? 'только что' : m < 60 ? m + ' мин назад' : Math.round(m / 60) + ' ч назад'; };
 const MON_BAD = ['down', 'repairing', 'gave_up'];
+// уведомления мониторинга: всей группы (quiet) или одной ноды (addr); проверка и починка от этого не меняются
+async function monNotify(g, body, okText) {
+  const r = await UI.run(() => api(`profiles/${g.id}/monitor/notify`, 'POST', body), okText);
+  if (r) { g.mon_quiet = r.quiet; g.mon_mute = r.mute; UI.nav.refresh(); }
+}
+const nodeMuted = (g, n) => (g.mon_mute || []).includes(n.addr);
 // сводка проверки: большой знак состояния, что проверено и когда; кнопка — проверить сейчас
 function monStatusCard(nodes, extra) {
   const live = MON.checkers.some(c => ['running', 'idle'].includes(c.status));
@@ -521,7 +527,7 @@ function monitorView() {
       const nn = g.nodes.filter(n => n.kind !== 'host'), bad = g.nodes.filter(n => MON_BAD.includes(n.status)).length;
       const online = nn.reduce((a, n) => a + (n.online_users || 0), 0);
       return row({ icon: 'activity', color: !g.enabled ? 'gray' : bad ? 'pink' : 'green', title: g.name,
-        sub: g.enabled ? `${nn.length} ${UI.plural(nn.length, 'нода', 'ноды', 'нод')} · онлайн ${online} · ${MON.modes[g.mon_mode]}` : 'выключен — вставьте ссылку подписки',
+        sub: g.enabled ? `${nn.length} ${UI.plural(nn.length, 'нода', 'ноды', 'нод')} · онлайн ${online} · ${g.mon_quiet ? 'без уведомлений' : MON.modes[g.mon_mode]}` : 'выключен — вставьте ссылку подписки',
         status: !g.enabled ? ['выключен', 'quiet'] : bad ? ['проблем: ' + bad, 'bad'] : g.nodes.length ? ['в норме', 'ok'] : null,
         onClick: () => { delete MONF[g.id]; UI.nav.push(() => monGroupView(g.id)); } });
     }) : [row({ title: 'Групп пока нет', cls: 'is-dim', chevron: false })])));
@@ -547,7 +553,10 @@ function monGroupView(pid, part) {
   const nodes = g.nodes.filter(n => !isHost(n)), hosts = g.nodes.filter(isHost);
   const online = nodes.reduce((a, n) => a + (n.online_users || 0), 0);
   const v = h('div', { class: 'mon-page' }, ...pageHead(g.name, { sub: `${nodes.length} ${UI.plural(nodes.length, 'нода', 'ноды', 'нод')} · онлайн ${online} · ${MON.modes[g.mon_mode]}`,
-    menu: [{ text: 'Проверка и починка', icon: 'gear', color: 'gray', fn: () => { delete MONF[pid]; UI.nav.push(() => monGroupView(pid, 'settings')); } }] }));
+    menu: [{ text: 'Проверка и починка', icon: 'gear', color: 'gray', fn: () => { delete MONF[pid]; UI.nav.push(() => monGroupView(pid, 'settings')); } },
+      { text: g.mon_quiet ? 'Включить уведомления группы' : 'Выключить уведомления группы', icon: 'bell', color: g.mon_quiet ? 'amber' : 'gray',
+        fn: () => monNotify(g, { quiet: !g.mon_quiet }, g.mon_quiet ? 'Уведомления группы включены' : 'Уведомления группы выключены') }] }));
+  if (g.mon_quiet) v.append(h('div', { class: 'notice info' }, h('b', {}, 'Уведомления выключены. '), 'Бот проверяет и чинит ноды, но в чат о группе не пишет.'));
   const verdict = n => !n.data ? 'нет в подписке для проверки'
     : isHost(n) ? (n.fail ? `не проходит у ${n.fail} из ${n.data}` : 'проходит') + (n.total > 1 ? ` · выходов ${n.up} из ${n.total}` : '')
     : n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `чекеры ${n.data}/${n.data}`;
@@ -557,16 +566,19 @@ function monGroupView(pid, part) {
       (n.cdn_hosts || []).length ? 'через CDN' : '', n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
       n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
     status: n.status === 'ok' && !n.fail ? [String(n.online_users ?? ''), 'ok', 'доступна', 'num'] : stOf(n),
-    chevron: ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok ? undefined : false,
-    onClick: ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok ? async () => {
-      const btns = [];
-      if (!isHost(n) && g.mon_steps.length) btns.push({ id: 'fix', text: 'Чинить по шагам' });
-      if (!isHost(n) && g.mon_steps.includes('replace')) btns.push({ id: 'replace', text: 'Сразу новая нода' });
-      if (n.status !== 'ignored') btns.push({ id: 'ignore', text: isHost(n) ? 'Не напоминать' : 'Не трогать' });
-      if (!btns.length) return;
-      const a = await UI.ask({ title: n.name || n.addr, message: isHost(n) ? 'Хост без ноды недоступен из России. Бот его не чинит — только сообщает.' : 'Нода недоступна из России. Что делаем?', buttons: btns });
-      if (a) { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } }
-    } : null });
+    tags: nodeMuted(g, n) ? [['без уведомлений', '']] : null,
+    onClick: () => {
+      const down = ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok;
+      const act2 = a => async () => { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } };
+      const items = [];
+      if (down && !isHost(n) && g.mon_steps.length) items.push({ text: 'Чинить по шагам', icon: 'tools', color: 'blue', fn: act2('fix') });
+      if (down && !isHost(n) && g.mon_steps.includes('replace')) items.push({ text: 'Сразу новая нода', icon: 'plusCircle', color: 'green', fn: act2('replace') });
+      if (down && n.status !== 'ignored') items.push({ text: isHost(n) ? 'Не напоминать' : 'Не трогать', icon: 'eyeOff', color: 'gray', fn: act2('ignore') });
+      items.push(nodeMuted(g, n)
+        ? { text: 'Включить уведомления', icon: 'bell', color: 'amber', sub: 'сообщать, когда нода упадёт и оживёт', fn: () => monNotify(g, { addr: n.addr, mute: false }, 'Уведомления о ноде включены') }
+        : { text: 'Выключить уведомления', icon: 'bell', color: 'gray', sub: g.mon_quiet ? 'сейчас молчит вся группа' : 'проверка и починка продолжатся, сообщений не будет', fn: () => monNotify(g, { addr: n.addr, mute: true }, 'Уведомления о ноде выключены') });
+      actionSheet(n.name || n.addr, items);
+    } });
   const attn = n => MON_BAD.includes(n.status) || n.status === 'ignored' || (n.status === 'ok' && n.fail);
   const cnt = { all: nodes.length, bad: nodes.filter(attn).length, ok: nodes.filter(n => !attn(n)).length };
   v.append(monStatusCard(nodes));
@@ -611,6 +623,12 @@ function monSettingsView(g, pid, pushed) {
     mon_script: g.mon_script, mon_port: String(g.mon_port || 8443), mon_old: g.mon_old, mon_max_buys: String(g.mon_max_buys),
     mon_buy: g.mon_buy.map(x => ({ ...x })), mon_buy_last: g.mon_buy_last, mon_skip: g.mon_skip || '' });
   if (g.enabled) v.append(monStatusCard(g.nodes.filter(n => n.kind !== 'host')));
+  const muted = (g.mon_mute || []).length;
+  v.append(group('Уведомления', [row({ icon: 'bell', color: g.mon_quiet ? 'gray' : 'amber', title: 'Сообщения в Telegram', cls: 'wrap', chevron: false,
+    sub: g.mon_quiet ? 'выключены для всей группы' : muted ? `без уведомлений: ${muted} ${UI.plural(muted, 'нода', 'ноды', 'нод')}` : 'когда нода упала, ожила и что сделала починка',
+    right: UI.toggle(!g.mon_quiet, on => monNotify(g, { quiet: !on }, on ? 'Уведомления включены' : 'Уведомления выключены'), 'Уведомления') }),
+    ...(muted ? [act('Включить уведомления всех нод', () => monNotify(g, { clear: true }, 'Уведомления нод включены'))] : [])],
+    'Отдельную ноду можно заглушить, нажав на неё в мониторинге группы. Проверка и починка идут как обычно.'));
   // подписка: поле с кнопкой «вставить»
   const sub = h('input', { type: 'password', class: 'code', autocomplete: 'off', placeholder: g.sub_hint ? 'оставить ' + g.sub_hint + ' («-» — убрать)' : 'Вставьте ссылку подписки…', 'aria-label': 'Ссылка подписки' });
   sub.value = S.mon_sub;
@@ -1337,13 +1355,15 @@ function nodesView(pid) {
   const VS = L.versions || {}, U = UPG[pid] || (UPG[pid] = { sel: null, tag: VS.target || 'latest' });
   const old = n => n.version && semverLt(n.version, U.tag);
   const stale = L.nodes.filter(n => !n.disabled && old(n)).length;
-  v.append(h('div', { class: 'stats' }, statTile(L.nodes.length, UI.plural(L.nodes.length, 'нода', 'ноды', 'нод')), statTile(stale, stale ? 'устарели' : 'устаревших нет', stale ? 'warn' : 'ok'),
+  v.append(h('div', { class: 'stats' }, statTile(L.nodes.length, UI.plural(L.nodes.length, 'нода', 'ноды', 'нод')), statTile(stale, stale ? 'устарели' : 'все свежие', stale ? 'warn' : 'ok'),
     statTile(VS.target && VS.target !== 'latest' ? VS.target : '—', 'последняя')));
   const picking = !!U.sel;
   v.append(group(null, L.nodes.map(n => row({ flag: flagOf(n.country), title: n.name,
     // в строке — адрес и только то, что требует внимания: устаревшая версия, перегрузка, дополнения
-    sub: [mid(n.address, 30), old(n) ? 'версия ' + n.version : '', n.load && n.load.hot && n.load.hot.length ? loadShort(n.load) : '',
-      n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(' · '),
+    sub: [mid(n.address, 30), n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(' · '),
+    // версия — у каждой ноды; устаревшая — жёлтым, перегрузка — меткой
+    tags: [n.version ? ['v' + n.version + (old(n) ? ' · устарела' : ''), old(n) ? 'warn' : ''] : ['версия неизвестна', ''],
+      ...(n.load && n.load.hot && n.load.hot.length ? [[loadShort(n.load), 'warn']] : [])],
     status: picking ? null : n.busy ? ['задача идёт', 'run'] : (n.load && n.load.hot && n.load.hot.length) ? ['нагрузка', 'warn'] : n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : ['', 'ok', 'на связи'],
     // число онлайн — только у ноды без особого состояния: иначе слово состояния важнее и места на узком экране не хватает
     detail: !picking && !n.busy && n.connected && !n.disabled && !(n.load && n.load.hot && n.load.hot.length) && n.online != null ? String(n.online) : null,

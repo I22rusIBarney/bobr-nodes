@@ -1684,6 +1684,30 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             mon().resync()
         return J({'ok': True, 'resync': changed})
 
+    @r.post('/api/profiles/{pid}/monitor/notify')
+    async def monitor_notify(request):
+        """Уведомления мониторинга: всей группы (quiet) или одной ноды (addr + mute). Проверка и починка не меняются."""
+        from . import monitor as M
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        cfg = M.settings_of(p)
+        if 'quiet' in b:
+            cfg['mon_quiet'] = bool(b['quiet'])
+        if b.get('clear'):
+            cfg['mon_mute'] = []
+        if b.get('addr') is not None:
+            addr = str(b['addr']).strip()[:253]
+            if not addr:
+                raise ApiError('Не указана нода')
+            mute = [x for x in cfg['mon_mute'] if x != addr]
+            if b.get('mute'):
+                if len(mute) >= 500:
+                    raise ApiError('Слишком много нод без уведомлений')
+                mute.append(addr)
+            cfg['mon_mute'] = mute
+        store.save_profile({**p, 'mon_quiet': cfg['mon_quiet'], 'mon_mute': cfg['mon_mute']})
+        return J({'quiet': cfg['mon_quiet'], 'mute': cfg['mon_mute']})
+
     @r.post('/api/monitor/action')
     async def monitor_action(request):
         b = await body(request)
