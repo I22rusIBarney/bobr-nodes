@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, data 
 CREATE TABLE IF NOT EXISTS scripts (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS checkers (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mon (key TEXT PRIMARY KEY, data TEXT NOT NULL);  -- состояние нод в мониторинге
+CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, data TEXT NOT NULL);  -- приглашённые пользователи
+CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -120,6 +122,42 @@ class Store:
 
     def delete_checker(self, cid: int) -> None:
         self._q('DELETE FROM checkers WHERE id=?', (cid,))
+
+    # ── приглашённые пользователи и приглашения ──
+    def users(self) -> list[dict]:
+        return [{**json.loads(r['data']), 'tg_id': r['tg_id']} for r in self._q('SELECT * FROM users ORDER BY tg_id')]
+
+    def user(self, tg_id: int) -> dict | None:
+        rows = self._q('SELECT * FROM users WHERE tg_id=?', (int(tg_id),))
+        return {**json.loads(rows[0]['data']), 'tg_id': rows[0]['tg_id']} if rows else None
+
+    def save_user(self, data: dict) -> None:
+        body = json.dumps({k: v for k, v in data.items() if k != 'tg_id'}, ensure_ascii=False)
+        self._q('INSERT INTO users(tg_id, data) VALUES(?, ?) ON CONFLICT(tg_id) DO UPDATE SET data=excluded.data',
+                (int(data['tg_id']), body))
+
+    def delete_user(self, tg_id: int) -> None:
+        self._q('DELETE FROM users WHERE tg_id=?', (int(tg_id),))
+
+    def invites(self) -> list[dict]:
+        return [{**json.loads(r['data']), 'id': r['id'], 'token': r['token']} for r in self._q('SELECT * FROM invites ORDER BY id DESC')]
+
+    def invite(self, iid: int | None = None, token: str | None = None) -> dict | None:
+        rows = (self._q('SELECT * FROM invites WHERE id=?', (int(iid),)) if iid is not None
+                else self._q('SELECT * FROM invites WHERE token=?', (token or '',)))
+        return {**json.loads(rows[0]['data']), 'id': rows[0]['id'], 'token': rows[0]['token']} if rows else None
+
+    def add_invite(self, token: str, data: dict) -> int:
+        with self.lock:
+            return self.db.execute('INSERT INTO invites(token, data) VALUES(?, ?)',
+                                   (token, json.dumps(data, ensure_ascii=False))).lastrowid
+
+    def save_invite(self, data: dict) -> None:
+        body = json.dumps({k: v for k, v in data.items() if k not in ('id', 'token')}, ensure_ascii=False)
+        self._q('UPDATE invites SET data=? WHERE id=?', (body, int(data['id'])))
+
+    def delete_invite(self, iid: int) -> None:
+        self._q('DELETE FROM invites WHERE id=?', (int(iid),))
 
     # ── состояние мониторинга: ключ «группа:нода» ──
     def mon(self, key: str) -> dict:

@@ -136,17 +136,19 @@ CHAT = Chat(id=1, type='private')
 UPD = [0]
 
 
-def upd_msg(text):
+def upd_msg(text, user=ADMIN):
     UPD[0] += 1
-    return Update(update_id=UPD[0], message=Message(message_id=UPD[0], date=datetime.datetime.now(), chat=CHAT,
-                                                    from_user=ADMIN, text=text))
+    chat = CHAT if user is ADMIN else Chat(id=user.id, type='private')
+    return Update(update_id=UPD[0], message=Message(message_id=UPD[0], date=datetime.datetime.now(), chat=chat,
+                                                    from_user=user, text=text))
 
 
-def upd_cb(data, msg_id=1):
+def upd_cb(data, msg_id=1, user=ADMIN):
     UPD[0] += 1
+    chat = CHAT if user is ADMIN else Chat(id=user.id, type='private')
     return Update(update_id=UPD[0], callback_query=CallbackQuery(
-        id=str(UPD[0]), from_user=ADMIN, chat_instance='x', data=data,
-        message=Message(message_id=msg_id, date=datetime.datetime.now(), chat=CHAT, from_user=ADMIN, text='…')))
+        id=str(UPD[0]), from_user=user, chat_instance='x', data=data,
+        message=Message(message_id=msg_id, date=datetime.datetime.now(), chat=chat, from_user=user, text='…')))
 
 
 async def main():
@@ -186,7 +188,9 @@ async def main():
     sess = fakes.fake_session()
     bot = Bot('42:TEST', session=sess)
     dp = Dispatcher(storage=MemoryStorage())
-    mw = handlers.AdminOnly({1})
+    from bot.access import Access
+    access = Access(store, {1})
+    mw = handlers.AdminOnly({1}, access)
     dp.message.outer_middleware(mw)
     dp.callback_query.outer_middleware(mw)
     dp.include_router(handlers.router)
@@ -194,6 +198,7 @@ async def main():
                     update_node=functools.partial(engine.update_node, check_tries=1, check_every=0),
                     poll_every=0.05, edit_every=0)
     dp['store'], dp['runner'], dp['public_url'] = store, runner, 'https://nodes.test'
+    dp['access'] = access
 
     # веб-админка
     from aiohttp.test_utils import TestClient, TestServer
@@ -201,17 +206,18 @@ async def main():
     from bot.security import Watch
     watch = Watch(store, bot, {1}, TMP, every=0)
     from bot.monitor import Monitor
-    monitor = Monitor(store, runner, bot, {1})
+    monitor = Monitor(store, runner, bot, {1}, access=access)
     monitor.soon = lambda *a, **kw: None  # в тесте опросы — только вручную
     dp['monitor'] = monitor
-    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor)
+    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor, access=access)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
-    def init_data(uid):
+    def init_data(uid, username=None):
         import hashlib, hmac, time
         from urllib.parse import urlencode
-        f = {'auth_date': str(int(time.time())), 'user': json.dumps({'id': uid, 'first_name': 'Админ'}), 'query_id': 'q'}
+        u = {'id': uid, 'first_name': 'Админ', **({'username': username} if username else {})}
+        f = {'auth_date': str(int(time.time())), 'user': json.dumps(u), 'query_id': 'q'}
         chk = '\n'.join(f'{k}={v}' for k, v in sorted(f.items()))
         sec = hmac.new(b'WebAppData', b'42:TEST', hashlib.sha256).digest()
         return urlencode({**f, 'hash': hmac.new(sec, chk.encode(), hashlib.sha256).hexdigest()})
@@ -282,7 +288,7 @@ async def main():
     stranger = Update(update_id=UPD[0], message=Message(message_id=999, date=datetime.datetime.now(),
                       chat=Chat(id=7, type='private'), from_user=User(id=7, is_bot=False, first_name='X'), text='/start'))
     await dp.feed_update(bot, stranger)
-    ok(any('только для администраторов' in m.text for _, m in sess.sent[n:]), 'чужой пользователь не пускается в чат')
+    ok(any('по приглашениям' in m.text for _, m in sess.sent[n:]), 'чужой пользователь без приглашения не пускается в чат')
     ok((await wapi('state', headers={}))[0] == 403, 'админка без подписи Telegram — 403')
     ok((await wapi('state', headers={'X-Init-Data': init_data(7)}))[0] == 403, 'админка для не-админа — 403')
     bad = init_data(1)
@@ -438,6 +444,83 @@ async def main():
     ok(csrv.tg_id == 77 and cbal < 30_000, 'сервер в аккаунте клиента в bcloud, оплачен с его баланса')
     st, js = await wapi(f'jobs?pid={gid}')
     ok([x['id'] for x in js['jobs']] == [cj['id']], 'серверы группы отдельно от других групп')
+
+    # ── приглашения: Вася входит по ссылке, видит только свою группу и покупает только со своего баланса
+    VASYA = User(id=77, is_bot=False, first_name='Вася', username='Vasya_Client')
+    HV = {'X-Init-Data': init_data(77, 'Vasya_Client')}
+
+    async def vwapi(path, method='GET', body=None):
+        return await wapi(path, method, body, headers=HV)
+
+    def sent_to(n, chat):
+        return [m.text for name, m in sess.sent[n:] if name in ('SendMessage', 'EditMessageText') and m.chat_id == chat]
+
+    ok((await vwapi('state'))[0] == 403, 'до приглашения Вася — чужой')
+    st, inv = await wapi('invites', 'POST', {'note': 'Вася', 'uses': 1, 'days': 7})
+    ok(st == 200 and inv['link'].startswith('https://t.me/nodes_bot?start=inv_') and inv['state'] == 'active', f'приглашение: {inv}')
+    token = inv['link'].split('start=')[1]
+    n = len(sess.sent)
+    await dp.feed_update(bot, upd_msg('/start ' + token, VASYA))
+    ok(any('Доступ открыт' in t for t in sent_to(n, 77)) and any('По приглашению' in t for t in sent_to(n, 1)),
+       f'Вася вошёл по ссылке, администратору сообщили: {[m.text[:40] for _, m in sess.sent[n:] if hasattr(m, "text")]}')
+    ok(any('Групп: 1' in t for t in sent_to(n, 77)), 'в меню Васи сразу его группа (завёл администратор)')
+    n = len(sess.sent)
+    await dp.feed_update(bot, upd_msg('/start ' + token, User(id=78, is_bot=False, first_name='Петя')))
+    ok(any('уже использовано' in t for t in sent_to(n, 78)) and store.user(78) is None, 'одноразовое приглашение второй раз не работает')
+    st, js = await wapi('users')
+    ok(st == 200 and [u['tg_id'] for u in js['users']] == [77] and [g['id'] for g in js['users'][0]['groups']] == [gid]
+       and js['invites'][0]['state'] == 'used', f'администратор видит Васю и его группу: {js}')
+    st, js = await vwapi('state')
+    ok(st == 200 and js['role'] == 'member' and [p['id'] for p in js['profiles']] == [gid] and js['profiles'][0]['kind'] == 'shared'
+       and js['settings'] == {} and js['security'] is None, f'Вася видит только свою группу, без настроек бота: {js.get("profiles")}')
+    ok((await vwapi(f'profiles/{pid}'))[0] == 404 and (await vwapi(f'catalog?pid={pid}'))[0] == 404
+       and (await vwapi('deploy', 'POST', {'pid': pid, 'location': 'nl', 'idx': 0, 'period': '1m', 'domains': ['x1.example.com']}))[0] == 404,
+       'чужая группа для пользователя — как несуществующая')
+    st, js = await vwapi('jobs')
+    aj = next(j for j in store.jobs(200) if j['profile_id'] == pid)
+    ok({x['profile_id'] for x in js['jobs']} == {gid} and (await vwapi(f'jobs/{aj["id"]}'))[0] == 404
+       and (await vwapi(f'jobs/{aj["id"]}/hide', 'POST'))[0] == 404, 'задачи — только своей группы')
+    for path, method in (('settings', 'POST'), ('check/bcloud', 'POST'), ('check/cloudflare', 'POST'), ('theme', 'POST'),
+                         ('scripts', 'POST'), ('invites', 'POST'), ('users', 'GET'), ('gemini/models', 'GET')):
+        ok((await vwapi(path, method, {}))[0] == 403, f'только администратору: {method} {path}')
+    st, js = await vwapi('scripts')
+    ok(st == 200 and all(x['status'] == 'approved' for x in js['scripts']), 'пользователю — только утверждённые скрипты')
+    st, pv = await vwapi(f'profiles/{gid}')
+    ok(pv['locked'] == ['owner', 'cf_token'] and pv['can_delete'] is False and pv['shared_cf'] is False, f'в группе администратора клиент и Cloudflare заперты: {pv.get("locked")}')
+    st, js = await vwapi(f'profiles/{gid}', 'PUT', {'name': 'Клиент Вася', 'owner': '1', 'cf_token': 'cf-other-999999'})
+    g2 = store.profile(gid)
+    ok(st == 200 and g2['owner_tg_id'] == '77' and g2['cf_token'] == 'cf-token-123456', 'сменить клиента bcloud и Cloudflare чужой группы нельзя')
+    ok((await vwapi(f'profiles/{gid}', 'DELETE'))[0] == 400, 'группу, заведённую администратором, пользователь не удаляет')
+    st, cv = await vwapi(f'catalog?pid={gid}')
+    ok(st == 200 and cv['buyer'] == '@Vasya_Client', 'покупки в группе Васи — с его баланса')
+    # своя группа пользователя: клиент bcloud — всегда он сам, Cloudflare — только свой
+    own_in = {**prof_in, 'name': 'Своя', 'base_domain': 'example.com', 'owner': '1'}
+    st, js = await vwapi('profiles', 'POST', {**own_in, 'cf_token': ''})
+    ok(st == 400 and 'Cloudflare' in js['detail'], 'своя группа пользователя — только со своим токеном Cloudflare')
+    st, js = await vwapi('profiles', 'POST', {**own_in, 'cf_token': 'cf-token-123456'})
+    mid = js.get('id')
+    mg = store.profile(mid) if mid else {}
+    ok(st == 200 and mg.get('created_by') == 77 and mg.get('owner_tg_id') == '77', f'клиент bcloud своей группы — сам пользователь: {js}')
+    from bot.runner import buyer_of, cf_token_of
+    ok(cf_token_of(store, {'created_by': 77}) == '' and cf_token_of(store, {}) == store.get('cf_token')
+       and buyer_of(store, {'created_by': 77}) == 77, 'общий Cloudflare и баланс администратора группам пользователей не достаются')
+    ok(store.get('ssh_pubkey') in ('', '-') or store.get('ssh_pubkey') not in runner.pubkeys(mg), 'личный ключ администратора не кладётся на серверы пользователя')
+    st, js = await wapi('state')
+    ok({p['id']: p['kind'] for p in js['profiles']}.get(mid) == 'user', 'администратор видит группу пользователя с пометкой')
+    st, js = await vwapi(f'profiles/{mid}', 'DELETE')
+    ok(st == 200 and store.profile(mid) is None, 'свою группу пользователь удаляет')
+    # чат: чужая группа и чужие задачи недоступны
+    n = len(sess.sent)
+    await dp.feed_update(bot, upd_cb(f'd:p:{pid}', user=VASYA))
+    ok(any(name == 'AnswerCallbackQuery' and m.text == 'Группа не найдена' for name, m in sess.sent[n:]), 'чужая группа в мастере чата — нет')
+    n = len(sess.sent)
+    await dp.feed_update(bot, upd_cb(f'j:{aj["id"]}', user=VASYA))
+    ok(any(name == 'AnswerCallbackQuery' and m.text == 'Задача не найдена' for name, m in sess.sent[n:]), 'чужая задача в чате — нет')
+    # закрыть доступ и открыть снова
+    st, js = await wapi('users/77/block', 'POST', {'blocked': True})
+    ok(st == 200 and js['blocked'] and (await vwapi('state'))[0] == 403, 'закрытый пользователь — 403')
+    await wapi('users/77/block', 'POST', {'blocked': False})
+    ok((await vwapi('state'))[0] == 200, 'доступ открыт снова')
 
     # ── балансировщик: 2 ноды в Польше, шаблон копируется с базового (конфиг пользователя), хост-балансировщик один
     base_tpl = json.load(open(os.path.join(os.path.dirname(__file__), 'balancer_base.json')))
@@ -1247,6 +1330,13 @@ async def main():
     ok(store.checker(cids[0]).get('poll_error'), 'неответивший чекер помечен')
     st, js = await wapi(f'checkers/{cids[0]}', 'DELETE')
     ok(st == 200 and len(store.checkers()) == 2, 'чекер удалён')
+
+    # чекеры общие: пользователь видит их без адресов и доступа, чужой не удалит
+    st, mv = await vwapi('monitor')
+    ok(st == 200 and {g['id'] for g in mv['groups']} <= {gid} and mv['checkers']
+       and all(not c['mine'] and 'ip' not in c and 'log' not in c and 'ssh' not in c for c in mv['checkers']),
+       f'пользователь видит общие чекеры без адресов и доступа и только свои группы: {mv["checkers"][:1]}')
+    ok((await vwapi(f'checkers/{cids[1]}', 'DELETE'))[0] == 403 and len(store.checkers()) == 2, 'чужой чекер пользователь не удаляет')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')

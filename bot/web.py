@@ -1,5 +1,6 @@
 """Веб-админка (Telegram Mini App): страница /admin и JSON API /api/*.
-Доступ — только из Telegram: подпись initData проверяется токеном бота, пользователь должен быть в ADMIN_IDS."""
+Доступ — только из Telegram: подпись initData проверяется токеном бота. Администраторы (ADMIN_IDS) видят всё;
+приглашённые пользователи — только свои группы, их задачи и мониторинг, без настроек бота (см. bot/access.py)."""
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +17,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 
 from . import engine, forms, naming, scripts as sc, services as svc
+from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
 from .runner import Runner, bcloud_from, buyer_of, stages_for
 from .store import ACTIVE, Store
@@ -75,6 +77,22 @@ SEC_HEADERS = {
 }
 FAIL_LIMIT, FAIL_WINDOW = 20, 600   # 20 запросов без доступа за 10 минут с одного IP — пауза
 
+# только для администраторов: настройки и подключения бота, оформление, «Мои скрипты» (кроме списка утверждённых),
+# пользователи и приглашения
+ADMIN_ONLY = [
+    (r'POST|PUT|DELETE', r'/api/theme(/.*)?'),
+    (r'.*', r'/api/settings'),
+    (r'.*', r'/api/check/(bcloud|cloudflare|gemini)'),
+    (r'.*', r'/api/gemini/.*'),
+    (r'POST|PUT|DELETE', r'/api/scripts(/.*)?'),
+    (r'GET', r'/api/scripts/.+'),
+    (r'.*', r'/api/(users|invites)(/.*)?'),
+]
+
+
+def admin_only(method: str, path: str) -> bool:
+    return any(re.fullmatch(m, method) and re.fullmatch(pt, path) for m, pt in ADMIN_ONLY)
+
 
 def bc_ui(store, tg_id=None):
     """Клиент bcloud для ответов админке: недоступный bcloud ждём недолго, чтобы страница не висела."""
@@ -90,8 +108,10 @@ def client_ip(request) -> str:
 
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
-              bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None) -> web.Application:
+              bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
+              access: Access | None = None) -> web.Application:
     media = Path(data_dir) / 'media'
+    access = access or Access(store, admins)
     fails: dict[str, list[float]] = {}
 
     @web.middleware
@@ -111,7 +131,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not request.path.startswith('/api/'):
             return await handler(request)
         user = validate_init_data(request.headers.get('X-Init-Data', ''), bot_token)
-        if not user or int(user.get('id', 0)) not in admins:
+        role = access.role(int(user.get('id', 0))) if user else None
+        if not role:
             ip, now = client_ip(request), time.time()
             recent = [t for t in fails.get(ip, []) if t > now - FAIL_WINDOW]
             if len(recent) >= FAIL_LIMIT:
@@ -122,7 +143,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 for k in [k for k, v in fails.items() if not v or v[-1] < now - FAIL_WINDOW]:
                     fails.pop(k, None)
             return web.json_response({'detail': 'Нет доступа. Откройте панель из Telegram-бота.'}, status=403)
-        request['user'] = user
+        request['user'], request['role'] = user, role
+        if role == 'member':
+            access.touch(user)
+            if admin_only(request.method, request.path):
+                return web.json_response({'detail': 'Это доступно только администратору бота.'}, status=403)
         try:
             return await handler(request)
         except ApiError as e:
@@ -148,9 +173,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('неверный запрос')
         return data
 
-    def profile_or_404(pid) -> dict:
-        p = store.profile(int(pid))
-        if not p:
+    def is_admin(request) -> bool:
+        return request.get('role') == 'admin'
+
+    def uid_of(request) -> int:
+        return int(request['user'].get('id', 0))
+
+    def can(request, p: dict | None) -> bool:
+        return bool(p) and (is_admin(request) or access.can(p, uid_of(request), uname(request['user'])))
+
+    def my_profiles(request) -> list[dict]:
+        return store.profiles() if is_admin(request) else access.profiles_for(uid_of(request), uname(request['user']))
+
+    def profile_or_404(pid, request) -> dict:
+        try:
+            p = store.profile(int(pid))
+        except (TypeError, ValueError):
+            p = None
+        if not p or not can(request, p):  # чужая группа для пользователя — как несуществующая
             raise ApiError('Профиль не найден', 404)
         return p
 
@@ -262,16 +302,37 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
 
-    def issues() -> list[str]:
+    def issues(request=None) -> list[str]:
         from .handlers import ready_issues
-        return ready_issues(store)
+        if request is None or is_admin(request):
+            return ready_issues(store)
+        return ready_issues(store, my_profiles(request), 'member')
+
+    def group_kind(request, p: dict) -> str:
+        """mine — группа пользователя (создал сам), shared — завёл администратор; у администратора: own / user."""
+        if is_admin(request):
+            return 'user' if p.get('created_by') else 'own'
+        return 'mine' if str(p.get('created_by') or '') == str(uid_of(request)) else 'shared'
+
+    def user_label(tg_id) -> str:
+        u = store.user(int(tg_id)) if str(tg_id or '').isdigit() else None
+        if not u:
+            return str(tg_id or '')
+        return '@' + u['username'] if u.get('username') else (u.get('first_name') or str(u['tg_id']))
 
     @r.get('/api/state')
     async def state(request):
-        jobs = store.jobs(1000)
-        return J({'settings': settings_view(), 'profiles': [profile_summary(p, jobs) for p in store.profiles()],
-                  'issues': issues(), 'bot_username': bot_username,
-                  'security': security.info() if security else None, 'theme': theme(),
+        ps = my_profiles(request)
+        ids = {p['id'] for p in ps}
+        jobs = [j for j in store.jobs(1000) if j['profile_id'] in ids]
+        admin = is_admin(request)
+        return J({'settings': settings_view() if admin else {}, 'role': request['role'],
+                  'profiles': [{**profile_summary(p, jobs), 'kind': group_kind(request, p),
+                                'created_by_label': user_label(p['created_by']) if admin and p.get('created_by') else ''}
+                               for p in ps],
+                  'issues': issues(request), 'bot_username': bot_username,
+                  'security': security.info() if security and admin else None, 'theme': theme(),
+                  'users': sum(1 for u in store.users() if not u.get('blocked')) if admin else None,
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
@@ -299,7 +360,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('; '.join(errors))
         for k, v in clean.items():
             store.set(k, v)
-        return J({'ok': True, 'settings': settings_view(), 'issues': issues()})
+        return J({'ok': True, 'settings': settings_view(), 'issues': issues(request)})
 
     @r.post('/api/check/bcloud')
     async def check_bcloud(_):
@@ -318,8 +379,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return J({'ok': False, 'message': str(e)})
 
     # ── профили ──
-    def profile_view(p: dict) -> dict:
+    def profile_view(p: dict, request=None) -> dict:
         out = {k: ('' if k in forms.SECRET_FIELDS else p.get(k, '')) for k in forms.PFIELDS}
+        if request is not None:
+            kind = group_kind(request, p)
+            # пользователь в группе, которую завёл администратор, не меняет клиента bcloud и Cloudflare
+            out.update({'kind': kind, 'locked': ['owner', 'cf_token'] if kind == 'shared' else (['owner'] if kind == 'mine' else []),
+                        'can_delete': kind != 'shared',
+                        'shared_cf': kind == 'shared' and not p.get('cf_token')})
         out.update({'id': p['id'], 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
                     'script_id': p.get('script_id'), 'panel_profile_uuid': p.get('panel_profile_uuid', ''),
                     'panel_inbounds': p.get('panel_inbounds') or [],
@@ -333,23 +400,48 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/profiles/{pid}')
     async def get_profile(request):
-        return J(profile_view(profile_or_404(request.match_info['pid'])))
+        return J(profile_view(profile_or_404(request.match_info['pid'], request), request))
 
     @r.post('/api/profiles')
     async def create_profile(request):
-        data = await body(request)
-        prof = await with_script(await with_owner(forms.clean_profile(data)), data)
+        data = member_data(request, await body(request), None)
+        prof = forms.clean_profile(data)
+        if not is_admin(request):
+            prof['owner'] = str(uid_of(request))
+        prof = await with_script(await with_owner(prof), data)
+        if not is_admin(request):
+            prof['created_by'] = uid_of(request)
+            if not prof.get('cf_token'):
+                raise ApiError('Токен Cloudflare группы: укажите свой — домены нод создаются в вашем аккаунте Cloudflare')
         prof['id'] = store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
 
     @r.put('/api/profiles/{pid}')
     async def update_profile(request):
-        cur = profile_or_404(request.match_info['pid'])
-        data = await body(request)
-        prof = await with_script(await with_owner(forms.clean_profile(data, cur), cur), data)
+        cur = profile_or_404(request.match_info['pid'], request)
+        data = member_data(request, await body(request), cur)
+        prof = forms.clean_profile(data, cur)
+        if not is_admin(request) and group_kind(request, cur) == 'mine':
+            prof['owner'] = str(uid_of(request))
+        prof = await with_script(await with_owner(prof, cur), data)
+        if cur.get('created_by'):
+            prof['created_by'] = cur['created_by']
+            if not prof.get('cf_token'):
+                raise ApiError('Токен Cloudflare группы: у группы пользователя нужен свой токен')
         prof['id'] = cur['id']
         store.save_profile(prof)
         return J({'id': prof['id'], 'check': await panel_check(prof)})
+
+    def member_data(request, data: dict, cur: dict | None) -> dict:
+        """Что пользователь может менять в группе: клиент bcloud — всегда он сам (покупки только с его баланса);
+        в группе, которую завёл администратор, — без клиента и токена Cloudflare."""
+        if is_admin(request):
+            return data
+        data = {**data}
+        data.pop('owner', None)  # клиента bcloud ставим сами после проверки формы
+        if cur is not None and str(cur.get('created_by') or '') != str(uid_of(request)):
+            data.pop('cf_token', None)
+        return data
 
     async def with_owner(prof: dict, cur: dict | None = None) -> dict:
         """Владелец группы в bcloud: по ID или @username находим клиента и запоминаем его ID и подпись."""
@@ -393,7 +485,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.delete('/api/profiles/{pid}')
     async def delete_profile(request):
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
+        if group_kind(request, p) == 'shared':
+            raise ApiError('Эту группу завёл администратор — удалить её может только он')
         if any(j['profile_id'] == p['id'] for j in store.active_jobs()):
             raise ApiError('У группы есть задачи в работе — дождитесь их')
         store.delete_profile(p['id'])
@@ -414,12 +508,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles/{pid}/check')
     async def check_profile(request):
-        return J(await panel_check(profile_or_404(request.match_info['pid'])))
+        return J(await panel_check(profile_or_404(request.match_info['pid'], request)))
 
     @r.get('/api/profiles/{pid}/panel')
     async def panel_meta(request):
         """Сквады и Xray-шаблоны панели группы — для выбора при установке."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         try:
             meta = await asyncio.to_thread(lambda: engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', '')).meta())
         except engine.StepError as e:
@@ -462,7 +556,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/profiles/{pid}/nodes')
     async def panel_nodes(request):
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
 
         def load():
             pl = panel_of(p)
@@ -485,7 +579,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/profiles/{pid}/nodes/{uuid}')
     async def panel_node(request):
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid = request.match_info['uuid']
 
         def load():
@@ -526,7 +620,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def panel_node_ssh(request):
         """Сохранить доступ по SSH (пароль, свой ключ или ключ бота, можно вместе; не-root — через sudo) и проверить вход."""
         from . import sshaccess
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid, b = request.match_info['uuid'], await body(request)
         try:
             new = sshaccess.clean(b, runner.ssh_of(p['id'], uuid), runner.keydir)
@@ -562,7 +656,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def panel_node_ip(request):
         """Перепривязка IP: mode bcloud — сменить в bcloud (платно, с баланса владельца), sync — взять уже сменённый
         из bcloud, manual — новый IP вручную. Дальше задача: Cloudflare, SSH, адрес в панели."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid, b = request.match_info['uuid'], await body(request)
         mode = b.get('mode')
         if mode not in ('bcloud', 'sync', 'manual'):
@@ -605,7 +699,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/profiles/{pid}/nodes/{uuid}/address-domain')
     async def panel_node_address(request):
         """Адрес ноды в панели: IP → домен (тогда при смене IP хватит A-записи)."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid = request.match_info['uuid']
 
         def run():
@@ -626,17 +720,26 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/profiles/{pid}/nodes/{uuid}/forget-hostkey')
     async def panel_node_forget(request):
         """Забыть ключ SSH сервера — после переустановки системы на ноде."""
-        profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         ip = str((await body(request)).get('ip') or '')
         if not re.fullmatch(r'[0-9a-fA-F:.]{3,45}', ip):
             raise ApiError('Неверный адрес')
+        if not is_admin(request):  # пользователь забывает ключи только серверов своей группы
+            uuid = request.match_info['uuid']
+            nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+            n = next((x for x in nodes if x['uuid'] == uuid), None)
+            known = {(bot_jobs_by_ip(p['id']).get(n['address']) or {}).get('ip'), n['address']} if n else set()
+            if n and not engine.is_ip(n['address']):
+                known.add(await asyncio.to_thread(resolve, n['address']))
+            if ip not in known:
+                raise ApiError('Это не адрес этой ноды')
         engine.forget_host(runner.known_hosts(), ip)
         return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/rollback')
     async def panel_node_rollback(request):
         """Убрать дополнения: нода и её хосты — обратно в исходный профиль (Psiphon/WARP на ноде остаются, но не нужны)."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid = request.match_info['uuid']
         nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
         n = next((x for x in nodes if x['uuid'] == uuid), None)
@@ -654,7 +757,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
     async def panel_node_apply(request):
         """Задача «дополнения на ноде»: Psiphon/WARP (с переводом ноды в вариант профиля), порт, Final Mask."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         uuid, b = request.match_info['uuid'], await body(request)
         try:
             extras = parse_extras(b)
@@ -689,7 +792,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def hosts_export(request):
         """Набор хостов (с профилями и Xray JSON-шаблонами) из панели группы pid."""
         b = await body(request)
-        p = profile_or_404(b.get('pid', 0))
+        p = profile_or_404(b.get('pid', 0), request)
         uuids = [u for u in (b.get('hosts') or []) if isinstance(u, str)]
         if not 1 <= len(uuids) <= 200:
             raise ApiError('Выберите хосты')
@@ -703,14 +806,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         """Создать хосты в панели группы pid: из другой группы (from_pid + hosts), из набора JSON (bundle)
         или просто шаблон Xray JSON (template_name + template_json)."""
         b = await body(request)
-        p = profile_or_404(b.get('pid', 0))
+        p = profile_or_404(b.get('pid', 0), request)
         squads = [x for x in (b.get('squads') or []) if isinstance(x, str)]
         mode = 'update' if b.get('template_mode') == 'update' else 'copy'
         lines: list[str] = []
 
         def run():
             if b.get('from_pid'):
-                src = profile_or_404(b['from_pid'])
+                src = profile_or_404(b['from_pid'], request)
                 uuids = [u for u in (b.get('hosts') or []) if isinstance(u, str)]
                 if not uuids:
                     raise ApiError('Выберите хосты')
@@ -730,7 +833,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     # ── развёртывание ──
     @r.get('/api/catalog')
     async def catalog(request):
-        p = profile_or_404(request.query.get('pid', 0))
+        p = profile_or_404(request.query.get('pid', 0), request)
         cat = await svc.load_catalog(store, p)
         try:
             bal = await bc_ui(store, buyer_of(store, p)).balance()
@@ -743,7 +846,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def custom_quote(request):
         """Цена своей конфигурации (конструктор) для покупателя группы."""
         q = request.query
-        p = profile_or_404(q.get('pid', 0))
+        p = profile_or_404(q.get('pid', 0), request)
         cat = await svc.load_catalog(store, p)
         try:
             o = await svc.custom_offer(store, p, cat, str(q.get('location', '')),
@@ -755,14 +858,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.get('/api/profiles/{pid}/servers')
     async def own_servers(request):
         """Уже купленные серверы покупателя группы в bcloud — для установки нод без новой покупки."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         servers = [{k: v for k, v in x.items() if k != 'root_password'} for x in await svc.own_servers(store, p)]
         return J({'servers': servers, 'buyer': p.get('owner_label') or 'ваш аккаунт'})
 
     @r.get('/api/profiles/{pid}/zones')
     async def zones(request):
         """Домены Cloudflare для выбора: зоны аккаунта (токен группы или общий) + домен группы для автоимён."""
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         base = p.get('base_domain') or ''
         try:
             names = await asyncio.to_thread(lambda: svc.cf_for(store, p).zone_names())
@@ -778,7 +881,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/domains/auto')
     async def domains_auto(request):
         b = await body(request)
-        p = profile_or_404(b.get('pid', 0))
+        p = profile_or_404(b.get('pid', 0), request)
         n = int(b.get('count') or 0)
         if not 1 <= n <= 50:
             raise ApiError('Количество: от 1 до 50')
@@ -788,14 +891,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/domains/check')
     async def domains_check(request):
         b = await body(request)
-        p = profile_or_404(b.get('pid', 0))
+        p = profile_or_404(b.get('pid', 0), request)
         return J({'domains': await svc.check_domains(store, p, b.get('domains') or '', int(b.get('count') or 0))})
 
     @r.post('/api/deploy')
     async def deploy(request):
         """Одна или несколько локаций: items = [{location, idx, domains}], либо старый вид location/idx/domains."""
         b = await body(request)
-        p = profile_or_404(b.get('pid', 0))
+        p = profile_or_404(b.get('pid', 0), request)
         items = b.get('items') or [{'location': b.get('location'), 'idx': b.get('idx'), 'domains': b.get('domains') or []}]
         if not isinstance(items, list) or not items:
             raise ApiError('Не выбрано ни одной локации')
@@ -918,8 +1021,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return out
 
     @r.get('/api/scripts')
-    async def scripts_list(_):
-        return J({'scripts': [script_summary(s) for s in store.scripts()], 'gemini': bool(store.get('gemini_key'))})
+    async def scripts_list(request):
+        """Пользователям — только утверждённые скрипты: их можно выбрать в своей группе."""
+        ss = store.scripts() if is_admin(request) else [x for x in store.scripts() if x.get('status') == 'approved']
+        out = [script_summary(x) for x in ss]
+        if not is_admin(request):
+            mine = {p['name'] for p in my_profiles(request)}
+            for x in out:
+                x['used_by'] = [n for n in x['used_by'] if n in mine]
+        return J({'scripts': out, 'gemini': bool(store.get('gemini_key')) if is_admin(request) else None})
 
     @r.post('/api/scripts/resolve')
     async def scripts_resolve(request):
@@ -1072,27 +1182,34 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 out['log'] = ''
         return out
 
-    def job_or_404(jid) -> dict:
-        j = store.job(int(jid))
-        if not j:
+    def job_or_404(jid, request) -> dict:
+        try:
+            j = store.job(int(jid))
+        except (TypeError, ValueError):
+            j = None
+        if not j or not (is_admin(request) or can(request, store.profile(j['profile_id']))):
             raise ApiError('Задача не найдена', 404)
         return j
 
     @r.get('/api/jobs')
     async def jobs(request):
         pid = request.query.get('pid')
-        js = store.jobs(500 if pid else 60)
+        if is_admin(request):
+            js = store.jobs(500 if pid else 60)
+        else:
+            ids = {p['id'] for p in my_profiles(request)}
+            js = [j for j in store.jobs(1000) if j['profile_id'] in ids][:500 if pid else 60]
         if pid:
             js = [j for j in js if str(j['profile_id']) == pid]
         return J({'jobs': [job_view(j) for j in js]})
 
     @r.get('/api/jobs/{jid}')
     async def job(request):
-        return J(job_view(job_or_404(request.match_info['jid']), full=True))
+        return J(job_view(job_or_404(request.match_info['jid'], request), full=True))
 
     @r.post('/api/jobs/{jid}/retry')
     async def retry(request):
-        j = job_or_404(request.match_info['jid'])
+        j = job_or_404(request.match_info['jid'], request)
         if j['status'] != 'failed':
             raise ApiError('Повторить можно только задачу с ошибкой')
         store.update_job(j['id'], status='queued', error='')
@@ -1101,7 +1218,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/jobs/{jid}/hide')
     async def hide(request):
-        j = job_or_404(request.match_info['jid'])
+        j = job_or_404(request.match_info['jid'], request)
         if j['status'] in ACTIVE:
             raise ApiError('Задача ещё в работе')
         store.update_job(j['id'], hidden=1)
@@ -1113,17 +1230,36 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Мониторинг выключен', 404)
         return monitor
 
-    def checker_or_404(cid) -> dict:
-        ch = store.checker(int(cid))
+    def checker_or_404(cid, request, manage: bool = True) -> dict:
+        """Чекеры общие для всех: опросы видят все, а менять и удалять может тот, кто добавил, и администратор."""
+        try:
+            ch = store.checker(int(cid))
+        except (TypeError, ValueError):
+            ch = None
         if not ch:
             raise ApiError('Чекер не найден', 404)
+        if manage and not is_admin(request) and str(ch.get('created_by') or '') != str(uid_of(request)):
+            raise ApiError('Этот чекер добавил другой пользователь — менять его может он или администратор', 403)
         return ch
 
     @r.get('/api/monitor')
-    async def monitor_view(_):
+    async def monitor_view(request):
         v = mon().view()
+        ids = {p['id'] for p in my_profiles(request)}
+        v['groups'] = [g for g in v['groups'] if g['id'] in ids]
         for g in v['groups']:
             g['sub_hint'] = hint((store.profile(g['id']) or {}).get('mon_sub') or '')
+        me, admin = str(uid_of(request)), is_admin(request)
+        cks = []
+        for c in v['checkers']:
+            raw = store.checker(c['id']) or {}
+            mine = admin or str(raw.get('created_by') or '') == me
+            c.update(mine=mine, by=user_label(raw['created_by']) if raw.get('created_by') else ('администратор' if not admin else ''))
+            if not mine:  # чужой чекер: только имя и как он проверяет — без адреса, доступа и журнала
+                c = {k: c.get(k) for k in ('id', 'name', 'status', 'polled_at', 'poll_error', 'proxies', 'online', 'mine', 'by')}
+                c['poll_error'] = 'не отвечает' if c.get('poll_error') else ''
+            cks.append(c)
+        v['checkers'] = cks
         v['bot_key'] = runner.bot_key()[1]
         v['scripts'] = [{'id': x['id'], 'title': x.get('title') or x.get('path')} for x in store.scripts() if x.get('status') == 'approved']
         return J(v)
@@ -1142,13 +1278,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             acc = sshaccess.clean(b, None, runner.keydir)
         except ValueError as e:
             raise ApiError(str(e)) from None
-        cid = store.save_checker({'name': name, 'ip': ip, **acc, 'status': 'new', 'created_at': int(time.time())})
+        cid = store.save_checker({'name': name, 'ip': ip, **acc, 'status': 'new', 'created_at': int(time.time()),
+                                  **({} if is_admin(request) else {'created_by': uid_of(request)})})
         mon().install(cid)
         return J({'id': cid})
 
     @r.post('/api/checkers/{cid}/install')
     async def checker_install(request):
-        ch = checker_or_404(request.match_info['cid'])
+        ch = checker_or_404(request.match_info['cid'], request)
         if ch.get('status') == 'installing':
             raise ApiError('Установка уже идёт')
         from . import sshaccess
@@ -1164,13 +1301,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/checkers/{cid}/forget-hostkey')
     async def checker_forget(request):
         """Забыть ключ сервера чекера — после переустановки или если облако отдало IP новому серверу."""
-        ch = checker_or_404(request.match_info['cid'])
+        ch = checker_or_404(request.match_info['cid'], request)
         engine.forget_host(runner.known_hosts(), ch['ip'], int(ch.get('port') or 22))
         return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
     @r.delete('/api/checkers/{cid}')
     async def checker_delete(request):
-        ch = checker_or_404(request.match_info['cid'])
+        ch = checker_or_404(request.match_info['cid'], request)
         store.delete_checker(ch['id'])
         if ch.get('api_password'):  # остановить чекер на сервере — по возможности, не дожидаясь
             path, _, kh = mon().keyfiles()
@@ -1187,7 +1324,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/profiles/{pid}/monitor')
     async def monitor_settings(request):
         from . import monitor as M
-        p = profile_or_404(request.match_info['pid'])
+        p = profile_or_404(request.match_info['pid'], request)
         b = await body(request)
         try:
             cfg = M.clean_settings(b, p, store.scripts())
@@ -1205,6 +1342,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         what = b.get('action')
         if what not in ('fix', 'replace', 'ignore'):
             raise ApiError('Неизвестное действие')
+        found = mon().find(str(b.get('tok') or ''))
+        if found and not can(request, found[0]):
+            raise ApiError('Нода не найдена', 404)
         return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what)})
 
     @r.post('/api/monitor/check')
@@ -1213,6 +1353,70 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if m._lock.locked():
             raise ApiError('Проверка уже идёт')
         asyncio.get_running_loop().create_task(m.tick())
+        return J({'ok': True})
+
+    # ── пользователи и приглашения (только администратор) ──
+    def invite_view(inv: dict) -> dict:
+        return {'id': inv['id'], 'note': inv.get('note', ''), 'max_uses': inv.get('max_uses', 1),
+                'used': [{'tg_id': u, 'label': user_label(u)} for u in inv.get('used_by', [])],
+                'created_at': inv.get('created_at'), 'expires_at': inv.get('expires_at') or 0,
+                'state': access.invite_state(inv),
+                'link': f'https://t.me/{bot_username}?start={INVITE_PREFIX}{inv["token"]}' if bot_username else
+                        f'/start {INVITE_PREFIX}{inv["token"]}'}
+
+    def user_view(u: dict) -> dict:
+        ps = access.profiles_for(u['tg_id'], u.get('username', '')) if not u.get('blocked') else [
+            p for p in store.profiles() if access.owns(p, u['tg_id'], u.get('username', ''))]
+        return {'tg_id': u['tg_id'], 'username': u.get('username', ''), 'first_name': u.get('first_name', ''),
+                'label': user_label(u['tg_id']), 'blocked': bool(u.get('blocked')), 'created_at': u.get('created_at'),
+                'note': u.get('note', ''),
+                'groups': [{'id': p['id'], 'name': p['name'], 'mine': str(p.get('created_by') or '') == str(u['tg_id'])} for p in ps],
+                'checkers': sum(1 for c in store.checkers() if str(c.get('created_by') or '') == str(u['tg_id']))}
+
+    @r.get('/api/users')
+    async def users_list(_):
+        return J({'users': [user_view(u) for u in store.users()],
+                  'invites': [invite_view(i) for i in store.invites()]})
+
+    @r.post('/api/invites')
+    async def invite_create(request):
+        b = await body(request)
+        try:
+            inv = access.create_invite(uid_of(request), str(b.get('note') or ''), int(b.get('uses') or 1), int(b.get('days') or 0))
+        except (TypeError, ValueError) as e:
+            raise ApiError(str(e) or 'неверные значения') from None
+        return J(invite_view(inv))
+
+    @r.delete('/api/invites/{iid}')
+    async def invite_revoke(request):
+        inv = store.invite(int(request.match_info['iid']))
+        if not inv:
+            raise ApiError('Приглашение не найдено', 404)
+        if inv.get('used_by'):  # по нему уже вошли — оставляем в истории, только закрываем
+            inv['revoked'] = True
+            store.save_invite(inv)
+        else:
+            store.delete_invite(inv['id'])
+        return J({'ok': True})
+
+    def user_or_404(tg) -> dict:
+        u = store.user(int(tg)) if str(tg).isdigit() else None
+        if not u:
+            raise ApiError('Пользователь не найден', 404)
+        return u
+
+    @r.post('/api/users/{tg}/block')
+    async def user_block(request):
+        u = user_or_404(request.match_info['tg'])
+        u['blocked'] = bool((await body(request)).get('blocked'))
+        store.save_user(u)
+        return J(user_view(u))
+
+    @r.delete('/api/users/{tg}')
+    async def user_delete(request):
+        """Удалить доступ. Группы, которые пользователь создал, остаются — их видит администратор."""
+        u = user_or_404(request.match_info['tg'])
+        store.delete_user(u['tg_id'])
         return J({'ok': True})
 
     app.add_routes(r)

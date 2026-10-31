@@ -11,6 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 
 from . import services as svc
+from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
 from .runner import STATUS_ICON, Runner, job_text
 from .store import ACTIVE, Store
@@ -20,19 +21,69 @@ router = Router()
 
 # ───────────────────────── доступ ─────────────────────────
 
+def invite_token(text: str | None) -> str:
+    """Токен из «/start inv_…» — так Telegram передаёт ссылку-приглашение t.me/<бот>?start=inv_…"""
+    parts = (text or '').split()
+    if len(parts) == 2 and parts[0].split('@')[0] == '/start' and parts[1].startswith(INVITE_PREFIX):
+        return parts[1][len(INVITE_PREFIX):][:64]
+    return ''
+
+
 class AdminOnly(BaseMiddleware):
-    def __init__(self, admins: set[int]):
-        self.admins = admins
+    """Доступ к боту: администраторы (ADMIN_IDS) и приглашённые пользователи. Ссылка-приглашение открывает доступ.
+    В обработчики передаются role ('admin' | 'member'), uid и username."""
+    def __init__(self, admins: set[int], access: Access | None = None):
+        self.admins, self.access = set(admins), access
 
     async def __call__(self, handler, event, data):
         user = data.get('event_from_user')
-        if user is None or user.id not in self.admins:
+        uid = user.id if user else 0
+        role = 'admin' if uid in self.admins else (self.access.role(uid) if self.access and uid else None)
+        if role is None and self.access and isinstance(event, Message) and invite_token(event.text):
+            good, text = self.access.redeem(invite_token(event.text), user)
+            if not good:
+                await event.answer('❌ ' + text)
+                return None
+            role = 'member'
+            await event.answer('✅ ' + text + ' Группы, которые администратор завёл для вас, уже здесь; '
+                               'свою панель можно добавить в «Панели управления».')
+            bot = data.get('bot')
+            who = html.escape(f'@{user.username}' if user.username else (user.full_name or str(uid)))
+            for a in sorted(self.admins):
+                try:
+                    await bot.send_message(a, f'👤 По приглашению вошёл {who} (<code>{uid}</code>).', parse_mode='HTML')
+                except Exception:  # noqa: BLE001 — сообщение админу не обязательно
+                    pass
+        if role is None:
             if isinstance(event, Message):
-                await event.answer('Этот бот только для администраторов.')
+                await event.answer('Этот бот работает по приглашениям. Попросите ссылку у администратора.')
             elif isinstance(event, CallbackQuery):
                 await event.answer('Нет доступа', show_alert=True)
             return None
+        if role == 'member':
+            self.access.touch(user)
+        data.update(role=role, uid=uid, username=uname(user) if user else '')
         return await handler(event, data)
+
+
+def my_profiles(store: Store, access: Access | None, role: str, uid: int, username: str = '') -> list[dict]:
+    if role == 'admin' or access is None:
+        return store.profiles()
+    return access.profiles_for(uid, username)
+
+
+def my_profile(store: Store, access: Access | None, role: str, uid: int, username: str, pid) -> dict | None:
+    p = store.profile(int(pid or 0))
+    if not p or role == 'admin' or access is None:
+        return p
+    return p if access.can(p, uid, username) else None
+
+
+def my_job(store: Store, access: Access | None, role: str, uid: int, username: str, jid: int) -> dict | None:
+    j = store.job(jid)
+    if not j or role == 'admin' or access is None:
+        return j
+    return j if my_profile(store, access, role, uid, username, j['profile_id']) else None
 
 
 # ───────────────────────── помощники ─────────────────────────
@@ -101,25 +152,28 @@ class Deploy(StatesGroup):
 
 # ───────────────────────── меню ─────────────────────────
 
-def ready_issues(store: Store) -> list[str]:
+def ready_issues(store: Store, profiles: list[dict] | None = None, role: str = 'admin') -> list[str]:
+    ps = store.profiles() if profiles is None else profiles
     out = []
     if not all(store.get(k) for k in ('bcloud_url', 'bcloud_token', 'bcloud_tg_id')):
-        out.append('подключите bcloud')
-    if not store.get('cf_token') and not any(p.get('cf_token') for p in store.profiles()):
+        out.append('подключите bcloud' if role == 'admin' else 'администратор ещё не подключил bcloud')
+    if role == 'admin' and not store.get('cf_token') and not any(p.get('cf_token') for p in ps):
         out.append('добавьте токен Cloudflare')
-    if not store.profiles():
+    if not ps:
         out.append('создайте группу')
     return out
 
 
-def main_text(store: Store) -> str:
-    issues = ready_issues(store)
+def main_text(store: Store, profiles: list[dict] | None = None, role: str = 'admin') -> str:
+    ps = store.profiles() if profiles is None else profiles
+    issues = ready_issues(store, ps, role)
     lines = ['<b>🦫 Bobr Nodes</b>', 'Покупка серверов в bcloud и установка нод Remnawave.', '']
     if issues:
         lines.append('Чтобы начать, в панели управления: ' + ', '.join(issues) + '.')
     else:
-        lines.append(f'Групп: {len(store.profiles())}')
-    active = len(store.active_jobs())
+        lines.append(f'Групп: {len(ps)}')
+    ids = {p['id'] for p in ps}
+    active = sum(1 for j in store.active_jobs() if j['profile_id'] in ids)
     if active:
         lines.append(f'В работе задач: {active}')
     return '\n'.join(lines)
@@ -130,23 +184,30 @@ def main_kb(store: Store, public_url: str) -> InlineKeyboardMarkup:
     return kb([('🚀 Развернуть ноды', 'm:deploy')], [('📋 Задачи', 'm:jobs')], [adm] if adm else None)
 
 
+def menu_text(store: Store, access, role: str, uid: int, username: str) -> str:
+    return main_text(store, my_profiles(store, access, role, uid, username), role)
+
+
 @router.message(CommandStart())
 @router.message(Command('menu'))
-async def start(m: Message, state: FSMContext, store: Store, public_url: str):
+async def start(m: Message, state: FSMContext, store: Store, public_url: str, access: Access | None = None,
+                role: str = 'admin', uid: int = 0, username: str = ''):
     await state.clear()
-    await show(m, main_text(store), main_kb(store, public_url))
+    await show(m, menu_text(store, access, role, uid, username), main_kb(store, public_url))
 
 
 @router.callback_query(F.data == 'm:main')
-async def main_cb(c: CallbackQuery, state: FSMContext, store: Store, public_url: str):
+async def main_cb(c: CallbackQuery, state: FSMContext, store: Store, public_url: str, access: Access | None = None,
+                  role: str = 'admin', uid: int = 0, username: str = ''):
     await state.clear()
-    await show(c, main_text(store), main_kb(store, public_url))
+    await show(c, menu_text(store, access, role, uid, username), main_kb(store, public_url))
 
 
 @router.message(Command('cancel'))
-async def cancel(m: Message, state: FSMContext, store: Store, public_url: str):
+async def cancel(m: Message, state: FSMContext, store: Store, public_url: str, access: Access | None = None,
+                 role: str = 'admin', uid: int = 0, username: str = ''):
     await state.clear()
-    await show(m, 'Отменено.\n\n' + main_text(store), main_kb(store, public_url))
+    await show(m, 'Отменено.\n\n' + menu_text(store, access, role, uid, username), main_kb(store, public_url))
 
 
 # ───────────────────────── развёртывание ─────────────────────────
@@ -156,13 +217,14 @@ async def wizard(state: FSMContext) -> dict:
 
 
 @router.callback_query(F.data == 'm:deploy')
-async def deploy_start(c: CallbackQuery, state: FSMContext, store: Store, public_url: str):
+async def deploy_start(c: CallbackQuery, state: FSMContext, store: Store, public_url: str, access: Access | None = None,
+                       role: str = 'admin', uid: int = 0, username: str = ''):
     await state.clear()
-    issues = ready_issues(store)
+    ps = my_profiles(store, access, role, uid, username)
+    issues = ready_issues(store, ps, role)
     if issues:
         adm = admin_button(public_url)
         return await show(c, 'Сначала в панели управления: ' + ', '.join(issues) + '.', kb([adm] if adm else None, BACK))
-    ps = store.profiles()
     if len(ps) == 1:
         return await deploy_profile(c, state, store, ps[0]['id'])
     await show(c, '<b>🚀 Куда ставим ноды?</b>\n\nВыберите группу:',
@@ -170,7 +232,10 @@ async def deploy_start(c: CallbackQuery, state: FSMContext, store: Store, public
 
 
 @router.callback_query(F.data.startswith('d:p:'))
-async def deploy_profile_cb(c: CallbackQuery, state: FSMContext, store: Store):
+async def deploy_profile_cb(c: CallbackQuery, state: FSMContext, store: Store, access: Access | None = None,
+                            role: str = 'admin', uid: int = 0, username: str = ''):
+    if not my_profile(store, access, role, uid, username, c.data[4:]):
+        return await c.answer('Группа не найдена', show_alert=True)
     await deploy_profile(c, state, store, int(c.data[4:]))
 
 
@@ -489,9 +554,13 @@ async def own_create(c: CallbackQuery, store: Store, runner: Runner, w: dict) ->
 # ───────────────────────── мониторинг ─────────────────────────
 
 @router.callback_query(F.data.regexp(r'^mon:[fri]:[0-9a-f]{8}$'))
-async def monitor_button(c: CallbackQuery, monitor=None):
+async def monitor_button(c: CallbackQuery, store: Store, monitor=None, access: Access | None = None,
+                         role: str = 'admin', uid: int = 0, username: str = ''):
     if monitor is None:
         return await c.answer('Мониторинг выключен', show_alert=True)
+    found = monitor.find(c.data[6:])
+    if found and not my_profile(store, access, role, uid, username, found[0]['id']):
+        return await c.answer('Нет доступа', show_alert=True)
     what = {'f': 'fix', 'r': 'replace', 'i': 'ignore'}[c.data[4]]
     msg = await monitor.action(c.data[6:], what)
     try:
@@ -504,9 +573,14 @@ async def monitor_button(c: CallbackQuery, monitor=None):
 # ───────────────────────── задачи ─────────────────────────
 
 @router.callback_query(F.data == 'm:jobs')
-async def jobs(c: CallbackQuery, state: FSMContext, store: Store):
+async def jobs(c: CallbackQuery, state: FSMContext, store: Store, access: Access | None = None,
+               role: str = 'admin', uid: int = 0, username: str = ''):
     await state.clear()
-    js = store.jobs(15)
+    if role == 'admin' or access is None:
+        js = store.jobs(15)
+    else:
+        ids = {p['id'] for p in my_profiles(store, access, role, uid, username)}
+        js = [j for j in store.jobs(500) if j['profile_id'] in ids][:15]
     if not js:
         return await show(c, '<b>📋 Задачи</b>\n\nПока пусто.', kb(BACK))
     btns = [[(f'{STATUS_ICON.get(j["status"], "•")} #{j["id"]} {j["data"]["domain"]}', f'j:{j["id"]}')] for j in js]
@@ -516,8 +590,9 @@ async def jobs(c: CallbackQuery, state: FSMContext, store: Store):
 
 
 @router.callback_query(F.data.regexp(r'^j:\d+$'))
-async def job_view(c: CallbackQuery, store: Store, runner: Runner):
-    j = store.job(int(c.data[2:]))
+async def job_view(c: CallbackQuery, store: Store, runner: Runner, access: Access | None = None,
+                   role: str = 'admin', uid: int = 0, username: str = ''):
+    j = my_job(store, access, role, uid, username, int(c.data[2:]))
     if not j:
         return await c.answer('Задача не найдена', show_alert=True)
     p = store.profile(j['profile_id']) or {}
@@ -528,8 +603,11 @@ async def job_view(c: CallbackQuery, store: Store, runner: Runner):
 
 
 @router.callback_query(F.data.regexp(r'^j:\d+:log$'))
-async def job_log(c: CallbackQuery, runner: Runner):
+async def job_log(c: CallbackQuery, store: Store, runner: Runner, access: Access | None = None,
+                  role: str = 'admin', uid: int = 0, username: str = ''):
     jid = int(c.data.split(':')[1])
+    if not my_job(store, access, role, uid, username, jid):
+        return await c.answer('Задача не найдена', show_alert=True)
     path = runner.log_path(jid)
     if not path.exists() or path.stat().st_size == 0:
         return await c.answer('Журнала пока нет — установка ещё не начиналась', show_alert=True)
@@ -538,9 +616,10 @@ async def job_log(c: CallbackQuery, runner: Runner):
 
 
 @router.callback_query(F.data.regexp(r'^j:\d+:retry$'))
-async def job_retry(c: CallbackQuery, store: Store, runner: Runner):
+async def job_retry(c: CallbackQuery, store: Store, runner: Runner, access: Access | None = None,
+                    role: str = 'admin', uid: int = 0, username: str = ''):
     jid = int(c.data.split(':')[1])
-    j = store.job(jid)
+    j = my_job(store, access, role, uid, username, jid)
     if not j or j['status'] != 'failed':
         return await c.answer('Повторить можно только задачу с ошибкой', show_alert=True)
     store.update_job(jid, status='queued', error='')
@@ -550,8 +629,11 @@ async def job_retry(c: CallbackQuery, store: Store, runner: Runner):
 
 
 @router.callback_query(F.data.regexp(r'^j:\d+:hide$'))
-async def job_hide(c: CallbackQuery, store: Store):
+async def job_hide(c: CallbackQuery, store: Store, access: Access | None = None,
+                   role: str = 'admin', uid: int = 0, username: str = ''):
     jid = int(c.data.split(':')[1])
+    if not my_job(store, access, role, uid, username, jid):
+        return await c.answer('Задача не найдена', show_alert=True)
     store.update_job(jid, hidden=1)
     await delete_quietly(c.message)
     await c.answer('Скрыто из списка')

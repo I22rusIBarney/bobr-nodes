@@ -82,6 +82,9 @@ const badge = (text, cls) => h('span', { class: 'badge ' + (cls || '') }, text);
 const statusLine = () => h('div', { class: 'status-line', role: 'status' });
 function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.message; UI.haptic(r.ok ? 'success' : 'error'); }
 const title = (t, back) => [UI.nav.backLink(back || 'Bobr Nodes'), h('h1', { class: 'large-title' }, t)];
+const isAdmin = () => !!ST && ST.role === 'admin';
+// подпись группы в списках: чья она (у администратора — пользователя; у пользователя — от администратора)
+const groupWho = p => p.kind === 'user' ? 'пользователя ' + (p.created_by_label || '') : p.kind === 'shared' ? 'от администратора' : '';
 
 async function load() {
   try { ST = await api('state'); } catch (e) { ST = { error: e.message }; }
@@ -112,13 +115,13 @@ const specText = sp => (sp || '').replace(/ · /g, ', ');
 function home() {
   if (!ST) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]));
   if (ST.error) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), h('div', { class: 'notice bad' }, h('b', {}, 'Нет доступа. '), ST.error));
-  const s = ST.settings, j = ST.jobs;
+  const s = ST.settings, j = ST.jobs, admin = isAdmin();
   const v = h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'));
   if (ST.issues.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'Чтобы начать: '), ST.issues.join(', ') + '.'));
   v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => { D = null; UI.nav.push(() => deployView()); } }, 'Развернуть ноды')));
   v.append(group(['Группы', h('span', { class: 'n' }, ST.profiles.length || '')], [
     ...ST.profiles.map(p => row({ title: p.name,
-      sub: [p.servers + ' ' + UI.plural(p.servers, 'сервер', 'сервера', 'серверов'), p.owner_label, p.script].filter(Boolean).join(', '),
+      sub: [p.servers + ' ' + UI.plural(p.servers, 'сервер', 'сервера', 'серверов'), groupWho(p), admin ? p.owner_label : '', p.script].filter(Boolean).join(', '),
       status: p.active ? ['в работе: ' + p.active, 'run'] : p.failed ? ['ошибок: ' + p.failed, 'bad'] : null,
       onClick: () => UI.nav.push(() => groupView(p.id)) })),
     row({ title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })]));
@@ -126,9 +129,14 @@ function home() {
   v.append(group(null, [
     row({ title: 'Задачи', status: jobsStatus, detail: jobsStatus ? null : String(j.done || ''), onClick: () => UI.nav.push(jobsView) }),
     row({ title: 'Мониторинг', sub: 'доступность нод из России', onClick: () => { MON = null; UI.nav.push(monitorView); } }),
-    row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }),
-    row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }),
-    row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })]));
+    admin ? row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }) : null,
+    admin || ST.profiles.length > 1 ? row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }) : null,
+    admin ? row({ title: 'Пользователи', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }) : null,
+    admin ? row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) }) : null].filter(Boolean)));
+  if (!admin) {
+    v.append(h('div', { class: 'pad' }, h('div', { class: 'group-f' }, 'Серверы покупаются с вашего баланса в bcloud. Свою панель добавьте как новую группу — с вашим токеном Cloudflare. Чекеры в «Мониторинге» общие: ваш чекер проверяет ноды всех пользователей бота.')));
+    return v;
+  }
   const sec = ST.security || {}, hd = sec.hardened;
   const ok = k => s[k] && s[k].set;
   const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
@@ -253,11 +261,13 @@ function monitorView() {
     h('div', { class: 'subtitle' }, 'Чекеры на серверах в России проверяют подписки групп. Нода недоступна, если её не пропускает большинство чекеров 3 проверки подряд (~15 мин).'));
   if (MON.error) { v.append(h('div', { class: 'notice bad' }, MON.error)); return v; }
   monPoll();
-  const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
-    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c), onClick: () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } }));
+  const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.mine ? null : 'добавил ' + (c.by || 'другой пользователь'), c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
+    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c), chevron: c.mine ? undefined : false,
+    onClick: c.mine ? () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } : null }));
   chRows.push(row({ title: 'Добавить чекер', cls: 'accent', onClick: () => { NEWCK = null; UI.nav.push(checkerAddView); } }));
   v.append(group(['Чекеры', h('span', { class: 'n' }, MON.checkers.length || '')], chRows,
-    'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп; API чекера наружу не открыт — бот читает его по SSH.'));
+    'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп всех пользователей бота; API чекера наружу не открыт — бот читает его по SSH.'
+    + (isAdmin() ? '' : ' Чекеры общие: добавленный вами проверяет и чужие группы, а менять и удалять его можете только вы.')));
   const gRows = MON.groups.map(g => {
     const bad = g.nodes.filter(n => ['down', 'repairing', 'gave_up'].includes(n.status)).length;
     const nn = g.nodes.filter(n => n.kind !== 'host').length, hh = g.nodes.length - nn;
@@ -576,6 +586,71 @@ function geminiView() {
     'check/gemini', { fields: { gemini_proxy: { ph: 'socks5://user:pass@host:1080' } } }));
 }
 
+// ───────── пользователи и приглашения ─────────
+let USERS = null;
+const NEWINV = { note: '', uses: 1, days: 7 };
+const INV_ST = { active: ['', 'ok', 'действует'], used: ['использовано', ''], expired: ['истекло', 'warn'], revoked: ['отозвано', 'warn'] };
+const day = ts => ts ? new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '';
+async function loadUsers() { try { USERS = await api('users'); } catch (e) { USERS = { error: e.message }; } }
+function usersView() {
+  if (USERS === null) { loadUsers().then(() => UI.nav.refresh()); return h('div', {}, ...title('Пользователи'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); }
+  const v = h('div', {}, ...title('Пользователи'),
+    h('div', { class: 'subtitle' }, 'Приглашённые видят только свои группы: созданные сами и те, где клиент bcloud — они (по Telegram ID или @username). Покупают со своего баланса bcloud, домены — своим токеном Cloudflare. Настроек бота, скриптов и оформления у них нет.'));
+  if (USERS.error) { v.append(h('div', { class: 'notice bad' }, USERS.error)); return v; }
+  const reload = async () => { await loadUsers(); await load(); };
+  v.append(group(['Пользователи', h('span', { class: 'n' }, USERS.users.length || '')], USERS.users.length ? USERS.users.map(u => row({ title: u.label, cls: 'wrap',
+    sub: [u.groups.length ? 'группы: ' + u.groups.map(g => g.name + (g.mine ? '' : ' (ваша)')).join(', ') : 'групп нет', u.checkers ? 'чекеров ' + u.checkers : '', u.note].filter(Boolean).join(' · '),
+    status: u.blocked ? ['закрыт', 'bad'] : null, onClick: () => UI.nav.push(() => userView(u.tg_id)) }))
+    : [row({ title: 'Пока никого', cls: 'is-dim', chevron: false })]));
+  // новое приглашение
+  const f = NEWINV;
+  const make = h('button', { class: 'btn', type: 'button' }, 'Создать ссылку');
+  make.onclick = UI.busy(make, async () => {
+    const r = await UI.run(() => api('invites', 'POST', { note: f.note, uses: f.uses, days: f.days }));
+    if (!r) return;
+    f.note = ''; UI.copy(r.link, 'Ссылка'); await reload(); UI.nav.refresh();
+  });
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новое приглашение'), h('div', { class: 'list' },
+    h('label', { class: 'field stack' }, h('label', {}, 'Для кого', h('span', { class: 'opt' }, ' необязательно')), textIn(f.note, 'Иван, панель EU', x => { f.note = x; })),
+    row({ title: 'Сколько человек', chevron: false, right: stepper(f.uses, n => { f.uses = n; }, 20) }),
+    row({ title: 'Срок', chevron: false, right: UI.segmented([{ value: 1, label: 'день' }, { value: 7, label: 'неделя' }, { value: 30, label: 'месяц' }, { value: 0, label: '∞' }], f.days, x => { f.days = x; }) })),
+    h('div', { class: 'group-f' }, 'Человек открывает ссылку — бот впускает его. Если для его Telegram ID или @username уже есть группа, она сразу у него в списке.')),
+    h('div', { class: 'pad' }, make));
+  const invs = USERS.invites;
+  if (invs.length) v.append(group(['Приглашения', h('span', { class: 'n' }, invs.length)], invs.map(i => row({ title: i.note || 'Приглашение от ' + day(i.created_at), cls: 'wrap',
+    sub: [`${i.used.length} из ${i.max_uses}`, i.used.map(x => x.label).join(', '), i.expires_at ? 'до ' + day(i.expires_at) : 'бессрочно'].filter(Boolean).join(' · '),
+    status: INV_ST[i.state] || [i.state, ''], onClick: async () => {
+      const btns = i.state === 'active' ? [{ id: 'copy', text: 'Скопировать ссылку' }, { id: 'del', text: 'Отозвать', type: 'destructive' }] : [{ id: 'del', text: i.used.length ? 'Закрыть' : 'Удалить', type: 'destructive' }];
+      const a = await UI.ask({ title: i.note || 'Приглашение', message: i.state === 'active' ? i.link : 'Ссылка больше не работает.', buttons: btns });
+      if (a === 'copy') UI.copy(i.link, 'Ссылка');
+      if (a === 'del' && await UI.run(() => api('invites/' + i.id, 'DELETE'), 'Готово') !== undefined) { await reload(); UI.nav.refresh(); }
+    } }))));
+  return v;
+}
+function userView(tg) {
+  const u = USERS && !USERS.error && USERS.users.find(x => x.tg_id === tg);
+  if (!u) return h('div', {}, ...title('Пользователь', 'Пользователи'), h('div', { class: 'notice' }, 'Пользователь удалён'));
+  const reload = async () => { await loadUsers(); await load(); UI.nav.refresh(); };
+  const v = h('div', {}, ...title(u.label, 'Пользователи'));
+  v.append(group(null, [
+    row({ title: 'Telegram ID', detail: String(u.tg_id), mono: true, copy: String(u.tg_id) }),
+    u.username ? row({ title: 'Username', detail: '@' + u.username }) : null,
+    u.first_name ? row({ title: 'Имя', detail: u.first_name }) : null,
+    row({ title: 'Вошёл', detail: day(u.created_at) + (u.note ? ' · ' + u.note : '') }),
+    row({ title: 'Доступ', chevron: false, right: UI.toggle(!u.blocked, async on => {
+      if (await UI.run(() => api('users/' + tg + '/block', 'POST', { blocked: !on }), on ? 'Доступ открыт' : 'Доступ закрыт') !== undefined) reload();
+    }, 'Доступ') })].filter(Boolean), u.blocked ? 'Доступ закрыт: бот и панель для него не открываются, сообщения мониторинга о его группах снова приходят вам.' : null));
+  v.append(group('Группы', u.groups.length ? u.groups.map(g => row({ title: g.name, sub: g.mine ? 'создал сам' : 'вы завели для него',
+    onClick: () => { if (ST.profiles.some(p => p.id === g.id)) UI.nav.push(() => groupView(g.id)); } }))
+    : [row({ title: 'Групп нет', cls: 'is-dim', chevron: false })],
+    'Чтобы дать пользователю готовую группу, укажите в её настройках клиентом bcloud его Telegram ID или @username.'));
+  v.append(group(null, [row({ title: 'Удалить пользователя', cls: 'destructive', onClick: async () => {
+    const ok = await UI.ask({ title: 'Удалить пользователя?', message: 'Он потеряет доступ. Группы, которые он создал, и его чекеры останутся — их увидите вы. Вернуть доступ можно новым приглашением.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
+    if (ok && await UI.run(() => api('users/' + tg, 'DELETE'), 'Удалён') !== undefined) { await loadUsers(); await load(); UI.nav.back(); }
+  } })]));
+  return v;
+}
+
 // ───────── группа ─────────
 const GJ = {}, PS = {};
 function groupView(pid) {
@@ -587,7 +662,8 @@ function groupView(pid) {
   else if (Array.isArray(jobs) && jobs.some(j => ACTIVE_ST.includes(j.status)))
     poll(() => { if (document.querySelector('#root .group-page')) reload(); }, 4000);
   const v = h('div', { class: 'group-page' }, ...title(g.name),
-    h('div', { class: 'subtitle' }, g.panel_url.replace(/^https?:\/\//, '') + ', ' + (g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт bcloud')));
+    h('div', { class: 'subtitle' }, g.panel_url.replace(/^https?:\/\//, '') + ', ' + (!isAdmin() ? 'ваш баланс bcloud' + (g.kind === 'shared' ? ', группу завёл администратор' : '')
+      : (g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт bcloud') + (g.kind === 'user' ? ', группа пользователя ' + g.created_by_label : ''))));
   v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'),
     onclick: () => { D = null; UI.nav.push(() => deployView(pid)); } }, 'Развернуть в группе')));
   if (jobs === undefined) v.append(group('Серверы', [h('div', { class: 'skeleton' })]));
@@ -987,11 +1063,16 @@ function profileView(p) {
   };
   api('scripts').then(r => { scripts = r.scripts; drawScript(); }).catch(() => { scripts = []; drawScript(); });
   drawScript();
-  const ownerText = () => p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в bcloud.' : 'Пусто — серверы покупаются с вашего аккаунта bcloud.';
+  const member = !isAdmin(), locked = p.locked || (member ? ['owner'] : []);
+  const ownerText = () => member ? 'Серверы покупаются с вашего баланса в bcloud и видны вам там.'
+    : p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в bcloud.' : 'Пусто — серверы покупаются с вашего аккаунта bcloud.';
   const ownerNote = h('div', { class: 'group-f' }, ownerText());
+  const cfNote = p.shared_cf ? 'Группу завёл администратор — домены нод создаются его токеном Cloudflare.'
+    : member || p.kind === 'user' ? 'Токен Cloudflare, где лежат домены нод этой группы. Обязателен: у групп пользователей нет общего токена.'
+    : 'Токен Cloudflare, где лежат домены нод этой группы. Пусто — общий токен из «Подключений».';
   const out = [...title(p.id ? p.name : 'Новая группа'),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Группа'),
-      h('div', { class: 'list' }, ['name', 'owner'].map(field)), ownerNote),
+      h('div', { class: 'list' }, ['name', 'owner'].filter(k => !locked.includes(k)).map(field)), ownerNote),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Панель Remnawave'),
       h('div', { class: 'list' }, ['panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'node_port'].map(field)),
       h('div', { class: 'group-f' }, 'Токен: Панель → Настройки → API Tokens. Cookie-защита: вставьте секретную ссылку входа целиком — бот сам возьмёт пару ИМЯ=ЗНАЧЕНИЕ. Исходящие IP — только им будет открыт API ноды.')),
@@ -1001,9 +1082,9 @@ function profileView(p) {
       h('div', { class: 'group-f' }, 'Домен для автоимён: например example.com → ноды de1.example.com, nl2.example.com. Пусто — домены только вручную. В шаблоне {cc} — код локации, {n} — номер; «vpn» в именах запрещено. Сквады — UUID внутренних сквадов, куда добавить inbound новых нод.')),
     scriptBox,
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Cloudflare'),
-      h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, 'Токен Cloudflare, где лежат домены нод этой группы. Пусто — общий токен из «Подключений».')),
+      locked.includes('cf_token') ? null : h('div', { class: 'list' }, field('cf_token')), h('div', { class: 'group-f' }, cfNote)),
     h('div', { class: 'pad', style: 'margin-bottom:var(--s2)' }, status), h('div', { class: 'actions' }, test, save)];
-  if (p.id) out.push(group(null, [row({ title: 'Удалить группу', cls: 'destructive', onClick: async () => {
+  if (p.id && p.can_delete !== false) out.push(group(null, [row({ title: 'Удалить группу', cls: 'destructive', onClick: async () => {
     const ok = await UI.ask({ title: 'Удалить группу?', message: 'Серверы, ноды и записи в панели останутся, удалятся только настройки в боте.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
     if (ok && await UI.run(() => api('profiles/' + p.id, 'DELETE'), 'Группа удалена') !== undefined) { await load(); UI.nav.reset(); }
   } })]));

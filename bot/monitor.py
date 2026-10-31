@@ -22,6 +22,7 @@ from . import engine
 from . import services as svc
 from . import sshaccess
 from .bcloud import BcloudError
+from .runner import cf_token_of
 from .store import ACTIVE, Store
 
 log = logging.getLogger(__name__)
@@ -135,8 +136,9 @@ def kb(*rows) -> InlineKeyboardMarkup:
 
 
 class Monitor:
-    def __init__(self, store: Store, runner, bot, admins: set[int], every: float = ck.INTERVAL):
+    def __init__(self, store: Store, runner, bot, admins: set[int], every: float = ck.INTERVAL, access=None):
         self.store, self.runner, self.bot, self.admins = store, runner, bot, admins
+        self.access = access  # кому писать о группе: её пользователю и/или администраторам
         self.every = every
         self.results: dict[int, list[dict] | None] = {}  # последний опрос каждого чекера
         self.polled_at = 0.0
@@ -443,8 +445,11 @@ class Monitor:
                 self.store.set_mon(key, None)
 
     # ───────── сообщения ─────────
-    async def say(self, text: str, markup=None) -> None:
-        for uid in sorted(self.admins):
+    def recipients(self, prof: dict) -> list[int]:
+        return self.access.recipients(prof) if self.access is not None else sorted(self.admins)
+
+    async def say(self, prof: dict, text: str, markup=None) -> None:
+        for uid in self.recipients(prof):
             try:
                 await self.bot.send_message(uid, text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
             except Exception as e:  # noqa: BLE001
@@ -462,27 +467,27 @@ class Monitor:
         if st.get('kind') == 'host':  # свой сервер с xray.json: починить его бот не может — только сообщает
             if st.get('total'):
                 text += f'\nИз {st["total"]} выходов хоста не прошёл ни один.'
-            return await self.say(text + '\n\nЭто хост без ноды (свой xray.json) — бот его не чинит.',
+            return await self.say(prof, text + '\n\nЭто хост без ноды (свой xray.json) — бот его не чинит.',
                                   kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]))
         steps = [STEP_LABEL[s] for s in cfg['mon_steps']]
         if cfg['mon_mode'] == 'auto':
             text += '\n\nЧиню по шагам: ' + (', '.join(steps) if steps else 'шагов не выбрано') + '.'
-            return await self.say(text)
+            return await self.say(prof, text)
         if cfg['mon_mode'] == 'ask':
             text += '\n\nШаги починки: ' + (', '.join(steps) if steps else 'не выбраны') + '.'
             rows = [[('🛠 Починить', f'mon:f:{st["tok"]}')]] if steps else []
             if 'replace' in cfg['mon_steps']:
                 rows.append([('🆕 Сразу новая нода', f'mon:r:{st["tok"]}')])
             rows.append([('🙈 Не трогать', f'mon:i:{st["tok"]}')])
-            return await self.say(text, kb(*rows))
-        await self.say(text)
+            return await self.say(prof, text, kb(*rows))
+        await self.say(prof, text)
 
     async def recovered(self, prof: dict, st: dict) -> None:
         if settings_of(prof)['mon_mode'] == 'watch':
             return
         done = st.get('steps_done') or []
         how = f' после шага «{STEP_LABEL[done[-1]]}»' if done and st.get('status') == 'repairing' else ''
-        await self.say(f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.')
+        await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.')
 
     # ───────── починка ─────────
     def find(self, tok: str) -> tuple[dict, str, dict] | None:
@@ -529,15 +534,15 @@ class Monitor:
             try:
                 jid, note = await self.run_step(prof, st, step, cfg)
             except (ValueError, engine.StepError, BcloudError) as e:
-                await self.say(f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}» пропущен: {html.escape(str(e))}')
+                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}» пропущен: {html.escape(str(e))}')
                 continue
             st.update(step=step, job=jid, job_done=False, fails=0)
             self.store.set_mon(key, st)
-            await self.say(f'🛠 {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}»: {html.escape(note)}')
+            await self.say(prof, f'🛠 {self.head(prof, st)}\nшаг «{STEP_LABEL[step]}»: {html.escape(note)}')
             return f'Шаг: {STEP_LABEL[step]}'
         st.update(status='gave_up', step=None, job=None)
         self.store.set_mon(key, st)
-        await self.say(f'❌ {self.head(prof, st)}\nвсе шаги починки испробованы — нода всё ещё недоступна. Посмотрите её сами.')
+        await self.say(prof, f'❌ {self.head(prof, st)}\nвсе шаги починки испробованы — нода всё ещё недоступна. Посмотрите её сами.')
         return 'Шагов больше нет'
 
     async def drive(self, prof: dict, st: dict) -> None:
@@ -552,7 +557,7 @@ class Monitor:
             st.update(job_done=True, fails=0)
             if job['status'] == 'failed':
                 self.store.set_mon(key, st)
-                await self.say(f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[st["step"]]}» не удался: {html.escape(job["error"][:200])}')
+                await self.say(prof, f'⚠️ {self.head(prof, st)}\nшаг «{STEP_LABEL[st["step"]]}» не удался: {html.escape(job["error"][:200])}')
                 await self.next_step(prof, st)
                 return
             if st['step'] == 'replace':
@@ -566,8 +571,9 @@ class Monitor:
             self.store.set_mon(key, st)
 
     # ── шаги ──
-    def chat(self) -> int:
-        return sorted(self.admins)[0] if self.admins else 0
+    def chat(self, prof: dict) -> int:
+        r = self.recipients(prof)
+        return r[0] if r else 0
 
     async def run_step(self, prof: dict, st: dict, step: str, cfg: dict) -> tuple[int, str]:
         pid = prof['id']
@@ -602,7 +608,7 @@ class Monitor:
         elif step == 'xhttp':
             if prof.get('script_id'):
                 raise ValueError('группа ставит ноды своим скриптом — запасной XHTTP только у встроенного установщика')
-            if not (prof.get('cf_token') or self.store.get('cf_token')):
+            if not (cf_token_of(self.store, prof)):
                 raise ValueError('нет токена Cloudflare')
             if not doms:
                 raise ValueError('у ноды нет домена')
@@ -611,7 +617,7 @@ class Monitor:
             note = 'ставлю запасной вход через Cloudflare CDN'
         else:
             raise ValueError('неизвестный шаг')
-        jid = self.store.add_job('mon-' + st['uuid'][:8], pid, self.chat(), data)
+        jid = self.store.add_job('mon-' + st['uuid'][:8], pid, self.chat(prof), data)
         await self.runner.render(jid, force=True)
         self.runner.start(jid)
         return jid, note
@@ -642,13 +648,13 @@ class Monitor:
         srv = await self.bcloud_server(prof, bd, ip)
         if not srv or srv.get('status') != 'active':
             raise ValueError('сервера ноды нет в bcloud у покупателя группы — переустановить не на что')
-        pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+        pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
         await asyncio.to_thread(engine.remove_node, pconf, srv['ip'], dom, lambda t: None)
         if bd.get('_job'):
             self.store.patch_job_data(int(bd['_job']), removed=True, removed_at=int(time.time()))
         engine.forget_host(self.runner.known_hosts(), srv['ip'])
         cat = {'locations': [], 'os_code': srv.get('os') or 'debian12'}
-        ids = await svc.create_jobs(self.store, self.runner, self.chat(), prof['id'], cat, srv['location'], None, '1m', [dom],
+        ids = await svc.create_jobs(self.store, self.runner, self.chat(prof), prof['id'], cat, srv['location'], None, '1m', [dom],
                                     squads=bd.get('squads'), host=bd.get('host'), servers=[srv], script_id=sid,
                                     extras={k: bd.get(k) for k in ('psiphon', 'warp') if bd.get(k)},
                                     note={'monitor': True})
@@ -676,7 +682,7 @@ class Monitor:
         idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
         doms = await svc.auto_domains(self.store, prof, loc, 1)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
-        ids = await svc.create_jobs(self.store, self.runner, self.chat(), prof['id'], cat, loc, idx, '1m', doms,
+        ids = await svc.create_jobs(self.store, self.runner, self.chat(prof), prof['id'], cat, loc, idx, '1m', doms,
                                     squads=bd.get('squads'), host=bd.get('host'), extras=extras, custom=custom,
                                     note={'monitor': True, 'replaces': st['addr']})
         self.store.set(f'mon_buys:{prof["id"]}', json.dumps(buys + [time.time()]))
@@ -728,7 +734,7 @@ class Monitor:
         dom = bd.get('domain') or ('' if engine.is_ip(st['addr']) else st['addr'])
         what = 'старая нода оставлена как есть'
         if cfg['mon_old'] in ('panel', 'delete'):
-            pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+            pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
             try:
                 await asyncio.to_thread(engine.remove_node, pconf, ip, dom, lambda t: None)
                 what = 'старая нода убрана из панели'
@@ -748,7 +754,7 @@ class Monitor:
                 what += ', сервера в bcloud не нашёл'
         st.update(status='replaced', step=None, job=None, replaced_by=job['data'].get('domain'))
         self.store.set_mon(key, st)
-        await self.say(f'✅ {self.head(prof, st)}\nзаменена новой нодой <code>{html.escape(job["data"].get("domain", ""))}</code>; '
+        await self.say(prof, f'✅ {self.head(prof, st)}\nзаменена новой нодой <code>{html.escape(job["data"].get("domain", ""))}</code>; '
                        f'{html.escape(what)}.')
 
     # ───────── для админки ─────────

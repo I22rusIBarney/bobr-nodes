@@ -65,8 +65,16 @@ def bcloud_from(store: Store, tg_id: int | str | None = None) -> Bcloud:
 
 
 def buyer_of(store: Store, prof: dict) -> int:
-    """Чей баланс у группы: владелец группы или аккаунт из настроек."""
-    return int(prof.get('owner_tg_id') or store.get('bcloud_tg_id') or 0)
+    """Чей баланс у группы: владелец группы или аккаунт из настроек. Группа приглашённого пользователя —
+    только с его баланса, никогда с аккаунта администратора."""
+    return int(prof.get('owner_tg_id') or prof.get('created_by') or store.get('bcloud_tg_id') or 0)
+
+
+def cf_token_of(store: Store, prof: dict) -> str:
+    """Токен Cloudflare группы; общий из «Подключений» — только у групп администратора, не у групп пользователей."""
+    if prof.get('cf_token'):
+        return prof['cf_token']
+    return '' if prof.get('created_by') else store.get('cf_token')
 
 
 def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
@@ -138,9 +146,11 @@ class Runner:
         self.keydir.mkdir(parents=True, exist_ok=True)
         return str(self.keydir / 'known_hosts')
 
-    def pubkeys(self) -> str:
-        """Ключи для authorized_keys новой ноды: ваш (из настроек) и ключ бота."""
-        return '\n'.join(x for x in (self.store.get('ssh_pubkey'), self.bot_key()[1]) if x and x != '-')
+    def pubkeys(self, prof: dict | None = None) -> str:
+        """Ключи для authorized_keys новой ноды: ваш (из настроек) и ключ бота. На серверы групп приглашённых
+        пользователей ваш личный ключ не кладём — только ключ бота (он нужен для починки и дополнений)."""
+        mine = '' if (prof or {}).get('created_by') else self.store.get('ssh_pubkey')
+        return '\n'.join(x for x in (mine, self.bot_key()[1]) if x and x != '-')
 
     def log_path(self, jid: int) -> Path:
         return self.logdir / f'job-{jid}.log'
@@ -174,7 +184,7 @@ class Runner:
             if srv.get('status') != 'deleted':
                 continue
             lines: list[str] = []
-            pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+            pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
             try:
                 res = await asyncio.to_thread(engine.remove_node, pconf, d.get('ip', ''), d.get('domain', ''), lines.append)
             except engine.StepError as e:
@@ -294,7 +304,7 @@ class Runner:
         self.last[jid] = f'новый IP: {d["new_ip"]}'
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'old_ip': d['old_ip'], 'new_ip': d['new_ip'],
                 'domains': d.get('domains') or [], **self._node_ssh(d, prof)}
-        pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+        pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
         async with self.sem():
             def on_log(text: str) -> None:
                 self.last[jid] = text
@@ -319,7 +329,7 @@ class Runner:
                 'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                 'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'),
                 **self._node_ssh(d, prof)}
-        pconf = {**prof, 'ssh_pubkey': self.pubkeys(), 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
+        pconf = {**prof, 'ssh_pubkey': self.pubkeys(prof), 'cf_token': cf_token_of(self.store, prof)}
         self.last[jid] = 'ждём свободный слот'
         await self.render(jid)
         async with self.sem():
@@ -408,8 +418,8 @@ class Runner:
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
                         'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                         'traffic_control': prof.get('traffic_control', True), 'known_hosts': self.known_hosts()}
-                pconf = {**prof, 'cf_token': prof.get('cf_token') or self.store.get('cf_token'),
-                         'ssh_pubkey': self.pubkeys()}
+                pconf = {**prof, 'cf_token': cf_token_of(self.store, prof),
+                         'ssh_pubkey': self.pubkeys(prof)}
                 fn = self.deploy
                 sid = d.get('script_id', prof.get('script_id'))
                 if sid:

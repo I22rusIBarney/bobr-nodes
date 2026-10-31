@@ -9,7 +9,7 @@ import string
 
 from . import engine, naming
 from .bcloud import BcloudError
-from .runner import Runner, bcloud_from, buyer_of
+from .runner import Runner, bcloud_from, buyer_of, cf_token_of
 from .store import Store
 
 PERIOD_LABEL = {'1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год'}
@@ -59,7 +59,10 @@ def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict
 
 
 def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
-    return engine.Cloudflare(prof.get('cf_token') or store.get('cf_token'))
+    tok = cf_token_of(store, prof)
+    if not tok:
+        raise engine.StepError('у группы нет своего токена Cloudflare — добавьте его в настройках группы')
+    return engine.Cloudflare(tok)
 
 
 async def load_catalog(store: Store, prof: dict | None = None) -> dict:

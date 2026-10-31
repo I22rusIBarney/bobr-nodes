@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
+from bot.access import Access
 from bot.handlers import AdminOnly, router
 from bot.monitor import Monitor
 from bot.runner import Runner
@@ -54,13 +55,15 @@ async def main():
     bot = Bot(token, default=DefaultBotProperties(parse_mode='HTML'))
     me = await bot.get_me()
     dp = Dispatcher(storage=MemoryStorage())
-    mw = AdminOnly(admins)
+    access = Access(store, admins)
+    mw = AdminOnly(admins, access)
     dp.message.outer_middleware(mw)
     dp.callback_query.outer_middleware(mw)
     dp.include_router(router)
     runner = Runner(store, bot, f'{data_dir}/logs')
-    monitor = Monitor(store, runner, bot, admins)
+    monitor = Monitor(store, runner, bot, admins, access=access)
     dp['store'], dp['runner'], dp['public_url'], dp['monitor'] = store, runner, public_url, monitor
+    dp['access'] = access
 
     await bot.set_my_commands([BotCommand(command='start', description='Меню'),
                                BotCommand(command='cancel', description='Отменить ввод')])
@@ -74,7 +77,8 @@ async def main():
     watch_task = asyncio.create_task(watch.run())  # входы по SSH и блокировки fail2ban на сервере бота
     sync_task = asyncio.create_task(runner.sync_loop())  # серверы, удалённые в bcloud, — убрать из панели
     mon_task = asyncio.create_task(monitor.run())  # доступность нод из России: чекеры, сообщения, починка
-    app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir, monitor=monitor)
+    app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir, monitor=monitor,
+                    access=access)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
