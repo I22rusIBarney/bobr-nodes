@@ -472,7 +472,7 @@ body.has-composer .tabbar { display: none; }
   body { padding-bottom: 40px; padding-left: 232px; }
   body > #root { max-width: 640px; }
   .tabbar { top: 0; right: auto; width: 232px; height: auto; flex-direction: column; justify-content: flex-start; gap: 4px; padding: 20px 12px; border-top: 0; border-right: 1px solid var(--line); background: #0F1219; }
-  .tabbar::before { content: "Bobr Nodes"; display: block; font-weight: 650; font-size: 17px; letter-spacing: -0.02em; padding: 4px 12px 18px; color: var(--text); }
+  .tabbar::before { content: "BobrNet"; display: block; font-weight: 700; font-size: 18px; letter-spacing: -0.025em; padding: 6px 12px 22px 52px; color: var(--text); background: url(logo.png) 12px 0 / 30px 30px no-repeat; line-height: 30px; }
   .tabbar button { flex: none; max-width: none; flex-direction: row; justify-content: flex-start; gap: 10px; font-size: 14px; height: 44px; padding: 0 6px; border-radius: 10px; }
   .tabbar button[aria-current="page"] { background: var(--accent-soft); }
   .tabbar button[aria-current="page"] .tb-ic { background: none; }
@@ -563,4 +563,8 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .balance-card span { display: block; font-size: 13px; color: var(--hint); }
 .balance-card b { display: block; font-size: 32px; line-height: 40px; font-weight: 650; letter-spacing: -0.03em; margin: 2px 0 6px; }
 .brand { white-space: nowrap; }
-@media (max-width: 379px) { .appbar .brand .bt { display: none; } }
+@media (max-width: 339px) { .appbar .brand .bt { display: none; } }
+/* логотип BobrNet: знак и название, «Net» — градиентом знака */
+.brand .logo { width: 30px; height: 30px; border-radius: 8px; flex: none; display: block; }
+.brand { font-size: 19px; font-weight: 700; letter-spacing: -0.025em; gap: 10px; }
+.brand .net { background: linear-gradient(90deg, #3FB4FF, #6E8BFF); -webkit-background-clip: text; background-clip: text; color: transparent; }

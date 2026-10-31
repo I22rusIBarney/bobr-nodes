@@ -27,6 +27,7 @@ HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
+          'logo.png': 'image/png',
           'flags.woff': 'font/woff',  # флаги стран для Windows и Telegram Desktop (Twemoji, CC-BY 4.0, web/static/flags-LICENSE.txt)
           **{f'hero-{k}.webp': 'image/webp' for k in (f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night'))}}
 # картинка на главной: по сезону и времени суток (auto), одна из восьми или без картинки
@@ -214,7 +215,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if name not in STATIC:
             raise web.HTTPNotFound()
         cache = ('public, max-age=31536000, immutable' if name.endswith(('.woff2', '.woff'))  # шрифты не меняются
-                 else 'public, max-age=604800' if name.endswith('.webp') else 'no-cache')
+                 else 'public, max-age=604800' if name.endswith(('.webp', '.png')) else 'no-cache')
         return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
 
     @r.get('/health')

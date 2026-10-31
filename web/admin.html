@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>Bobr Nodes</title>
+<title>BobrNet</title>
+<link rel="icon" href="/static/logo.png">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/static/ui.css">
 <style>
@@ -160,7 +161,7 @@ function heroImg(key, cls) {
 function home() {
   const v = h('div', { class: 'home-page' }, h('div', { class: 'appbar' },
     h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Все разделы', onclick: allSections }, icon('menu')),
-    h('span', { class: 'brand' }, svgEl(BRAND), h('span', { class: 'bt' }, 'Bobr Nodes')), h('div', { class: 'sp' }), ST && !ST.error ? walletChip() : null, bellBtn()));
+    h('span', { class: 'brand' }, h('img', { class: 'logo', src: '/static/logo.png', alt: '', width: 30, height: 30 }), h('span', { class: 'bt' }, 'Bobr', h('span', { class: 'net' }, 'Net'))), h('div', { class: 'sp' }), ST && !ST.error ? walletChip() : null, bellBtn()));
   if (!ST) {
     v.append(h('div', { 'aria-busy': 'true', 'aria-label': 'Загрузка' }, h('div', { class: 'hero skeleton', style: 'background-color:var(--cell)' }),
       h('div', { class: 'stats' }, [1, 2, 3].map(() => h('div', { class: 'stat skeleton', style: 'height:72px' }))),
@@ -184,7 +185,7 @@ function home() {
   const state = bad.length ? ['Внимание: ' + bad.join(', '), 'bad'] : j.active ? [`Идёт установка: ${j.active}`, 'run'] : NS.loading ? ['Проверяю панели…', ''] : ['Все системы работают', 'ok'];
   const hk = heroKey();
   v.append(h('div', { class: 'hero' + (hk === 'none' ? ' plain' : '') }, hk === 'none' ? null : h('div', { class: 'art' }, heroImg(hk)),
-    h('h2', {}, name ? `Привет, ${name}!` : 'Bobr Nodes'), h('span', { class: 'st ' + state[1], role: 'status' }, state[0])));
+    h('h2', {}, name ? `Привет, ${name}!` : 'BobrNet'), h('span', { class: 'st ' + state[1], role: 'status' }, state[0])));
   const servers = ST.profiles.reduce((a, p) => a + (p.servers || 0), 0);
   v.append(h('div', { class: 'stats' },
     statTile(NS.nodes != null ? NS.nodes : servers, NS.nodes != null ? UI.plural(NS.nodes, 'нода', 'ноды', 'нод') : UI.plural(servers, 'сервер', 'сервера', 'серверов')),
