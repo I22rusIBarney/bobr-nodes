@@ -1447,6 +1447,10 @@ async def main():
     n0 = len(sess.sent)
     await pilot.check_load()
     ok(any('нагрузка спала' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'нагрузка спала — сообщение')
+    hn = next(x for x in L['nodes'] if x['load'].get('hot') == ['cpu'])
+    st, nd = await wapi(f'profiles/{pid}/nodes/{hn["uuid"]}')
+    ok(st == 200 and len(nd['load'].get('hist') or []) >= 4 and nd['load_on'] and 'hist' not in hn['load']
+       and nd['load']['hist'][-1].get('cpu') is not None, f'история нагрузки ноды для графика: {nd.get("load", {}).get("hist", [])[-1:]}')
 
     st, rent = await wapi(f'profiles/{pid}/rent')
     ok(st == 200 and rent['servers'] and all(x['expires_at'] and x['auto_renew'] is not None for x in rent['servers']),
@@ -1505,6 +1509,17 @@ async def main():
     ok((await wapi('state'))[1]['host']['level'] == hv['level'] and (await wapi('state', headers=HV))[1]['host'] is None
        and (await wapi('host', headers=HV))[0] == 403, 'нагрузка сервера — только администратору')
     ok('Сервер бота' in await pilot.summary(1) and 'Сервер бота' not in await pilot.summary(77), 'строка о сервере бота — в сводке администратора')
+
+    # удалить ноду из панели: нода, её хосты и DNS; со входами через Россию — отказ
+    st, L = await wapi(f'profiles/{pid}/nodes')
+    relayed = {x['node_uuid'] for x in store.relays() if x['pid'] == pid}
+    dv = next((x for x in L['nodes'] if x['uuid'] not in relayed and not x['busy']), None)
+    if relayed:
+        ok((await wapi(f'profiles/{pid}/nodes/{next(iter(relayed))}', 'DELETE'))[0] == 400, 'ноду со входом через Россию не удаляем')
+    st, js = await wapi(f'profiles/{pid}/nodes/{dv["uuid"]}', 'DELETE')
+    ok(st == 200 and js['ok'] and ('nodes', dv['uuid']) in world.deleted and all(n['uuid'] != dv['uuid'] for n in world.nodes),
+       f'нода убрана из панели: {js.get("message")}')
+    ok((await wapi(f'profiles/{pid}/nodes/{dv["uuid"]}', 'DELETE'))[0] == 404, 'второй раз — нода не найдена')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')

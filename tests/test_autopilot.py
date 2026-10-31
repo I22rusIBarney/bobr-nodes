@@ -49,3 +49,12 @@ def test_rent_risks():
     assert set(risks) == {1, 2, 3} and 'выключено' in risks[3] and 'нужно 600' in risks[1]
     r['balance_kop'] = 100000
     assert {x['id'] for x in ap.Autopilot.rent_risks(r)} == {3}
+
+
+def test_load_hist_keeps_a_day():
+    old = [{'t': 10, 'cpu': 1}, {'t': 90_000, 'cpu': 2}]
+    h = ap.load_hist(old, {'cpu': 50, 'mem': 40, 'rx': 1.5, 'tx': 0.5, 'disk': 30}, 100_000.0)
+    assert [x['t'] for x in h] == [90_000, 100_000]
+    assert h[-1] == {'t': 100_000, 'cpu': 50, 'mem': 40, 'rx': 1.5, 'tx': 0.5}
+    assert len(ap.load_hist([{'t': 99_000 + i} for i in range(300)], {}, 100_000.0)) == 200
+    assert ap.load_hist(None, {'cpu': 1}, 5.0) == [{'t': 5, 'cpu': 1, 'mem': None, 'rx': None, 'tx': None}]

@@ -131,6 +131,16 @@ def parse_load(out: str, prev: dict | None, now: float) -> dict:
     return res
 
 
+HIST_KEEP = 24 * 3600
+
+
+def load_hist(prev: list | None, s: dict, now: float) -> list[dict]:
+    """История замеров ноды за сутки для графика: процессор, память, трафик."""
+    pts = [x for x in (prev or []) if isinstance(x, dict) and x.get('t', 0) > now - HIST_KEEP]
+    pts.append({'t': int(now), **{k: s.get(k) for k in ('cpu', 'mem', 'rx', 'tx')}})
+    return pts[-200:]
+
+
 def hot(sample: dict) -> list[str]:
     """Что упирается: ['cpu', 'mem', 'disk']."""
     return [k for k, lim in HIGH.items() if (sample.get(k) or 0) >= lim]
@@ -330,6 +340,7 @@ class Autopilot:
         s['high'] = (int(prev.get('high') or 0) + 1) if h else 0
         s['alerted'] = prev.get('alerted') or 0
         s['name'], s['country'] = n['name'], n.get('countryCode') or ''
+        s['hist'] = load_hist(prev.get('hist'), s, now)
         if h and s['high'] >= HIGH_CYCLES and now - s['alerted'] >= REALERT:
             s['alerted'] = now
             why = ' и '.join(ADVICE[k] for k in h)
@@ -342,9 +353,14 @@ class Autopilot:
             await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.')
         self.put(key, s)
 
-    def load_of(self, pid: int, uuid: str) -> dict:
+    def load_of(self, pid: int, uuid: str, hist: bool = False) -> dict:
         s = self.get(f'ap:load:{pid}:{uuid}')
-        return {k: s.get(k) for k in ('cpu', 'mem', 'disk', 'rx', 'tx', 'at', 'cores')} | {'hot': hot(s), 'error': s.get('error')} if s else {}
+        if not s:
+            return {}
+        out = {k: s.get(k) for k in ('cpu', 'mem', 'disk', 'rx', 'tx', 'at', 'cores')} | {'hot': hot(s), 'error': s.get('error')}
+        if hist:
+            out['hist'] = s.get('hist') or []
+        return out
 
     # ───────── аренда ─────────
     async def rent(self, prof: dict) -> dict:

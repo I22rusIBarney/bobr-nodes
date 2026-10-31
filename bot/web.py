@@ -702,7 +702,36 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1],
                   'relays': [relay_view(x) for x in store.relays() if x['pid'] == p['id'] and x['node_uuid'] == uuid],
                   'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
-                  'relay_port': rl.target_port_of(hosts)})
+                  'relay_port': rl.target_port_of(hosts),
+                  'load': autopilot.load_of(p['id'], uuid, hist=True) if autopilot else {},
+                  'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),
+                  'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id'])})
+
+    def load_watched(p: dict) -> bool:
+        from . import autopilot as ap
+        return ap.auto_cfg(p)['load']
+
+    @r.delete('/api/profiles/{pid}/nodes/{uuid}')
+    async def panel_node_delete(request):
+        """Убрать ноду из панели: саму ноду, её хосты и A-запись домена. Сервер в Bobr Cloud не трогаем."""
+        p = profile_or_404(request.match_info['pid'], request)
+        uuid = request.match_info['uuid']
+        if any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']):
+            raise ApiError('По ноде идёт задача — дождитесь её окончания')
+        if any(x['pid'] == p['id'] and x['node_uuid'] == uuid for x in store.relays()):
+            raise ApiError('У ноды есть входы через Россию — сначала уберите их, чтобы бот снял проброс с российского сервера')
+        lines: list[str] = []
+
+        def run():
+            _pl, n, _hosts, ip, dom = node_ctx(p, uuid)
+            return n, engine.remove_node(p, ip or n['address'], dom, lines.append)
+        try:
+            n, removed = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        logging.getLogger(__name__).info('node %s removed from panel of profile %s by %s: %s', uuid, p['id'], uid_of(request), removed)
+        return J({'ok': True, 'removed': removed, 'log': lines,
+                  'message': f'Нода «{n["name"]}» убрана: хостов {removed["hosts"]}, DNS-записей {removed["dns"]}'})
 
     # ── вход через Россию: проброс со своего сервера в России на эту ноду ──
     relay_locks: dict[str, asyncio.Lock] = {}
@@ -1107,6 +1136,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         p = profile_or_404(b.get('pid', 0), request)
         squads = [x for x in (b.get('squads') or []) if isinstance(x, str)]
         mode = 'update' if b.get('template_mode') == 'update' else 'copy'
+        if any(x['pid'] == p['id'] and x['node_uuid'] == uuid for x in store.relays()):
+            raise ApiError('У ноды есть входы через Россию — сначала уберите их, чтобы бот снял проброс с российского сервера')
         lines: list[str] = []
 
         def run():

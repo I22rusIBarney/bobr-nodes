@@ -4,7 +4,7 @@
   const at = v => { try { return !!tg && tg.isVersionAtLeast(v); } catch (e) { return false; } };
 
   // ── Тема: графитовая дизайн-система Bobr Nodes; Telegram красим в цвет фона ──
-  const BG = '#141619';
+  const BG = '#0D1016';
   function applyTheme() {
     const root = document.documentElement;
     root.dataset.scheme = 'dark';
@@ -114,20 +114,21 @@
     },
     /* Строка списка. status: [текст, 'ok'|'bad'|'warn'|'run', подпись] — точка и слово справа (без текста — одна точка); mono — detail машинным шрифтом;
        copy — значение, которое копируется кнопкой справа (IP, пароль, ключ). Иконки без цветных подложек. */
-    row({ title, sub, detail, icon, flag, onClick, chevron, cls, right, label, status, mono, copy, copyLabel }) {
+    row({ title, sub, detail, icon, color, flag, lead: lead0, onClick, chevron, cls, right, label, status, mono, copy, copyLabel, tags }) {
       const tap = !!onClick;
-      const lead = icon ? UI.h('span', { class: 'icon-tile' }, UI.icon(icon))
+      const lead = lead0 ? lead0 : icon ? UI.tile(icon, color)
         : flag ? UI.h('span', { class: 'flag-tile', 'aria-hidden': 'true' }, flag) : null;
       // status без текста — только точка (успешно, на связи); третий элемент — подпись для экранного диктора
       let dot = null;
       if (status && !status[0]) dot = UI.h('span', { class: 'st dot ' + (status[1] || ''), role: 'img', 'aria-label': status[2] || '', title: status[2] || '' });
-      else if (status) right = UI.h('span', { class: 'st ' + (status[1] || '') }, status[0]);
+      else if (status) right = UI.h('span', { class: 'st ' + (status[1] || '') + (status[3] ? ' ' + status[3] : ''), 'aria-label': status[2] || null }, status[0]);
       if (copy) right = UI.h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Скопировать ' + (copyLabel || title),
         onclick: e => { e.stopPropagation(); UI.copy(copy, copyLabel || title); } }, UI.icon('copy'));
       const n = UI.h(tap ? 'button' : 'div', {
         class: 'row' + (tap ? ' tap' : '') + (lead ? ' has-icon' : '') + (cls ? ' ' + cls : ''), onclick: onClick, type: tap ? 'button' : undefined, 'aria-label': label,
       }, lead,
-        UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), sub ? UI.h('div', { class: 's' }, sub) : null),
+        UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), sub ? UI.h('div', { class: 's' }, sub) : null,
+          tags && tags.length ? UI.h('div', { class: 'tags' }, tags.map(t => UI.h('span', { class: 'tag ' + (t[1] || '') }, t[0]))) : null),
         dot,
         detail !== undefined && detail !== null ? UI.h('span', { class: 'd' + (mono ? ' mono' : ' num') }, detail) : null,
         right || null,
@@ -184,6 +185,56 @@
     failed(message, retry, what) {
       return UI.h('div', { class: 'failed', role: 'alert' }, UI.h('p', {}, UI.h('b', {}, what || 'Не удалось загрузить'), message),
         retry ? UI.h('button', { class: 'btn secondary', type: 'button', onclick: retry }, 'Повторить') : null);
+    },
+
+    /* Цветная плитка раздела: иконка на мягкой подложке своего цвета (blue, violet, teal, amber, green, pink, gray). */
+    tile(name, color, cls) {
+      return UI.h('span', { class: 'icon-tile' + (cls ? ' ' + cls : ''), 'data-c': color || null, style: color ? `--c:var(--ic-${color})` : null, 'aria-hidden': 'true' }, UI.icon(name));
+    },
+    /* Стопка отдельных карточек — для групп, нод, пользователей. */
+    stack(rows) { return UI.h('div', { class: 'stack' }, rows); },
+    /* Фильтры со счётчиками: options [{value, label, n, tone}] */
+    fchips(options, value, onChange) {
+      const wrap = UI.h('div', { class: 'fchips', role: 'group' });
+      options.forEach(o => wrap.append(UI.h('button', { type: 'button', 'aria-pressed': String(o.value === value),
+        onclick: () => { if (o.value === value) return; UI.haptic('select'); onChange(o.value); } },
+        o.label, o.n != null ? UI.h('span', { class: 'c' + (o.tone ? ' ' + o.tone : '') }, String(o.n)) : null)));
+      requestAnimationFrame(() => UI.scrollHint(wrap));
+      return wrap;
+    },
+    /* Поиск: значение живёт снаружи (get/set), перерисовка списка — onInput. */
+    search(value, placeholder, onInput) {
+      const i = UI.h('input', { type: 'search', placeholder, 'aria-label': placeholder, autocomplete: 'off', autocapitalize: 'off', spellcheck: false, enterkeyhint: 'search' });
+      i.value = value || '';
+      const x = UI.h('button', { class: 'x', type: 'button', 'aria-label': 'Очистить', hidden: !i.value }, UI.icon('close'));
+      i.addEventListener('input', () => { x.hidden = !i.value; onInput(i.value); });
+      x.onclick = () => { i.value = ''; x.hidden = true; onInput(''); i.focus(); };
+      return UI.h('label', { class: 'search' }, UI.icon('search'), i, x);
+    },
+    /* График за период: series [{color, pts:[[t, v]]}], max — верх шкалы. Первая серия — с заливкой. */
+    chart(series, { t0, t1, max = 100, limit } = {}) {
+      const NS = 'http://www.w3.org/2000/svg', W = 300, H = 96;
+      const el = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+      const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+      const span = Math.max(1, t1 - t0);
+      const X = t => (W * (t - t0) / span), Y = v => H - 4 - (H - 8) * Math.max(0, Math.min(max, v)) / max;
+      [0.25, 0.5, 0.75].forEach(f => svg.append(el('line', { x1: 0, x2: W, y1: (H * f).toFixed(1), y2: (H * f).toFixed(1), stroke: 'rgba(255,255,255,.05)', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' })));
+      if (limit != null) svg.append(el('line', { x1: 0, x2: W, y1: Y(limit).toFixed(1), y2: Y(limit).toFixed(1), stroke: 'rgba(240,93,94,.45)', 'stroke-dasharray': '3 4', 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke' }));
+      series.forEach((s, k) => {
+        const pts = s.pts.filter(p => p[1] != null && p[0] >= t0).map(p => [X(p[0]), Y(p[1])]);
+        if (pts.length < 2) return;
+        // сглаживание: кривая через середины отрезков
+        let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+        for (let i = 1; i < pts.length; i++) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i], mx = (x0 + x1) / 2; d += ` C${mx.toFixed(1)},${y0.toFixed(1)} ${mx.toFixed(1)},${y1.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`; }
+        if (k === 0) {
+          const id = 'g' + Math.random().toString(36).slice(2, 8), grad = el('linearGradient', { id, x1: 0, y1: 0, x2: 0, y2: 1 });
+          grad.append(el('stop', { offset: '0', 'stop-color': s.color, 'stop-opacity': '.32' }), el('stop', { offset: '1', 'stop-color': s.color, 'stop-opacity': '0' }));
+          const defs = el('defs', {}); defs.append(grad); svg.append(defs);
+          svg.append(el('path', { d: d + ` L${pts[pts.length - 1][0].toFixed(1)},${H} L${pts[0][0].toFixed(1)},${H} Z`, fill: `url(#${id})` }));
+        }
+        svg.append(el('path', { d, fill: 'none', stroke: s.color, 'stroke-width': k === 0 ? 2 : 1.6, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'vector-effect': 'non-scaling-stroke', opacity: k === 0 ? 1 : .9 }));
+      });
+      return UI.h('div', { class: 'chart' }, svg);
     },
 
     /* Аватар: фото из Telegram, иначе инициалы на цветном круге. src — функция, возвращающая Promise<url|null>. */
@@ -314,10 +365,32 @@
     },
 
     // ── навигация со стеком и системной кнопкой «Назад» ──
+    /* Разделы внизу (tabs: [{key, label, icon, root}]) — у каждого свой стек экранов; повторное нажатие раздела — к его началу. */
     nav: {
-      stack: [], root: null, _sheetClose: null, _onRoot: null,
-      mount(rootEl, renderRoot) { this.root = rootEl; this._onRoot = renderRoot; this.stack = []; this.render(false);
-        try { if (tg && at('6.1')) tg.BackButton.onClick(() => this.back()); } catch (e) {} },
+      stack: [], root: null, _sheetClose: null, _onRoot: null, tabs: null, tab: null, stacks: {}, bar: null, _scroll: {},
+      mount(rootEl, renderRoot, tabs) {
+        this.root = rootEl; this.stack = [];
+        if (tabs && tabs.length) {
+          this.tabs = tabs; this.tab = tabs[0].key; this._onRoot = tabs[0].root;
+          this.bar = UI.h('nav', { class: 'tabbar', 'aria-label': 'Разделы' }, tabs.map(t => UI.h('button', { type: 'button', 'data-k': t.key, onclick: () => this.setTab(t.key) },
+            UI.h('span', { class: 'tb-ic' }, UI.icon(t.icon)), t.label)));
+          document.body.append(this.bar);
+        } else this._onRoot = renderRoot;
+        this.render(false);
+        try { if (tg && at('6.1')) tg.BackButton.onClick(() => this.back()); } catch (e) {}
+      },
+      setTab(key) {
+        if (!this.tabs) return;
+        if (this._sheetClose) this._sheetClose();
+        if (key === this.tab) { if (this.stack.length) { this.stack = []; this.render(true); } else window.scrollTo({ top: 0, behavior: 'smooth' }); return; }
+        this.stacks[this.tab] = this.stack; this._scroll[this.tab] = window.scrollY;
+        this.tab = key; this.stack = this.stacks[key] || [];
+        this._onRoot = this.tabs.find(t => t.key === key).root;
+        UI.haptic('select');
+        this.render('tab');
+        window.scrollTo(0, this._scroll[key] || 0);
+      },
+      pip(key, on, cls) { const b = this.bar && this.bar.querySelector(`[data-k="${key}"]`); if (!b) return; let p = b.querySelector('.pip'); if (on && !p) b.append(p = UI.h('span', { class: 'pip' })); if (!on && p) p.remove(); if (p) p.className = 'pip' + (cls ? ' ' + cls : ''); },
       push(render) { this.stack.push(render); this.render(false); window.scrollTo(0, 0); UI.haptic('light'); },
       back() { if (this._sheetClose) return this._sheetClose(); if (!this.stack.length) return; this.stack.pop(); this.render(true); },
       reset() { this.stack = []; this.render(false); },
@@ -325,11 +398,12 @@
       render(isPop) {
         const fn = this.stack.length ? this.stack[this.stack.length - 1] : this._onRoot;
         const node = fn();
-        const v = UI.h('div', { class: isPop === null ? '' : 'view' + (isPop ? ' pop' : '') }, node);
+        const v = UI.h('div', { class: isPop === null ? '' : 'view' + (isPop === 'tab' ? ' tab' : isPop ? ' pop' : '') }, node);
         this.root.replaceChildren(v);
         document.body.classList.toggle('has-composer', !!v.querySelector('.composer'));
+        if (this.bar) this.bar.querySelectorAll('button').forEach(b => b.setAttribute('aria-current', b.dataset.k === this.tab ? 'page' : 'false'));
         this.syncBack();
-        document.dispatchEvent(new CustomEvent('navchange', { detail: { depth: this.stack.length } }));
+        document.dispatchEvent(new CustomEvent('navchange', { detail: { depth: this.stack.length, tab: this.tab } }));
       },
       syncBack() { try { if (tg && at('6.1')) (this.stack.length || this._sheetClose) ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) {} },
       backLink(text) { // для браузера вне Telegram, где нет системной кнопки
@@ -395,6 +469,31 @@
     up: S('<path d="M12 19V5M6 11l6-6 6 6"/>'),
     down: S('<path d="M12 5v14M6 13l6 6 6-6"/>'),
     close: S('<path d="M6 6l12 12M18 6 6 18"/>'),
+    menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+    arrowLeft: S('<path d="M19 12H5M11 6l-6 6 6 6"/>'),
+    home: S('<path d="M4 10.5 12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/>'),
+    servers: S('<rect x="3.5" y="4" width="17" height="6.5" rx="2"/><rect x="3.5" y="13.5" width="17" height="6.5" rx="2"/><path d="M7.5 7.25h.01M7.5 16.75h.01M11 7.25h5M11 16.75h5"/>'),
+    tools: S('<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L4 16.8V20h3.2l5.3-5.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>'),
+    sliders: S('<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'),
+    more: S('<circle cx="5.5" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="18.5" cy="12" r="1.2" fill="currentColor"/>'),
+    moreV: S('<circle cx="12" cy="5.5" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/><circle cx="12" cy="18.5" r="1.2" fill="currentColor"/>'),
+    activity: S('<path d="M3 12h4l3-8 4 16 3-8h4"/>'),
+    sun: S('<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4"/>'),
+    code: S('<path d="m9 8-4 4 4 4M15 8l4 4-4 4"/>'),
+    palette: S('<path d="M12 3a9 9 0 1 0 0 18c1.1 0 1.7-.8 1.7-1.7 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.2 0-.9.8-1.7 1.7-1.7H16a5 5 0 0 0 5-5c0-4-4-7.2-9-7.2z"/><circle cx="7.5" cy="11" r="1" fill="currentColor"/><circle cx="10.5" cy="7.5" r="1" fill="currentColor"/><circle cx="15" cy="7.5" r="1" fill="currentColor"/>'),
+    userPlus: S('<circle cx="10" cy="8" r="3.5"/><path d="M3.5 20a6.5 6.5 0 0 1 13 0M19 8v6M16 11h6"/>'),
+    cloud: S('<path d="M7 18.5h10.5a4 4 0 0 0 .6-7.95A6 6 0 0 0 6.6 9.1 4.75 4.75 0 0 0 7 18.5z"/>'),
+    upload: S('<path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/>'),
+    swap: S('<path d="M7 4 3 8l4 4M3 8h13M17 12l4 4-4 4M21 16H8"/>'),
+    list: S('<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>'),
+    play: S('<path d="M7 5v14l11-7z" fill="currentColor" stroke="none"/>'),
+    paste: S('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4h6v3H9zM9 12h6M9 16h4"/>'),
+    zap: S('<path d="M13 3 5 13.5h6L10 21l8-10.5h-6z"/>'),
+    layers: S('<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>'),
+    route: S('<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H16a3 3 0 0 0 0-6H8a3 3 0 0 1 0-6h7.5"/>'),
+    chart: S('<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>'),
+    calendar: S('<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
+    flag: S('<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>'),
   };
 
   window.UI = UI;
