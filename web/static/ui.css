@@ -49,7 +49,7 @@
   /* отступы: шкала 4 */
   --gutter: 16px;
   --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px;
-  --tabbar: 64px;
+  --tabbar: 52px;
 
   /* движение: только в ответ на действие */
   --t-fast: 120ms; --t: 180ms; --t-slow: 240ms;
@@ -76,7 +76,7 @@ body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 400 15px/20px var(--font); letter-spacing: -0.005em;
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-feature-settings: "ss01", "cv11";
-  padding-top: var(--sat); padding-bottom: calc(var(--tabbar) + 24px + var(--sab));
+  padding-top: var(--sat); padding-bottom: calc(var(--tabbar) + 36px + var(--sab));
 }
 button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
 a { color: var(--accent-text); text-decoration: none; }
@@ -350,14 +350,20 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .qa button .pip { position: absolute; top: 10px; right: 10px; min-width: 18px; height: 18px; border-radius: 9px; padding: 0 5px; font-size: 11px; font-weight: 600; display: grid; place-items: center; background: var(--danger); color: #fff; }
 
 /* ── Нижняя панель разделов ── */
-.tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; justify-content: space-around; align-items: stretch;
-  height: calc(var(--tabbar) + var(--sab)); padding: 0 8px var(--sab); background: #0F1219; border-top: 1px solid var(--line); }
-.tabbar button { flex: 1; max-width: 120px; border: 0; background: none; color: var(--hint-2); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 11px; font-weight: 500; position: relative; }
-.tabbar button svg { width: 24px; height: 24px; }
-.tabbar button[aria-current="page"] { color: var(--accent-text); }
-.tabbar button[aria-current="page"] .tb-ic { background: var(--accent-soft); }
-.tabbar .tb-ic { width: 52px; height: 30px; border-radius: 15px; display: grid; place-items: center; transition: background var(--t) var(--ease); }
-.tabbar .pip { position: absolute; top: 9px; left: calc(50% + 10px); width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 2px var(--bg); }
+/* плавающая капсула: у раздела, где вы сейчас, — подпись; у остальных — только знак */
+.tabbar { position: fixed; left: 50%; bottom: calc(10px + var(--sab)); transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 2px;
+  padding: 5px; border-radius: 26px; background: rgba(22, 26, 35, .94); box-shadow: 0 10px 30px rgba(0, 0, 0, .5), inset 0 0 0 1px var(--line-strong); max-width: calc(100% - 32px); }
+.tabbar button { height: 42px; min-width: 52px; padding: 0 14px; border: 0; border-radius: 21px; background: none; color: var(--hint); display: flex; align-items: center; justify-content: center; gap: 7px;
+  font-size: 14px; font-weight: 600; position: relative; white-space: nowrap; transition: background var(--t) var(--ease), color var(--t) var(--ease); }
+.tabbar button::after { content: ""; position: absolute; inset: -3px -1px; }
+.tabbar button svg { width: 22px; height: 22px; }
+.tabbar .tb-ic { display: grid; place-items: center; }
+.tabbar .tl { display: none; }
+.tabbar button[aria-current="page"] { background: var(--accent); color: #fff; padding: 0 16px 0 13px; }
+.tabbar button[aria-current="page"] .tl { display: inline; }
+.tabbar button:active { background: var(--fill); }
+.tabbar button[aria-current="page"]:active { background: var(--accent-press); }
+.tabbar .pip { position: absolute; top: 7px; right: 11px; width: 8px; height: 8px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 2px rgb(22, 26, 35); }
 body.has-composer .tabbar { display: none; }
 
 /* ── Графики ── */
@@ -472,13 +478,15 @@ body.has-composer .tabbar { display: none; }
 @media (min-width: 960px) {
   body { padding-bottom: 40px; padding-left: 232px; }
   body > #root { max-width: 640px; }
-  .tabbar { top: 0; right: auto; width: 232px; height: auto; flex-direction: column; justify-content: flex-start; gap: 4px; padding: 20px 12px; border-top: 0; border-right: 1px solid var(--line); background: #0F1219; }
+  .tabbar { top: 0; bottom: 0; left: 0; transform: none; max-width: none; border-radius: 0; box-shadow: none; align-items: stretch; width: 232px; height: auto; flex-direction: column; justify-content: flex-start; gap: 4px; padding: 20px 12px; border-right: 1px solid var(--line); background: #0F1219; }
+  .tabbar .tl { display: inline; }
+  .tabbar button[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); padding: 0 6px; }
   .tabbar::before { content: "BobrNet"; display: block; font-weight: 700; font-size: 18px; letter-spacing: -0.025em; padding: 6px 12px 22px 52px; color: var(--text); background: url(logo.png) 12px 0 / 30px 30px no-repeat; line-height: 30px; }
-  .tabbar button { flex: none; max-width: none; flex-direction: row; justify-content: flex-start; gap: 10px; font-size: 14px; height: 44px; padding: 0 6px; border-radius: 10px; }
+  .tabbar button { flex: none; justify-content: flex-start; gap: 10px; font-size: 14px; font-weight: 500; height: 44px; padding: 0 6px; border-radius: 10px; }
   .tabbar button[aria-current="page"] { background: var(--accent-soft); }
   .tabbar button[aria-current="page"] .tb-ic { background: none; }
   .tabbar .tb-ic { width: 32px; height: 32px; }
-  .tabbar .pip { top: 10px; left: 28px; }
+  .tabbar .pip { top: 10px; left: 28px; right: auto; }
 }
 
 /* ── Переписка (разбор скрипта с Gemini) ── */

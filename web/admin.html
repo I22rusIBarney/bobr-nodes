@@ -87,10 +87,40 @@ const isAdmin = () => !!ST && ST.role === 'admin';
 const groupWho = p => p.kind === 'user' ? 'пользователя ' + (p.created_by_label || '') : p.kind === 'shared' ? 'от администратора' : '';
 
 async function load() {
-  try { ST = await api('state'); } catch (e) { ST = { error: e.message, status: e.status }; }
+  const had = ST;
+  try { ST = await api('state'); saveCache(); }
+  catch (e) {
+    // нет связи, а есть сохранённое — показываем его и говорим об этом, а не пустой экран
+    if (had && !had.error && had._stale) { ST = had; UI.toast('Бот не ответил — показаны сохранённые данные', true); }
+    else ST = { error: e.message, status: e.status };
+  }
   if (ST.theme) applyTheme(ST.theme);
   UI.nav.refresh();
 }
+// ───────── последнее известное состояние: сразу при открытии, потом — свежее ─────────
+const CACHE_KEY = 'bn:cache:' + (((UI.tg && UI.tg.initDataUnsafe && UI.tg.initDataUnsafe.user) || {}).id || 'web');
+let cacheTimer = 0;
+function saveCache() {
+  clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(() => {
+    if (!ST || ST.error) return;
+    const nodes = {};
+    for (const k in NODES) { const L = NODES[k]; if (L && !L.error && L.nodes) nodes[k] = { nodes: L.nodes, versions: L.versions, bot_key: L.bot_key }; }
+    const wal = WAL && !WAL.error && WAL.balance_kop != null ? { ...WAL, _stale: undefined } : null;
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ v: 1, at: Date.now(), st: { ...ST, _stale: undefined }, nodes, wal })); } catch (e) {}
+  }, 400);
+}
+function restoreCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+    if (!c || c.v !== 1 || Date.now() - c.at > 7 * 86400e3 || !c.st) return;
+    ST = { ...c.st, _stale: true };
+    for (const k in c.nodes || {}) NODES[k] = { ...c.nodes[k], _stale: true };
+    if (c.wal) WAL = { ...c.wal, _stale: true };
+    if (ST.theme) applyTheme(ST.theme);
+  } catch (e) {}
+}
+const needsLoad = L => L === undefined || (!!L && !!L._stale && !L._loading);
 // оформление: фон и эффект перезапускаются, только если что-то поменялось
 let themeKey = '';
 function applyGlass(g) {
@@ -188,9 +218,9 @@ function home() {
     h('h2', {}, name ? `Привет, ${name}!` : 'BobrNet'), h('span', { class: 'st ' + state[1], role: 'status' }, state[0])));
   const servers = ST.profiles.reduce((a, p) => a + (p.servers || 0), 0);
   v.append(h('div', { class: 'stats' },
-    statTile(NS.nodes != null ? NS.nodes : servers, NS.nodes != null ? UI.plural(NS.nodes, 'нода', 'ноды', 'нод') : UI.plural(servers, 'сервер', 'сервера', 'серверов')),
-    statTile(ST.profiles.length, UI.plural(ST.profiles.length, 'группа', 'группы', 'групп')),
-    statTile(NS.online != null ? NS.online : '—', 'онлайн')));
+    statTile(NS.nodes != null ? NS.nodes : servers, NS.nodes != null ? UI.plural(NS.nodes, 'нода', 'ноды', 'нод') : UI.plural(servers, 'сервер', 'сервера', 'серверов'), null, 'nodes'),
+    statTile(ST.profiles.length, UI.plural(ST.profiles.length, 'группа', 'группы', 'групп'), null, 'groups'),
+    statTile(NS.online != null ? NS.online : '—', 'онлайн', null, 'online')));
   if (ST.issues.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'Чтобы начать: '), ST.issues.join(', ') + '.'));
   v.append(h('div', { class: 'cta' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => { D = null; UI.nav.push(() => deployView()); } }, icon('plusCircle'), 'Развернуть ноды')));
   // группы: первые три, остальные — во вкладке «Серверы»
@@ -219,16 +249,19 @@ function home() {
 }
 // ───────── кошелёк: баланс Bobr Cloud и пополнение ─────────
 let WAL = null, walAt = 0;
+let walLoading = false;
 function loadWallet(force) {
-  if (!force && WAL && !WAL.error && Date.now() - walAt < 60000) return;
-  if (WAL === undefined) return;  // уже грузится
-  const had = WAL; WAL = undefined;
-  api('wallet').then(r => { WAL = r; walAt = Date.now(); }).catch(e => { WAL = had && !had.error ? had : { error: e.message }; })
-    .then(() => { if (document.querySelector('#root .home-page, #root .wallet-page, #root .settings-page')) UI.nav.refresh(); });
+  if (!force && WAL && !WAL.error && !WAL._stale && Date.now() - walAt < 60000) return;
+  if (walLoading) return;
+  walLoading = true;
+  const had = WAL;
+  if (!had || had.error) WAL = undefined;  // сохранённый баланс остаётся на месте, пока не придёт свежий
+  api('wallet').then(r => { WAL = r; walAt = Date.now(); saveCache(); }).catch(e => { WAL = had && !had.error ? had : { error: e.message }; })
+    .then(() => { walLoading = false; if (document.querySelector('#root .home-page, #root .wallet-page, #root .settings-page')) UI.nav.refresh(); });
 }
 const walletText = () => WAL && !WAL.error && WAL.balance_kop != null ? rubK(WAL.balance_kop) : WAL && WAL.error ? '—' : '…';
 function walletChip() {
-  if (WAL === null) loadWallet();
+  if (WAL === null || (WAL && WAL._stale)) loadWallet();
   return h('button', { class: 'wallet-chip', type: 'button', 'aria-label': 'Баланс Bobr Cloud: ' + walletText() + '. Пополнить', onclick: () => UI.nav.push(walletView) },
     icon('wallet'), h('span', { class: 'num' }, walletText()));
 }
@@ -274,7 +307,16 @@ function walletView() {
   v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Платёж принимает Bobr Cloud — чек и история пополнений там же.')));
   return v;
 }
-const statTile = (n, label, tone) => h('div', { class: 'stat' }, h('b', { class: tone || null }, String(n)), h('span', {}, label));
+const STATP = {};  // прошлые значения плиток: новое число «доезжает» от старого, а не прыгает
+function statTile(n, label, tone, key) {
+  const b = h('b', { class: tone || null }, String(n));
+  if (key) {
+    const prev = STATP[key];
+    if (typeof n === 'number' && typeof prev === 'number' && prev !== n) UI.tween(b, prev, n, x => String(x), 600);
+    if (typeof n === 'number') STATP[key] = n;
+  }
+  return h('div', { class: 'stat' }, b, h('span', {}, label));
+}
 // колокольчик: задачи; точка — идёт установка (синяя) или есть ошибки (красная)
 function bellBtn() {
   const j = (ST && ST.jobs) || {};
@@ -297,10 +339,13 @@ function serviceRows() {
     row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })];
 }
 // ноды всех групп — в фоне, для сводки на главной и карточек групп
-function warmNodes() { (ST.profiles || []).forEach(p => { if (NODES[p.id] === undefined) loadNodes(p.id, true); }); }
+function warmNodes() { if (ST._stale) return; (ST.profiles || []).forEach(p => { if (needsLoad(NODES[p.id])) loadNodes(p.id, true); }); }
 function loadNodes(pid, quiet) {
-  NODES[pid] = null;
-  api('profiles/' + pid + '/nodes').then(r => { NODES[pid] = r; }).catch(e => { NODES[pid] = { error: e.message }; })
+  const had = NODES[pid];
+  if (had && !had.error && had.nodes) had._loading = true;  // старые данные видны, пока грузятся новые
+  else NODES[pid] = null;
+  api('profiles/' + pid + '/nodes').then(r => { NODES[pid] = r; saveCache(); })
+    .catch(e => { NODES[pid] = had && !had.error && had.nodes ? { ...had, _loading: false } : { error: e.message }; })
     // фоновая загрузка не перерисовывает экраны с полями ввода — только списки
     .then(() => { if (!quiet || document.querySelector('#root .home-page, #root .servers-page')) UI.nav.refresh(); });
 }
@@ -1017,7 +1062,7 @@ function groupView(pid) {
   if (jobs === undefined) { GJ[pid] = null; reload(); }
   else if (Array.isArray(jobs) && jobs.some(x => ACTIVE_ST.includes(x.status))) poll(() => { if (document.querySelector('#root .group-page')) reload(); }, 4000);
   const L = NODES[pid];
-  if (L === undefined) loadNodes(pid);
+  if (needsLoad(L)) loadNodes(pid);
   const st = PS[pid];
   if (st === undefined) { PS[pid] = null; api('profiles/' + pid + '/check', 'POST').then(r => { PS[pid] = r; }).catch(e => { PS[pid] = { ok: false, message: e.message }; }).then(() => { if (document.querySelector('#root .group-page')) UI.nav.refresh(); }); }
   const acct = !isAdmin() ? 'ваш баланс Bobr Cloud' : g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт Bobr Cloud';
@@ -1335,7 +1380,7 @@ const flagOf = cc => /^[A-Za-z]{2}$/.test(cc || '') && cc.toUpperCase() !== 'XX'
 function nodesView(pid) {
   const L = NODES[pid];
   const v = h('div', {}, ...pageHead('Обновление нод', { sub: (ST.profiles.find(p => p.id === pid) || {}).name }));
-  if (L === undefined) loadNodes(pid);
+  if (needsLoad(L)) loadNodes(pid);
   if (!L) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
   if (L.error) { v.append(UI.failed(L.error, () => { delete NODES[pid]; UI.nav.refresh(); }, 'Панель не ответила')); return v; }
   if (!L.nodes.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'В панели нет нод'))); return v; }
@@ -2440,6 +2485,7 @@ document.addEventListener('navchange', e => {
   // точка на разделах: ошибки в задачах — на «Инструментах», сервер бота не справляется — на «Настройках»
   if (ST && !ST.error) { UI.nav.pip('tools', ST.jobs.failed > 0); UI.nav.pip('settings', !!(ST.host && ST.host.level === 'bad') || ST.issues.length > 0); }
 });
+restoreCache();
 UI.nav.mount(document.getElementById('root'), home, [
   { key: 'home', label: 'Главная', icon: 'home', root: home }, { key: 'servers', label: 'Серверы', icon: 'servers', root: serversView },
   { key: 'tools', label: 'Инструменты', icon: 'tools', root: toolsView }, { key: 'settings', label: 'Настройки', icon: 'gear', root: settingsTab }]);

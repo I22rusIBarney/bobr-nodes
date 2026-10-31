@@ -382,8 +382,8 @@
         this.root = rootEl; this.stack = [];
         if (tabs && tabs.length) {
           this.tabs = tabs; this.tab = tabs[0].key; this._onRoot = tabs[0].root;
-          this.bar = UI.h('nav', { class: 'tabbar', 'aria-label': 'Разделы' }, tabs.map(t => UI.h('button', { type: 'button', 'data-k': t.key, onclick: () => this.setTab(t.key) },
-            UI.h('span', { class: 'tb-ic' }, UI.icon(t.icon)), t.label)));
+          this.bar = UI.h('nav', { class: 'tabbar', 'aria-label': 'Разделы' }, tabs.map(t => UI.h('button', { type: 'button', 'data-k': t.key, 'aria-label': t.label, onclick: () => this.setTab(t.key) },
+            UI.h('span', { class: 'tb-ic' }, UI.icon(t.icon)), UI.h('span', { class: 'tl' }, t.label))));
           document.body.append(this.bar);
         } else this._onRoot = renderRoot;
         this.render(false);
