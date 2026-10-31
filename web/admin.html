@@ -260,7 +260,8 @@ function monitorView() {
     'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп; API чекера наружу не открыт — бот читает его по SSH.'));
   const gRows = MON.groups.map(g => {
     const bad = g.nodes.filter(n => ['down', 'repairing', 'gave_up'].includes(n.status)).length;
-    return row({ title: g.name, sub: g.enabled ? `нод ${g.nodes.length}, ${MON.modes[g.mon_mode]}` : 'подписка не задана',
+    const nn = g.nodes.filter(n => n.kind !== 'host').length, hh = g.nodes.length - nn;
+    return row({ title: g.name, sub: g.enabled ? `нод ${nn}${hh ? ', хостов без нод ' + hh : ''}, ${MON.modes[g.mon_mode]}` : 'подписка не задана',
       status: !g.enabled ? null : bad ? ['проблем: ' + bad, 'bad'] : g.nodes.length ? ['', 'ok', 'всё доступно'] : null,
       onClick: () => { delete MONF[g.id]; UI.nav.push(() => monGroupView(g.id)); } });
   });
@@ -339,25 +340,34 @@ function monGroupView(pid) {
   const v = h('div', { class: 'mon-page' }, ...title(g.name, 'Мониторинг'));
   // ноды
   if (g.enabled) {
-    const rows = g.nodes.map(n => {
-      const r = row({ title: n.name || n.addr, cls: 'wrap',
-        sub: [n.addr !== n.name ? n.addr : '', (n.hosts || []).length ? 'хосты: ' + n.hosts.join(', ') : '',
-          n.data ? (n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит у ${n.data} из ${n.data}`) : 'нет в подписке для проверки',
-          n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
-          n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
-        status: n.status === 'ok' && n.fail ? ['частично', 'warn'] : (MST[n.status] || [n.status, '']),
-        onClick: ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok ? async () => {
-          const btns = [];
-          if (g.mon_steps.length) btns.push({ id: 'fix', text: 'Чинить по шагам' });
-          if (g.mon_steps.includes('replace')) btns.push({ id: 'replace', text: 'Сразу новая нода' });
-          if (n.status !== 'ignored') btns.push({ id: 'ignore', text: 'Не трогать' });
-          const a = await UI.ask({ title: n.name || n.addr, message: 'Нода недоступна из России. Что делаем?', buttons: btns });
-          if (a) { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } }
-        } : null });
-      return r;
-    });
-    v.append(group(['Ноды', h('span', { class: 'n' }, g.nodes.length || '')], rows.length ? rows : [row({ cls: 'wrap is-dim', title: 'Пока нет данных', sub: 'Появятся после опроса чекеров (до 5 минут).' })],
-      g.nodes.some(n => ['down', 'gave_up', 'ignored'].includes(n.status)) ? 'Нажмите на недоступную ноду, чтобы запустить починку.' : null));
+    const isHost = n => n.kind === 'host';
+    const verdict = n => !n.data ? 'нет в подписке для проверки'
+      : isHost(n) ? (n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит`) + (n.total > 1 ? ` · выходов ${n.up} из ${n.total}` : '')
+      : n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит у ${n.data} из ${n.data}`;
+    const mkRow = n => row({ title: h('span', {}, isHost(n) ? '' : flagOf(n.country) + ' ', n.name || n.addr), cls: 'wrap',
+      sub: [n.addr && n.addr !== n.name ? n.addr : '', (n.hosts || []).length ? 'хосты: ' + n.hosts.join(', ') : '',
+        (n.cdn_hosts || []).length ? 'через CDN: ' + n.cdn_hosts.join(', ') : '', verdict(n),
+        !isHost(n) && n.online_users != null ? 'онлайн ' + n.online_users : '',
+        n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
+        n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
+      status: n.status === 'ok' && n.fail ? ['частично', 'warn'] : (MST[n.status] || [n.status, '']),
+      onClick: ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok ? async () => {
+        const btns = [];
+        if (!isHost(n) && g.mon_steps.length) btns.push({ id: 'fix', text: 'Чинить по шагам' });
+        if (!isHost(n) && g.mon_steps.includes('replace')) btns.push({ id: 'replace', text: 'Сразу новая нода' });
+        if (n.status !== 'ignored') btns.push({ id: 'ignore', text: isHost(n) ? 'Не напоминать' : 'Не трогать' });
+        if (!btns.length) return;
+        const a = await UI.ask({ title: n.name || n.addr, message: isHost(n) ? 'Хост без ноды недоступен из России. Бот его не чинит — только сообщает.' : 'Нода недоступна из России. Что делаем?', buttons: btns });
+        if (a) { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } }
+      } : null });
+    const nodes = g.nodes.filter(n => !isHost(n)), hosts = g.nodes.filter(isHost);
+    const online = nodes.reduce((a, n) => a + (n.online_users || 0), 0);
+    v.append(group(['Ноды', h('span', { class: 'n' }, nodes.length ? `${nodes.length}${online ? ' · онлайн ' + online : ''}` : '')],
+      nodes.length ? nodes.map(mkRow) : [row({ cls: 'wrap is-dim', title: 'Пока нет данных', sub: 'Появятся после опроса чекеров (около минуты).' })],
+      'Хосты ноды — по «Нодам» хоста или его inbound в профиле ноды. Нода жива, если проходит хоть один прямой вход; если прямых в подписке нет — смотрим входы через CDN.'
+      + (nodes.some(n => ['down', 'gave_up', 'ignored'].includes(n.status)) ? ' Нажмите на недоступную ноду, чтобы запустить починку.' : '')));
+    if (hosts.length) v.append(group(['Хосты без нод', h('span', { class: 'n' }, hosts.length)], hosts.map(mkRow),
+      'Свой профиль и xray.json, сервер не в панели. Проверки — по названию хоста в подписке; «проходит», если прошёл хоть один его выход. Бот только сообщает, не чинит.'));
   }
   // настройки
   // правки живут, пока страница открыта: перерисовка страницы (опрос) их не сбрасывает

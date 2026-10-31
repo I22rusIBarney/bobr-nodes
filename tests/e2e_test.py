@@ -1124,9 +1124,10 @@ async def main():
         out = []
         for p_ in store.profiles():
             if p_.get('mon_sub') and f'#{CK.sub_name(p_["id"])}' in env:
-                for n in world.nodes:
-                    out.append({'subName': CK.sub_name(p_['id']), 'server': n['address'], 'port': 443, 'name': n['name'],
-                                'online': (n['address'], ip) not in blocked and n['address'] not in blocked, 'latencyMs': 80, 'lastCheck': 1})
+                for h in world.hosts:  # как в подписке: по выходу на хост, адрес и порт хоста
+                    a = h['address']
+                    out.append({'subName': CK.sub_name(p_['id']), 'server': a, 'port': h['port'], 'name': h['remark'],
+                                'online': (a, ip) not in blocked and a not in blocked, 'latencyMs': 80, 'lastCheck': 1})
         return out
     behaviour['checker'] = checker_results
     st, js = await wapi('checkers', 'POST', {'name': 'Москва', 'ip': 'не ip', 'password': 'x'})
