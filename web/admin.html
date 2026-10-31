@@ -132,9 +132,9 @@ function home() {
     admin ? row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }) : null,
     admin || ST.profiles.length > 1 ? row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }) : null,
     admin ? row({ title: 'Пользователи', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }) : null,
-    admin ? row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) }) : null].filter(Boolean)));
+    row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })].filter(Boolean)));
   if (!admin) {
-    v.append(h('div', { class: 'pad' }, h('div', { class: 'group-f' }, 'Серверы покупаются с вашего баланса в bcloud. Свою панель добавьте как новую группу — с вашим токеном Cloudflare. Чекеры в «Мониторинге» общие: ваш чекер проверяет ноды всех пользователей бота.')));
+    v.append(h('div', { class: 'pad' }, h('div', { class: 'group-f' }, 'Серверы покупаются с вашего баланса в Bobr Cloud. Свою панель добавьте как новую группу — с вашим токеном Cloudflare. Чекеры в «Мониторинге» общие: ваш чекер проверяет ноды всех пользователей бота.')));
     return v;
   }
   const sec = ST.security || {}, hd = sec.hardened;
@@ -152,7 +152,7 @@ function home() {
 // ───────── оформление ─────────
 function themeView() {
   const t = ST.theme;
-  const v = h('div', {}, ...title('Оформление'));
+  const v = h('div', {}, ...title('Оформление'), h('div', { class: 'subtitle' }, 'Только для вас: у других пользователей бота оформление своё.'));
   if (!window.FX) { v.append(h('div', { class: 'notice bad' }, 'Не загрузился модуль оформления. Обновите страницу.')); return v; }
   const save = async patch => {
     const r = await UI.run(() => api('theme', 'POST', patch));
@@ -227,7 +227,7 @@ function settingsForm(header, keys, footer, check, opts = {}) {
 }
 function bcloudView() {
   return h('div', {}, ...title('bcloud'), ...settingsForm('Подключение', ['bcloud_url', 'bcloud_token', 'bcloud_tg_id'],
-    h('span', {}, 'Токен и адрес покажет команда ', h('span', { class: 'mono' }, 'bcloud api-token'), ' на сервере bcloud. Покупки идут с баланса указанного аккаунта — он должен быть в ADMIN_IDS bcloud.'),
+    h('span', {}, 'Токен и адрес покажет команда ', h('span', { class: 'mono' }, 'bcloud api-token'), ' на сервере Bobr Cloud. Покупки идут с баланса указанного аккаунта — он должен быть в ADMIN_IDS Bobr Cloud.'),
     'check/bcloud', { fields: { bcloud_url: { ph: 'https://bobr-cloud.online' }, bcloud_tg_id: { inputmode: 'numeric' } } }));
 }
 function cfView() {
@@ -423,7 +423,7 @@ function monGroupView(pid) {
   };
   const pickCustom = async () => {
     const c = await UI.run(needCat); if (!c) return;
-    if (!c.configurator) return UI.alert('В bcloud нет конструктора — доступны только готовые тарифы.');
+    if (!c.configurator) return UI.alert('В Bobr Cloud нет конструктора — доступны только готовые тарифы.');
     const sp = defSpec(c.configurator);
     UI.sheet('Своя конфигурация', close => h('div', {}, group(null, [['cpu', 'vCPU'], ['ram', 'Память, ГБ'], ['disk', 'Диск, ГБ']].map(([k, t]) =>
       row({ title: t, chevron: false, right: rangeStepper(sp[k], c.configurator[k], x => { sp[k] = x; }) }))),
@@ -468,7 +468,7 @@ function monGroupView(pid) {
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новая нода'), h('div', { class: 'list' },
     h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Старый сервер после замены'), UI.chips(Object.entries(MON.old).map(([k, t]) => ({ value: k, label: t })), S.mon_old, x => { S.mon_old = x; })),
     h('label', { class: 'field' }, h('label', {}, 'Покупок за сутки, не больше'), textIn(S.mon_max_buys, '2', x => { S.mon_max_buys = x.replace(/\D/g, ''); }, true, 'right'))),
-    h('div', { class: 'group-f' }, `Имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в bcloud сервер не вернуть — остаток срока возвращается по правилам bcloud.`)));
+    h('div', { class: 'group-f' }, `Имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в Bobr Cloud сервер не вернуть — остаток срока возвращается по правилам Bobr Cloud.`)));
   v.append(h('div', { class: 'pad', style: 'margin-bottom:var(--s2)' }, status), h('div', { class: 'actions' }, save));
   return v;
 }
@@ -595,7 +595,7 @@ async function loadUsers() { try { USERS = await api('users'); } catch (e) { USE
 function usersView() {
   if (USERS === null) { loadUsers().then(() => UI.nav.refresh()); return h('div', {}, ...title('Пользователи'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); }
   const v = h('div', {}, ...title('Пользователи'),
-    h('div', { class: 'subtitle' }, 'Приглашённые видят только свои группы: созданные сами и те, где клиент bcloud — они (по Telegram ID или @username). Покупают со своего баланса bcloud, домены — своим токеном Cloudflare. Настроек бота, скриптов и оформления у них нет.'));
+    h('div', { class: 'subtitle' }, 'Приглашённые видят только свои группы: созданные сами и те, где клиент Bobr Cloud — они (по Telegram ID или @username). Покупают со своего баланса Bobr Cloud, домены — своим токеном Cloudflare. Настроек бота, скриптов и оформления у них нет.'));
   if (USERS.error) { v.append(h('div', { class: 'notice bad' }, USERS.error)); return v; }
   const reload = async () => { await loadUsers(); await load(); };
   v.append(group(['Пользователи', h('span', { class: 'n' }, USERS.users.length || '')], USERS.users.length ? USERS.users.map(u => row({ title: u.label, cls: 'wrap',
@@ -643,7 +643,7 @@ function userView(tg) {
   v.append(group('Группы', u.groups.length ? u.groups.map(g => row({ title: g.name, sub: g.mine ? 'создал сам' : 'вы завели для него',
     onClick: () => { if (ST.profiles.some(p => p.id === g.id)) UI.nav.push(() => groupView(g.id)); } }))
     : [row({ title: 'Групп нет', cls: 'is-dim', chevron: false })],
-    'Чтобы дать пользователю готовую группу, укажите в её настройках клиентом bcloud его Telegram ID или @username.'));
+    'Чтобы дать пользователю готовую группу, укажите в её настройках клиентом Bobr Cloud его Telegram ID или @username.'));
   v.append(group(null, [row({ title: 'Удалить пользователя', cls: 'destructive', onClick: async () => {
     const ok = await UI.ask({ title: 'Удалить пользователя?', message: 'Он потеряет доступ. Группы, которые он создал, и его чекеры останутся — их увидите вы. Вернуть доступ можно новым приглашением.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
     if (ok && await UI.run(() => api('users/' + tg, 'DELETE'), 'Удалён') !== undefined) { await loadUsers(); await load(); UI.nav.back(); }
@@ -662,13 +662,13 @@ function groupView(pid) {
   else if (Array.isArray(jobs) && jobs.some(j => ACTIVE_ST.includes(j.status)))
     poll(() => { if (document.querySelector('#root .group-page')) reload(); }, 4000);
   const v = h('div', { class: 'group-page' }, ...title(g.name),
-    h('div', { class: 'subtitle' }, g.panel_url.replace(/^https?:\/\//, '') + ', ' + (!isAdmin() ? 'ваш баланс bcloud' + (g.kind === 'shared' ? ', группу завёл администратор' : '')
-      : (g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт bcloud') + (g.kind === 'user' ? ', группа пользователя ' + g.created_by_label : ''))));
+    h('div', { class: 'subtitle' }, g.panel_url.replace(/^https?:\/\//, '') + ', ' + (!isAdmin() ? 'ваш баланс Bobr Cloud' + (g.kind === 'shared' ? ', группу завёл администратор' : '')
+      : (g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт Bobr Cloud') + (g.kind === 'user' ? ', группа пользователя ' + g.created_by_label : ''))));
   v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'),
     onclick: () => { D = null; UI.nav.push(() => deployView(pid)); } }, 'Развернуть в группе')));
   if (jobs === undefined) v.append(group('Серверы', [h('div', { class: 'skeleton' })]));
   else if (jobs.error) v.append(h('div', { class: 'notice bad' }, jobs.error));
-  else if (!jobs.length) v.append(group('Серверы', [row({ cls: 'wrap', title: 'Серверов пока нет', sub: 'Они появятся здесь после развёртывания — и у клиента в bcloud.' })]));
+  else if (!jobs.length) v.append(group('Серверы', [row({ cls: 'wrap', title: 'Серверов пока нет', sub: 'Они появятся здесь после развёртывания — и у клиента в Bobr Cloud.' })]));
   else v.append(group(['Серверы', h('span', { class: 'n' }, jobs.length)], jobs.map(jobRow)));
   const st = PS[pid];
   if (st === undefined) { PS[pid] = null; api('profiles/' + pid + '/check', 'POST').then(r => { PS[pid] = r; UI.nav.refresh(); }).catch(e => { PS[pid] = { ok: false, message: e.message }; UI.nav.refresh(); }); }
@@ -928,8 +928,8 @@ function nodeView(pid, uuid) {
     const out = [];
     if (n.bcloud) {
       const price = n.bcloud.price_kop != null ? rubK(n.bcloud.price_kop) : '';
-      out.push(act('Сменить IP через bcloud' + (price ? ', ' + price : ''), () => startReip('bcloud', {}, { title: 'Сменить IP?', message: `bcloud сменит IP сервера${price ? ' за ' + price : ''} с баланса владельца. Бот сам обновит DNS и панель.`, buttons: [{ id: 'y', text: 'Сменить' }] })),
-        act('IP уже сменили в bcloud — подтянуть', () => startReip('sync', {})));
+      out.push(act('Сменить IP через Bobr Cloud' + (price ? ', ' + price : ''), () => startReip('bcloud', {}, { title: 'Сменить IP?', message: `bcloud сменит IP сервера${price ? ' за ' + price : ''} с баланса владельца. Бот сам обновит DNS и панель.`, buttons: [{ id: 'y', text: 'Сменить' }] })),
+        act('IP уже сменили в Bobr Cloud — подтянуть', () => startReip('sync', {})));
     }
     if (!n.ip_new) n.ip_new = '';
     out.push(h('label', { class: 'field' }, h('label', {}, n.bcloud ? 'Или новый IP' : 'Новый IP'), textIn(n.ip_new, '203.0.113.10', x => { n.ip_new = x.trim(); }, true, 'right')),
@@ -946,7 +946,7 @@ function nodeView(pid, uuid) {
     n.domain ? row({ title: 'Домен', detail: mid(n.domain, 26), mono: true, copy: n.domain, copyLabel: 'Домен' }) : null,
     n.address !== n.domain && n.address !== n.ip ? row({ title: 'В панели', detail: mid(n.address, 26), mono: true }) : null,
     ...UI.fold({ title: 'Сменить IP', summary: 'если адрес попал в бан', key: 'n-reip', body: reipBody })].filter(Boolean),
-    'Бот поменяет A-записи в Cloudflare, проверит SSH на новом IP и обновит адрес в панели.' + (n.bcloud ? ' Сервер куплен через бота — новый IP он узнает в bcloud сам.' : '')));
+    'Бот поменяет A-записи в Cloudflare, проверит SSH на новом IP и обновит адрес в панели.' + (n.bcloud ? ' Сервер куплен через бота — новый IP он узнает в Bobr Cloud сам.' : '')));
 
   // дополнения
   const drows = extrasRows(n.E, n.features);
@@ -1064,8 +1064,8 @@ function profileView(p) {
   api('scripts').then(r => { scripts = r.scripts; drawScript(); }).catch(() => { scripts = []; drawScript(); });
   drawScript();
   const member = !isAdmin(), locked = p.locked || (member ? ['owner'] : []);
-  const ownerText = () => member ? 'Серверы покупаются с вашего баланса в bcloud и видны вам там.'
-    : p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в bcloud.' : 'Пусто — серверы покупаются с вашего аккаунта bcloud.';
+  const ownerText = () => member ? 'Серверы покупаются с вашего баланса в Bobr Cloud и видны вам там.'
+    : p.owner_label ? 'Серверы покупаются от имени ' + p.owner_label + ', с его баланса, и видны ему в Bobr Cloud.' : 'Пусто — серверы покупаются с вашего аккаунта Bobr Cloud.';
   const ownerNote = h('div', { class: 'group-f' }, ownerText());
   const cfNote = p.shared_cf ? 'Группу завёл администратор — домены нод создаются его токеном Cloudflare.'
     : member || p.kind === 'user' ? 'Токен Cloudflare, где лежат домены нод этой группы. Обязателен: у групп пользователей нет общего токена.'
@@ -1259,10 +1259,10 @@ function deployView(pid) {
         status: x.ready ? null : [x.why, x.used ? 'ok' : 'warn'],
         right: x.ready ? UI.toggle(on, v2 => { if (v2) D.ownSel.push(x.id); else D.ownSel.splice(D.ownSel.indexOf(x.id), 1); D.items = ownItems(); resetNames(); UI.nav.refresh(); }, x.name || x.ip) : null });
     });
-    if (!orows.length) orows.push(row({ cls: 'wrap', title: 'Серверов нет', sub: 'В bcloud у ' + D.ownBuyer + ' пока нет серверов' }));
+    if (!orows.length) orows.push(row({ cls: 'wrap', title: 'Серверов нет', sub: 'В Bobr Cloud у ' + D.ownBuyer + ' пока нет серверов' }));
     orows.push(act('Обновить список', async () => { D.own = null; loadOwn(); UI.nav.refresh(); }));
-    v.append(group('В bcloud · ' + D.ownBuyer, orows,
-      'Все серверы этого аккаунта, где бы они ни были куплены: IP и root-пароль бот берёт из bcloud. Нода ставится поверх системы — на сервере не должно быть своего сайта или Xray на портах 80 и 443.'));
+    v.append(group('В Bobr Cloud · ' + D.ownBuyer, orows,
+      'Все серверы этого аккаунта, где бы они ни были куплены: IP и root-пароль бот берёт из Bobr Cloud. Нода ставится поверх системы — на сервере не должно быть своего сайта или Xray на портах 80 и 443.'));
     if (!D.items.length) { v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s6)' }, 'Выберите серверы для нод.')); return v; }
   } else {
   // локации (можно несколько)

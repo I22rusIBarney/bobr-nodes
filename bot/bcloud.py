@@ -1,4 +1,4 @@
-"""Клиент служебного API bcloud (/api/svc). Покупка идёт с баланса указанного админа."""
+"""Клиент служебного API Bobr Cloud (/api/svc). Покупка идёт с баланса указанного админа."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ class BcloudError(Exception):
 
 
 class BcloudUnavailable(BcloudError):
-    """bcloud не ответил (перезапускается, сеть) — запрос можно повторить позже."""
+    """Bobr Cloud не ответил (перезапускается, сеть) — запрос можно повторить позже."""
 
 
 class Bcloud:
@@ -21,7 +21,7 @@ class Bcloud:
 
     def __init__(self, url: str, token: str, tg_id: int, timeout: float = 60):
         if not (url and token and tg_id):
-            raise BcloudError('bcloud не настроен: нужны адрес, токен и аккаунт для покупок (панель → Подключения → bcloud)')
+            raise BcloudError('Bobr Cloud не настроен: нужны адрес, токен и аккаунт для покупок (панель → Подключения → Bobr Cloud)')
         self.base = url.rstrip('/')
         if not self.base.endswith('/api/svc'):
             self.base += '/api/svc'
@@ -41,7 +41,7 @@ class Bcloud:
             except httpx.HTTPError as e:
                 safe = method == 'GET' or isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
                 if not safe or time.monotonic() + wait > end:
-                    raise BcloudUnavailable(f'bcloud недоступен: {e}') from e
+                    raise BcloudUnavailable(f'Bobr Cloud недоступен: {e}') from e
                 await asyncio.sleep(wait)
                 wait = min(wait * 2, 20.0)
         try:
@@ -49,7 +49,7 @@ class Bcloud:
         except ValueError:
             payload = None
         if r.status_code < 300 and payload is None:
-            raise BcloudError(f'bcloud ответил не JSON (HTTP {r.status_code}) — проверьте адрес bcloud')
+            raise BcloudError(f'Bobr Cloud ответил не JSON (HTTP {r.status_code}) — проверьте адрес Bobr Cloud')
         if r.status_code >= 300:
             try:
                 detail = r.json().get('detail')
@@ -85,20 +85,20 @@ class Bcloud:
                                                              'cpu': int(cpu), 'ram': int(ram), 'disk': int(disk)})
         except BcloudError as e:
             if str(e).startswith('bcloud 404') and str(e).endswith(': Not Found'):  # старый bcloud: конструктора в API нет
-                raise BcloudError('bcloud не считает цену своей конфигурации — обновите его: bcloud update') from None
+                raise BcloudError('Bobr Cloud не считает цену своей конфигурации — обновите его: bcloud update') from None
             raise
 
     async def servers(self) -> list[dict]:
-        """Все серверы аккаунта в bcloud (кроме удалённых), где бы они ни были куплены: IP, root-пароль, локация."""
+        """Все серверы аккаунта в Bobr Cloud (кроме удалённых), где бы они ни были куплены: IP, root-пароль, локация."""
         try:
             return (await self._call('GET', '/servers', params={'tg_id': self.tg_id}))['servers']
         except BcloudError as e:
             if str(e).startswith('bcloud 405'):  # старый bcloud: списка серверов в служебном API ещё нет
-                raise BcloudError('bcloud не отдаёт список серверов — обновите его: bcloud update') from None
+                raise BcloudError('Bobr Cloud не отдаёт список серверов — обновите его: bcloud update') from None
             raise
 
     async def server(self, sid: int, sync: bool = False) -> dict:
-        """sync — сначала обновить данные у провайдера (новый IP после смены в кабинете bcloud)."""
+        """sync — сначала обновить данные у провайдера (новый IP после смены в кабинете Bobr Cloud)."""
         params = {'tg_id': self.tg_id, **({'sync': 1} if sync else {})}
         return await self._call('GET', f'/servers/{sid}', params=params)
 
@@ -110,5 +110,5 @@ class Bcloud:
         await self._call('POST', f'/servers/{sid}/rename', json={'tg_id': self.tg_id, 'name': name})
 
     async def delete(self, sid: int) -> dict:
-        """Удалить сервер владельца в bcloud (возврат остатка — по настройкам bcloud)."""
+        """Удалить сервер владельца в Bobr Cloud (возврат остатка — по настройкам Bobr Cloud)."""
         return await self._call('POST', f'/servers/{sid}/delete', json={'tg_id': self.tg_id})

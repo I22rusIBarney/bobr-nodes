@@ -209,16 +209,42 @@
       clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
       UI.haptic(isErr ? 'error' : 'success');
     },
-    alert(msg) { return new Promise(r => { try { if (at('6.2')) return tg.showAlert(msg, () => r()); } catch (e) {} window.alert(msg); r(); }); },
+    alert(msg) { return new Promise(r => { try { if (at('6.2')) return tg.showAlert(msg, () => r()); } catch (e) {} UI.dialog({ message: msg, buttons: [{ id: 'ok', text: 'Понятно' }], cancel: false }).then(() => r()); }); },
+    /* Свой диалог поверх страницы — когда системный Telegram недоступен или не вмещает кнопки.
+       В отличие от window.confirm не показывает адрес сайта и подписывает кнопки по смыслу. */
+    dialog({ title, message, buttons, cancel = true }) {
+      return new Promise(res => {
+        const scrim = UI.h('div', { class: 'scrim dlg-scrim' });
+        let done = false;
+        const close = id => {
+          if (done) return; done = true;
+          box.classList.remove('show'); scrim.classList.remove('show');
+          setTimeout(() => { box.remove(); scrim.remove(); }, 250);
+          UI.nav._sheetClose = prevClose; UI.nav.syncBack();
+          res(id);
+        };
+        const btns = buttons.map(b => UI.h('button', { class: 'btn ' + (b.type === 'destructive' ? 'destructive' : 'tinted'), type: 'button', onclick: () => close(b.id) }, b.text));
+        if (cancel) btns.push(UI.h('button', { class: 'btn plain', type: 'button', onclick: () => close(null) }, 'Отмена'));
+        const box = UI.h('div', { class: 'dlg', role: 'alertdialog', 'aria-modal': 'true', 'aria-label': title || message },
+          title ? UI.h('b', { class: 'dlg-t' }, title) : null, message ? UI.h('div', { class: 'dlg-m' }, message) : null,
+          UI.h('div', { class: 'dlg-b' }, btns));
+        scrim.onclick = () => close(null);
+        const prevClose = UI.nav._sheetClose;
+        UI.nav._sheetClose = () => close(null); UI.nav.syncBack();
+        document.body.append(scrim, box);
+        requestAnimationFrame(() => { scrim.classList.add('show'); box.classList.add('show'); });
+      });
+    },
     /* Диалог действия. buttons: [{id, text, type:'default'|'destructive'}]; кнопка «Отмена» добавляется сама. */
     ask({ title, message, buttons }) {
       return new Promise(res => {
         try {
-          if (at('6.2')) {
+          // системный попап Telegram: не больше 3 кнопок (с «Отменой»), заголовок до 64 и текст до 256 символов
+          if (at('6.2') && buttons.length <= 2 && (title || '').length <= 64 && (message || '').length <= 256 && buttons.every(b => b.text.length <= 64)) {
             return tg.showPopup({ title: title || '', message, buttons: [...buttons.map(b => ({ id: b.id, type: b.type || 'default', text: b.text })), { type: 'cancel' }] }, id => res(id || null));
           }
         } catch (e) {}
-        res(window.confirm((title ? title + '\n\n' : '') + message) ? buttons[0].id : null);
+        UI.dialog({ title, message, buttons }).then(res);
       });
     },
     async run(fn, okText) {

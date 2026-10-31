@@ -9,6 +9,7 @@ import hmac
 import json
 import logging
 import re
+import secrets
 import socket
 import time
 from pathlib import Path
@@ -25,7 +26,8 @@ from .store import ACTIVE, Store
 HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
-          'fx.js': 'application/javascript'}
+          'fx.js': 'application/javascript',
+          'flags.woff': 'font/woff'}  # флаги стран для Windows и Telegram Desktop (Twemoji, CC-BY 4.0, web/static/flags-LICENSE.txt)
 # оформление, как в bcloud: фон и сезонные эффекты (auto — по календарю)
 THEME_BGS = ('none', 'aurora', 'night', 'ocean', 'sunset', 'forest', 'image')
 THEME_EFFECTS = ('auto', 'none', 'snow', 'newyear', 'halloween', 'leaves', 'hearts', 'flowers', 'confetti')
@@ -35,7 +37,7 @@ GLASS_MAX = 80  # прозрачность списков, %: дальше те�
 
 
 def validate_init_data(init_data: str, bot_token: str, max_age_s: int = 86400, now: float | None = None) -> dict | None:
-    """Пользователь из initData или None, если подпись неверна или устарела (как в bcloud)."""
+    """Пользователь из initData или None, если подпись неверна или устарела (как в Bobr Cloud)."""
     if not init_data:
         return None
     pairs = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -77,10 +79,9 @@ SEC_HEADERS = {
 }
 FAIL_LIMIT, FAIL_WINDOW = 20, 600   # 20 запросов без доступа за 10 минут с одного IP — пауза
 
-# только для администраторов: настройки и подключения бота, оформление, «Мои скрипты» (кроме списка утверждённых),
+# только для администраторов: настройки и подключения бота, «Мои скрипты» (кроме списка утверждённых),
 # пользователи и приглашения
 ADMIN_ONLY = [
-    (r'POST|PUT|DELETE', r'/api/theme(/.*)?'),
     (r'.*', r'/api/settings'),
     (r'.*', r'/api/check/(bcloud|cloudflare|gemini)'),
     (r'.*', r'/api/gemini/.*'),
@@ -95,7 +96,7 @@ def admin_only(method: str, path: str) -> bool:
 
 
 def bc_ui(store, tg_id=None):
-    """Клиент bcloud для ответов админке: недоступный bcloud ждём недолго, чтобы страница не висела."""
+    """Клиент Bobr Cloud для ответов админке: недоступный Bobr Cloud ждём недолго, чтобы страница не висела."""
     b = bcloud_from(store, tg_id)
     b.RETRY_FOR = 8
     return b
@@ -208,7 +209,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         name = request.match_info['name']
         if name not in STATIC:
             raise web.HTTPNotFound()
-        cache = 'public, max-age=31536000, immutable' if name.endswith('.woff2') else 'no-cache'  # шрифты не меняются
+        cache = 'public, max-age=31536000, immutable' if name.endswith(('.woff2', '.woff')) else 'no-cache'  # шрифты не меняются
         return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
 
     @r.get('/health')
@@ -226,35 +227,70 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         ctype = next(t for e, t in IMG_TYPES.values() if f.suffix == '.' + e)
         return web.FileResponse(f, headers={'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400'})
 
-    def theme() -> dict:
-        bg, effect = store.get('theme_bg') or 'none', store.get('theme_effect') or 'auto'
+    # оформление у каждого своё (администраторы и пользователи); кто ещё не менял — общее, как было до разделения
+    BG_NAME = re.compile(r'bg-\d+-[A-Za-z0-9]{12}\.(jpg|png|webp)')
+
+    @r.get('/media/bg/{name}')
+    async def media_bg_user(request):  # своя картинка фона пользователя; имя случайное, его не угадать
+        name = request.match_info['name']
+        f = media / name
+        if not BG_NAME.fullmatch(name) or not f.exists():
+            raise web.HTTPNotFound()
+        ctype = next(t for e, t in IMG_TYPES.values() if f.suffix == '.' + e)
+        return web.FileResponse(f, headers={'Content-Type': ctype, 'Cache-Control': 'public, max-age=31536000, immutable'})
+
+    def theme_raw(uid: int) -> dict:
         try:
-            glass = max(0, min(GLASS_MAX, int(store.get('theme_glass') or 0)))
+            own = json.loads(store.get(f'theme:{uid}') or 'null')
         except ValueError:
+            own = None
+        if isinstance(own, dict):
+            return own
+        return {'bg': store.get('theme_bg'), 'effect': store.get('theme_effect'), 'glass': store.get('theme_glass'),
+                'image': store.get('theme_bg_image')}
+
+    def theme(uid: int = 0) -> dict:
+        t = theme_raw(uid)
+        bg, effect = t.get('bg') or 'none', t.get('effect') or 'auto'
+        try:
+            glass = max(0, min(GLASS_MAX, int(t.get('glass') or 0)))
+        except (TypeError, ValueError):
             glass = 0
         return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
-                'image': store.get('theme_bg_image') or '', 'glass': glass}
+                'image': t.get('image') or '', 'glass': glass}
+
+    def theme_put(uid: int, t: dict) -> dict:
+        store.set(f'theme:{uid}', json.dumps(t))
+        return theme(uid)
+
+    def own_bg(image: str) -> Path | None:
+        """Файл своей картинки пользователя (общая старая /media/bg — не его, её не удаляем)."""
+        name = image.split('?')[0].rsplit('/', 1)[-1]
+        return media / name if image.startswith('/media/bg/') and BG_NAME.fullmatch(name) else None
 
     @r.post('/api/theme')
     async def theme_save(request):
+        uid = uid_of(request)
         data = await body(request)
+        t = theme(uid)
         if 'bg' in data:
-            if data['bg'] not in THEME_BGS or (data['bg'] == 'image' and not bg_file()):
+            if data['bg'] not in THEME_BGS or (data['bg'] == 'image' and not t['image']):
                 raise ApiError('Такого фона нет')
-            store.set('theme_bg', data['bg'])
+            t['bg'] = data['bg']
         if 'effect' in data:
             if data['effect'] not in THEME_EFFECTS:
                 raise ApiError('Такого эффекта нет')
-            store.set('theme_effect', data['effect'])
+            t['effect'] = data['effect']
         if 'glass' in data:
             g = data['glass']
             if not isinstance(g, int) or isinstance(g, bool) or not 0 <= g <= GLASS_MAX:
                 raise ApiError(f'Прозрачность — от 0 до {GLASS_MAX}%')
-            store.set('theme_glass', str(g))
-        return J(theme())
+            t['glass'] = g
+        return J(theme_put(uid, t))
 
     @r.put('/api/theme/background')
     async def theme_bg_upload(request):
+        uid = uid_of(request)
         data = await request.content.read(BG_MAX + 1)
         if not data:
             raise ApiError('Файл пустой.')
@@ -264,21 +300,22 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not kind:
             raise ApiError('Подойдут JPG, PNG или WebP.')
         media.mkdir(parents=True, exist_ok=True)
-        for e, _ in IMG_TYPES.values():
-            (media / f'bg.{e}').unlink(missing_ok=True)
-        (media / f'bg.{kind[0]}').write_bytes(data)
-        store.set('theme_bg_image', f'/media/bg?v={int(time.time())}')
-        store.set('theme_bg', 'image')
-        return J(theme())
+        t = theme(uid)
+        old = own_bg(t['image'])
+        name = f'bg-{uid}-{secrets.token_hex(6)}.{kind[0]}'
+        (media / name).write_bytes(data)
+        if old:
+            old.unlink(missing_ok=True)
+        return J(theme_put(uid, {**t, 'bg': 'image', 'image': f'/media/bg/{name}'}))
 
     @r.delete('/api/theme/background')
-    async def theme_bg_delete(_):
-        for e, _t in IMG_TYPES.values():
-            (media / f'bg.{e}').unlink(missing_ok=True)
-        store.set('theme_bg_image', '')
-        if store.get('theme_bg') == 'image':
-            store.set('theme_bg', 'none')
-        return J(theme())
+    async def theme_bg_delete(request):
+        uid = uid_of(request)
+        t = theme(uid)
+        old = own_bg(t['image'])
+        if old:
+            old.unlink(missing_ok=True)
+        return J(theme_put(uid, {**t, 'image': '', 'bg': 'none' if t['bg'] == 'image' else t['bg']}))
 
     # ── состояние и настройки ──
     def settings_view() -> dict:
@@ -331,7 +368,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                 'created_by_label': user_label(p['created_by']) if admin and p.get('created_by') else ''}
                                for p in ps],
                   'issues': issues(request), 'bot_username': bot_username,
-                  'security': security.info() if security and admin else None, 'theme': theme(),
+                  'security': security.info() if security and admin else None, 'theme': theme(uid_of(request)),
                   'users': sum(1 for u in store.users() if not u.get('blocked')) if admin else None,
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
@@ -433,7 +470,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return J({'id': prof['id'], 'check': await panel_check(prof)})
 
     def member_data(request, data: dict, cur: dict | None) -> dict:
-        """Что пользователь может менять в группе: клиент bcloud — всегда он сам (покупки только с его баланса);
+        """Что пользователь может менять в группе: клиент Bobr Cloud — всегда он сам (покупки только с его баланса);
         в группе, которую завёл администратор, — без клиента и токена Cloudflare."""
         if is_admin(request):
             return data
@@ -444,7 +481,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return data
 
     async def with_owner(prof: dict, cur: dict | None = None) -> dict:
-        """Владелец группы в bcloud: по ID или @username находим клиента и запоминаем его ID и подпись."""
+        """Владелец группы в Bobr Cloud: по ID или @username находим клиента и запоминаем его ID и подпись."""
         owner = prof.get('owner') or ''
         if not owner:
             prof['owner_tg_id'], prof['owner_label'] = '', ''
@@ -454,9 +491,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         try:
             u = await bc_ui(store).resolve(owner)
         except BcloudError as e:
-            raise ApiError(f'Клиент bcloud: {e}') from None
+            raise ApiError(f'Клиент Bobr Cloud: {e}') from None
         if u.get('banned'):
-            raise ApiError('Клиент bcloud заблокирован')
+            raise ApiError('Клиент Bobr Cloud заблокирован')
         prof['owner_tg_id'] = str(u['tg_id'])
         name = u.get('first_name') or ''
         prof['owner_label'] = (f'@{u["username"]}' if u.get('username') else name or str(u['tg_id']))
@@ -654,8 +691,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/ip')
     async def panel_node_ip(request):
-        """Перепривязка IP: mode bcloud — сменить в bcloud (платно, с баланса владельца), sync — взять уже сменённый
-        из bcloud, manual — новый IP вручную. Дальше задача: Cloudflare, SSH, адрес в панели."""
+        """Перепривязка IP: mode bcloud — сменить в Bobr Cloud (платно, с баланса владельца), sync — взять уже сменённый
+        из Bobr Cloud, manual — новый IP вручную. Дальше задача: Cloudflare, SSH, адрес в панели."""
         p = profile_or_404(request.match_info['pid'], request)
         uuid, b = request.match_info['uuid'], await body(request)
         mode = b.get('mode')
@@ -857,7 +894,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/profiles/{pid}/servers')
     async def own_servers(request):
-        """Уже купленные серверы покупателя группы в bcloud — для установки нод без новой покупки."""
+        """Уже купленные серверы покупателя группы в Bobr Cloud — для установки нод без новой покупки."""
         p = profile_or_404(request.match_info['pid'], request)
         servers = [{k: v for k, v in x.items() if k != 'root_password'} for x in await svc.own_servers(store, p)]
         return J({'servers': servers, 'buyer': p.get('owner_label') or 'ваш аккаунт'})
@@ -936,7 +973,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 for sid in ids:
                     x = own.get(sid)
                     if not x or sid in taken:
-                        raise ApiError(f'Сервера #{sid} нет в bcloud у покупателя группы')
+                        raise ApiError(f'Сервера #{sid} нет в Bobr Cloud у покупателя группы')
                     if not x['ready']:
                         raise ApiError(f'Сервер {x["name"] or x["ip"]}: {x["why"]}')
                     if x['location'] != loc:

@@ -309,11 +309,13 @@ async def main():
     png = b'\x89PNG\r\n\x1a\n' + b'\0' * 64
     r = await web.put('/api/theme/background', data=png, headers={**H, 'Content-Type': 'image/png'})
     js = await r.json()
-    ok(r.status == 200 and js['bg'] == 'image' and js['image'].startswith('/media/bg'), 'своя картинка загружается и становится фоном')
-    rb = await web.get('/media/bg')
+    ok(r.status == 200 and js['bg'] == 'image' and js['image'].startswith('/media/bg/bg-1-'), 'своя картинка загружается и становится фоном')
+    bg_url = js['image']
+    rb = await web.get(bg_url)
     ok(rb.status == 200 and rb.headers['Content-Type'] == 'image/png' and await rb.read() == png, 'картинка фона отдаётся')
+    ok((await web.get('/media/bg/../bot.db')).status == 404 and (await web.get('/media/bg/bg-1-x.png')).status == 404, 'отдаются только картинки фона')
     st, js = await wapi('theme/background', 'DELETE')
-    ok(js['bg'] == 'none' and not js['image'] and (await web.get('/media/bg')).status == 404, 'картинка удаляется, фон сбрасывается')
+    ok(js['bg'] == 'none' and not js['image'] and (await web.get(bg_url)).status == 404, 'картинка удаляется, фон сбрасывается')
     await wapi('theme', 'POST', {'effect': 'auto'})
 
     out = await say('/start')
@@ -323,7 +325,7 @@ async def main():
 
     # ── настройки через админку
     st, js = await wapi('state')
-    ok(st == 200 and 'подключите bcloud' in js['issues'] and js['settings']['bcloud_tg_id']['value'] == '1', 'состояние: что не настроено')
+    ok(st == 200 and 'подключите Bobr Cloud' in js['issues'] and js['settings']['bcloud_tg_id']['value'] == '1', 'состояние: что не настроено')
     st, js = await wapi('settings', 'POST', {'values': {'bcloud_url': 'не адрес'}})
     ok(st == 400 and 'нужен адрес' in js['detail'], 'неверный адрес bcloud отклонён')
     st, js = await wapi('settings', 'POST', {'values': {'bcloud_url': 'http://bc.test', 'bcloud_token': 'svc-token', 'cf_token': 'cf-token-123456'}})
@@ -414,7 +416,7 @@ async def main():
 
     # ── группа клиента: покупки от его имени и с его баланса
     st, js = await wapi('profiles', 'POST', {**prof_in, 'name': 'Клиент Вася', 'base_domain': 'example.com', 'owner': '@nobody_here'})
-    ok(st == 400 and 'Клиент bcloud' in js['detail'], 'неизвестный клиент bcloud — понятная ошибка')
+    ok(st == 400 and 'Клиент Bobr Cloud' in js['detail'], 'неизвестный клиент bcloud — понятная ошибка')
     async with BD.session() as s_:
         s_.add(BD.User(tg_id=77, username='Vasya_Client', first_name='Вася'))
         await s_.commit()
@@ -480,7 +482,10 @@ async def main():
     aj = next(j for j in store.jobs(200) if j['profile_id'] == pid)
     ok({x['profile_id'] for x in js['jobs']} == {gid} and (await vwapi(f'jobs/{aj["id"]}'))[0] == 404
        and (await vwapi(f'jobs/{aj["id"]}/hide', 'POST'))[0] == 404, 'задачи — только своей группы')
-    for path, method in (('settings', 'POST'), ('check/bcloud', 'POST'), ('check/cloudflare', 'POST'), ('theme', 'POST'),
+    st, js = await vwapi('theme', 'POST', {'effect': 'snow', 'glass': 20})
+    ok(st == 200 and js['effect'] == 'snow' and (await vwapi('state'))[1]['theme']['effect'] == 'snow'
+       and (await wapi('state'))[1]['theme']['effect'] != 'snow', 'оформление у пользователя своё, у администратора не меняется')
+    for path, method in (('settings', 'POST'), ('check/bcloud', 'POST'), ('check/cloudflare', 'POST'),
                          ('scripts', 'POST'), ('invites', 'POST'), ('users', 'GET'), ('gemini/models', 'GET')):
         ok((await vwapi(path, method, {}))[0] == 403, f'только администратору: {method} {path}')
     st, js = await vwapi('scripts')
@@ -871,7 +876,7 @@ async def main():
     ok(store.job(mj[1]['id'])['data']['ip'] == new, 'бот запомнил новый IP сервера')
     ok(await _bcf(store, 1).balance() == bal0 - 15000, 'смена IP списана с баланса владельца сервера')
     st, jv = await wapi(f'jobs/{rjb["id"]}')
-    ok([x['code'] for x in jv['stages']] == ['ip', 'dns', 'ssh', 'panel', 'check'] and jv['stages'][0]['label'] == 'Смена IP в bcloud',
+    ok([x['code'] for x in jv['stages']] == ['ip', 'dns', 'ssh', 'panel', 'check'] and jv['stages'][0]['label'] == 'Смена IP в Bobr Cloud',
        'этапы смены IP')
     st, js = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}/ip', 'POST', {'mode': 'sync'})
     await runner.wait_all()
@@ -909,7 +914,7 @@ async def main():
     ok(not [r for r in world.records if r['name'] == gd['domain'] and r['type'] == 'A'], 'A-запись домена удалена')
     gj = store.job(gone['id'])
     ok(gj['data'].get('removed') and gj['hidden'] and gone['id'] not in [j['id'] for j in store.jobs(500)], 'сервер убран из списка бота')
-    ok(any('удалён в bcloud' in getattr(m, 'text', '') for name, m in sess.sent[n0:] if name == 'SendMessage'), 'админу пришло сообщение')
+    ok(any('удалён в Bobr Cloud' in getattr(m, 'text', '') for name, m in sess.sent[n0:] if name == 'SendMessage'), 'админу пришло сообщение')
     ok(gd['domain'] not in store.used_domains(), 'домен снова свободен для новых нод')
     ok(await runner.sync_bcloud() == [], 'повторная сверка ничего не трогает')
 

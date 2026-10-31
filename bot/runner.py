@@ -1,4 +1,4 @@
-"""Очередь задач: покупка в bcloud → ожидание IP → установка ноды. Каждая задача — одно сообщение,
+"""Очередь задач: покупка в Bobr Cloud → ожидание IP → установка ноды. Каждая задача — одно сообщение,
 которое обновляется по мере прохождения этапов. Незавершённые задачи продолжаются после перезапуска бота."""
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
-STAGES = [('buy', 'Покупка в bcloud'), ('ip', 'Создание сервера'), ('dns', 'DNS в Cloudflare'),
+STAGES = [('buy', 'Покупка в Bobr Cloud'), ('ip', 'Создание сервера'), ('dns', 'DNS в Cloudflare'),
           ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('extras', 'Дополнения на ноде'), ('panel', 'Регистрация в панели'),
           ('check', 'Проверка')]
 STAGE_ORDER = [s for s, _ in STAGES]
@@ -32,7 +32,7 @@ def extras_label(d: dict) -> str:
     return ', '.join(parts)
 
 
-REIP_IP = {'bcloud': 'Смена IP в bcloud', 'sync': 'Новый IP из bcloud', 'manual': 'Новый IP'}
+REIP_IP = {'bcloud': 'Смена IP в Bobr Cloud', 'sync': 'Новый IP из Bobr Cloud', 'manual': 'Новый IP'}
 
 
 def stages_for(d: dict) -> list[tuple[str, str]]:
@@ -48,7 +48,7 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
             [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') or d.get('xhttp') else [])
         return out
     skip = set(d.get('skipped_stages') or []) | (set() if extra else {'extras'})
-    names = {'extras': 'Дополнения: ' + extra, **({'ip': 'Сервер из bcloud'} if d.get('existing') else {})}
+    names = {'extras': 'Дополнения: ' + extra, **({'ip': 'Сервер из Bobr Cloud'} if d.get('existing') else {})}
     return [(c, names.get(c, lbl)) for c, lbl in STAGES if c not in skip]
 
 
@@ -60,7 +60,7 @@ class Fail(Exception):
 
 
 def bcloud_from(store: Store, tg_id: int | str | None = None) -> Bcloud:
-    """Клиент bcloud от имени tg_id (владелец группы); по умолчанию — аккаунт из настроек."""
+    """Клиент Bobr Cloud от имени tg_id (владелец группы); по умолчанию — аккаунт из настроек."""
     return Bcloud(store.get('bcloud_url'), store.get('bcloud_token'), int(tg_id or store.get('bcloud_tg_id') or 0))
 
 
@@ -164,7 +164,7 @@ class Runner:
 
     # ── серверы, удалённые в bcloud ──
     async def sync_bcloud(self) -> list[int]:
-        """Готовые ноды, чей сервер удалён в bcloud (вручную или по окончании срока): нода и хосты — из панели,
+        """Готовые ноды, чей сервер удалён в Bobr Cloud (вручную или по окончании срока): нода и хосты — из панели,
         A-запись — из Cloudflare, сервер — из списка бота. Профиль остаётся. Возвращает id таких задач."""
         done = []
         for j in self.store.jobs(5000):
@@ -191,14 +191,14 @@ class Runner:
                 log.warning('remove node job %s: %s', j['id'], e)
                 continue  # панель недоступна — попробуем в следующий раз
             with open(self.log_path(j['id']), 'a', encoding='utf-8') as lf:
-                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} сервер удалён в bcloud\n' +
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} сервер удалён в Bobr Cloud\n' +
                          ''.join(f'### {x}\n' for x in lines))
             self.store.patch_job_data(j['id'], removed=True, removed_at=int(time.time()))
             self.store.update_job(j['id'], hidden=1)
             done.append(j['id'])
             try:
                 await self.bot.send_message(j['chat_id'], (
-                    f'🗑 <b>Сервер {html.escape(d.get("domain") or d.get("name", ""))} удалён в bcloud</b>\n\n'
+                    f'🗑 <b>Сервер {html.escape(d.get("domain") or d.get("name", ""))} удалён в Bobr Cloud</b>\n\n'
                     f'Из панели «{html.escape(prof.get("name", ""))}» убраны нода и хосты: {res["nodes"]} / {res["hosts"]}'
                     + (', A-запись в Cloudflare удалена' if res['dns'] else '') + '. Профиль не тронут.'), parse_mode='HTML')
             except Exception as e:  # noqa: BLE001
@@ -274,7 +274,7 @@ class Runner:
         return {**sshaccess.to_node(ssh, self.bot_key()[0]), 'known_hosts': self.known_hosts()}
 
     async def _run_reip(self, jid: int, d: dict, prof: dict) -> None:
-        """Новый IP ноды: сменить в bcloud (или взять уже сменённый), затем DNS, SSH и адрес в панели."""
+        """Новый IP ноды: сменить в Bobr Cloud (или взять уже сменённый), затем DNS, SSH и адрес в панели."""
         loop = asyncio.get_running_loop()
         await self._set(jid, status='deploying', stage='ip', error='')
         if not d.get('new_ip'):
@@ -287,7 +287,7 @@ class Runner:
                 except BcloudError:
                     self.store.patch_job_data(jid, change_sent=False)
                     raise
-                self.last[jid] = r.get('message') or 'bcloud меняет IP'
+                self.last[jid] = r.get('message') or 'Bobr Cloud меняет IP'
             end = time.monotonic() + self.reip_timeout
             while True:
                 srv = await bc.server(d['server_id'], sync=True)
@@ -295,10 +295,10 @@ class Runner:
                     d = self.store.patch_job_data(jid, new_ip=srv['ip'])
                     break
                 if d['mode'] == 'sync':
-                    raise Fail(f'в bcloud у сервера прежний IP {d["old_ip"]} — сначала смените его в bcloud или выберите «Сменить IP через bcloud»')
+                    raise Fail(f'в Bobr Cloud у сервера прежний IP {d["old_ip"]} — сначала смените его в Bobr Cloud или выберите «Сменить IP через Bobr Cloud»')
                 if time.monotonic() > end:
-                    raise Fail('bcloud так и не сообщил новый IP — проверьте сервер в bcloud и нажмите «Повторить»')
-                self.last[jid] = 'ждём новый IP от bcloud'
+                    raise Fail('Bobr Cloud так и не сообщил новый IP — проверьте сервер в Bobr Cloud и нажмите «Повторить»')
+                self.last[jid] = 'ждём новый IP от Bobr Cloud'
                 await self.render(jid)
                 await asyncio.sleep(self.poll_every * 3)
         self.last[jid] = f'новый IP: {d["new_ip"]}'
@@ -371,22 +371,22 @@ class Runner:
 
             if not d.get('server_id'):
                 if job['status'] == 'buying':
-                    raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в bcloud. '
+                    raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в Bobr Cloud. '
                                'Повтор купит новый сервер.')
                 await self._set(jid, status='buying', stage='buy', error='')
                 srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
                 d = self.store.patch_job_data(jid, server_id=srv['id'])
 
             await self._set(jid, status='provisioning', stage='ip', error='')
-            self.last[jid] = 'ждём, пока bcloud создаст сервер'
+            self.last[jid] = 'ждём, пока Bobr Cloud создаст сервер'
             end = time.monotonic() + self.ip_timeout
             while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
                 try:
                     srv = await bc.server(d['server_id'])
                 except BcloudUnavailable as e:
                     if time.monotonic() > end:
-                        raise Fail(f'{e} — проверьте, что bcloud запущен, и нажмите «Повторить»') from e
-                    self.last[jid] = 'bcloud не отвечает — жду'
+                        raise Fail(f'{e} — проверьте, что Bobr Cloud запущен, и нажмите «Повторить»') from e
+                    self.last[jid] = 'Bobr Cloud не отвечает — жду'
                     await self.render(jid)
                     await asyncio.sleep(self.poll_every)
                     continue
@@ -397,10 +397,10 @@ class Runner:
                     break
                 if srv['status'] in ('deleted', 'failed', 'error'):
                     if d.get('existing'):
-                        raise Fail(f'сервер в bcloud недоступен (статус {srv["status"]})')
-                    raise Fail(f'bcloud не смог создать сервер (статус {srv["status"]}); деньги bcloud возвращает сам')
+                        raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
+                    raise Fail(f'Bobr Cloud не смог создать сервер (статус {srv["status"]}); деньги Bobr Cloud возвращает сам')
                 if time.monotonic() > end:
-                    raise Fail('сервер слишком долго создаётся — проверьте его в bcloud и нажмите «Повторить»')
+                    raise Fail('сервер слишком долго создаётся — проверьте его в Bobr Cloud и нажмите «Повторить»')
                 await asyncio.sleep(self.poll_every)
             if not d.get('renamed'):
                 try:

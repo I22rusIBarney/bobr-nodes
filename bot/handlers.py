@@ -156,7 +156,7 @@ def ready_issues(store: Store, profiles: list[dict] | None = None, role: str = '
     ps = store.profiles() if profiles is None else profiles
     out = []
     if not all(store.get(k) for k in ('bcloud_url', 'bcloud_token', 'bcloud_tg_id')):
-        out.append('подключите bcloud' if role == 'admin' else 'администратор ещё не подключил bcloud')
+        out.append('подключите Bobr Cloud' if role == 'admin' else 'администратор ещё не подключил Bobr Cloud')
     if role == 'admin' and not store.get('cf_token') and not any(p.get('cf_token') for p in ps):
         out.append('добавьте токен Cloudflare')
     if not ps:
@@ -167,7 +167,7 @@ def ready_issues(store: Store, profiles: list[dict] | None = None, role: str = '
 def main_text(store: Store, profiles: list[dict] | None = None, role: str = 'admin') -> str:
     ps = store.profiles() if profiles is None else profiles
     issues = ready_issues(store, ps, role)
-    lines = ['<b>🦫 Bobr Nodes</b>', 'Покупка серверов в bcloud и установка нод Remnawave.', '']
+    lines = ['<b>🦫 Bobr Nodes</b>', 'Покупка серверов в Bobr Cloud и установка нод Remnawave.', '']
     if issues:
         lines.append('Чтобы начать, в панели управления: ' + ', '.join(issues) + '.')
     else:
@@ -471,7 +471,7 @@ async def own_list(c: CallbackQuery, state: FSMContext, store: Store, refresh: b
     busy = [x for x in w['own_list'] if not x['ready']]
     who = html.escape(p.get('owner_label') or 'ваш аккаунт')
     lines = [f'<b>📦 Уже купленные серверы</b> · {who}', '',
-             'Серверы этого аккаунта в bcloud, где бы они ни были куплены. Нода ставится поверх системы — '
+             'Серверы этого аккаунта в Bobr Cloud, где бы они ни были куплены. Нода ставится поверх системы — '
              'на сервере не должно быть своего сайта или Xray на портах 80 и 443.']
     if busy:
         lines += ['', 'Недоступны:', *[f'• {html.escape(srv_title(x))} — {html.escape(x["why"])}' for x in busy[:15]]]
@@ -530,7 +530,7 @@ async def own_confirm(target, w: dict, store: Store):
 
 
 async def own_create(c: CallbackQuery, store: Store, runner: Runner, w: dict) -> None:
-    """Задачи на выбранные серверы: свежие данные из bcloud, по локациям, домены — в порядке выбора."""
+    """Задачи на выбранные серверы: свежие данные из Bobr Cloud, по локациям, домены — в порядке выбора."""
     p = store.profile(w['pid'])
     try:
         fresh = {x['id']: x for x in await svc.own_servers(store, p)}
@@ -541,7 +541,7 @@ async def own_create(c: CallbackQuery, store: Store, runner: Runner, w: dict) ->
     for sid, dom in zip(w['sel'], w['domains']):
         x = fresh.get(sid)
         if not x or not x['ready']:
-            await c.message.answer(f'❌ Сервер #{sid}: ' + html.escape(x['why'] if x else 'нет в bcloud') + ' — задачи не созданы',
+            await c.message.answer(f'❌ Сервер #{sid}: ' + html.escape(x['why'] if x else 'нет в Bobr Cloud') + ' — задачи не созданы',
                                    parse_mode='HTML')
             return
         g = groups.setdefault(x['location'], ([], []))

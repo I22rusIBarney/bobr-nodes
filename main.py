@@ -1,4 +1,4 @@
-"""Bobr Nodes: покупка серверов в bcloud → Nuvrion Vision → регистрация нод в Remnawave.
+"""Bobr Nodes: покупка серверов в Bobr Cloud → Nuvrion Vision → регистрация нод в Remnawave.
 Telegram-бот + веб-админка (Mini App) в одном процессе."""
 import asyncio
 import logging

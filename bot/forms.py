@@ -140,9 +140,9 @@ def v_parallel(v, _=None):
 
 # key: (название, подсказка, секрет, проверка)
 SETTINGS = {
-    'bcloud_url': ('Адрес bcloud', 'Адрес бота bcloud, как PUBLIC_URL, например https://bobr-cloud.online', False, v_url),
-    'bcloud_token': ('Токен bcloud', 'На сервере bcloud выполните: <code>bcloud api-token</code>', True, v_nonempty),
-    'bcloud_tg_id': ('Ваш аккаунт в bcloud (Telegram ID)', 'С его баланса покупаются серверы групп без своего клиента.', False, v_int),
+    'bcloud_url': ('Адрес Bobr Cloud', 'Адрес бота Bobr Cloud, как PUBLIC_URL, например https://bobr-cloud.online', False, v_url),
+    'bcloud_token': ('Токен Bobr Cloud', 'На сервере Bobr Cloud выполните: <code>bcloud api-token</code>', True, v_nonempty),
+    'bcloud_tg_id': ('Ваш аккаунт в Bobr Cloud (Telegram ID)', 'С его баланса покупаются серверы групп без своего клиента.', False, v_int),
     'cf_token': ('Токен Cloudflare', 'Права: Zone → DNS → Edit и Zone → Zone → Read', True, v_nonempty),
     'ssh_pubkey': ('Мой SSH-ключ', 'Публичный ключ (содержимое .pub) — добавим на каждый сервер. «-» — не добавлять', False, v_pubkey),
     'parallel': ('Параллельных установок', 'Сколько нод ставить одновременно, 1–10', False, v_parallel),
@@ -174,7 +174,7 @@ SECRET_SETTINGS = {k for k, (_, _, secret, _) in SETTINGS.items() if secret}
 
 PFIELDS = {
     'name': ('Название группы', 'Например «Мои ноды» или имя клиента', False, v_text),
-    'owner': ('Клиент bcloud', 'Telegram ID или @username владельца в bcloud: серверы покупаются от его имени, с его баланса и видны ему в bcloud. Пусто — с вашего аккаунта', False, v_owner),
+    'owner': ('Клиент Bobr Cloud', 'Telegram ID или @username владельца в Bobr Cloud: серверы покупаются от его имени, с его баланса и видны ему в Bobr Cloud. Пусто — с вашего аккаунта', False, v_owner),
     'panel_url': ('Адрес панели', 'Как открываете панель в браузере: https://panel.example.com', False, v_url),
     'panel_token': ('API-токен панели', 'Панель → Настройки → API Tokens → создать', True, v_nonempty),
     'panel_cookie': ('Cookie-защита', 'Пришлите секретную ссылку входа целиком или пару ИМЯ=ЗНАЧЕНИЕ. «-» — защиты нет', True, v_cookie),

@@ -1780,7 +1780,7 @@ def reip(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Cal
 # ─────────────────────────────── Сервер удалён в bcloud ──
 
 def remove_node(prof: dict, ip: str, domain: str, log: Callable[[str], None]) -> dict:
-    """Сервер удалён (в bcloud или истёк): нода и её хосты — из панели, A-запись домена — из Cloudflare.
+    """Сервер удалён (в Bobr Cloud или истёк): нода и её хосты — из панели, A-запись домена — из Cloudflare.
     Профиль, шаблоны и общие хосты-балансировщики остаются: ими пользуются другие ноды."""
     panel = Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
     names = {ip, domain} - {''}

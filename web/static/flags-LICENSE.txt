@@ -1,0 +1,4 @@
+flags.woff — только флаги стран из шрифта Twemoji Mozilla (https://github.com/mozilla/twemoji-colr),
+вырезано pyftsubset по рецепту https://github.com/talkjs/country-flag-emoji-polyfill (MIT).
+Графика флагов — Twemoji (https://github.com/twitter/twemoji), CC-BY 4.0:
+https://creativecommons.org/licenses/by/4.0/

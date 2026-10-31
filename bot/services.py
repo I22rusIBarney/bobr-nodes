@@ -1,4 +1,4 @@
-"""Развёртывание — общее для чата и веб-админки: каталог bcloud, цены, домены, создание задач."""
+"""Развёртывание — общее для чата и веб-админки: каталог Bobr Cloud, цены, домены, создание задач."""
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +16,7 @@ PERIOD_LABEL = {'1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 �
 
 
 def period_price(month_kop: int, months: int, pct: int) -> int:
-    """Как в bcloud: месяц × N со скидкой за срок, вверх до рубля."""
+    """Как в Bobr Cloud: месяц × N со скидкой за срок, вверх до рубля."""
     if months <= 1:
         return month_kop
     return math.ceil(month_kop * months * (100 - max(0, pct)) / 100 / 100) * 100
@@ -35,7 +35,7 @@ def gen_password() -> str:
 
 
 def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
-    """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер bcloud) этой группы.
+    """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер Bobr Cloud) этой группы.
     Ноды регистрируются по домену, старые — по IP, поэтому ключи — оба."""
     out = {}
     for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
@@ -66,15 +66,15 @@ def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
 
 
 async def load_catalog(store: Store, prof: dict | None = None) -> dict:
-    """Каталог bcloud для развёртывания (цены — для покупателя группы): только локации с тарифами, ОС выбрана автоматически."""
+    """Каталог Bobr Cloud для развёртывания (цены — для покупателя группы): только локации с тарифами, ОС выбрана автоматически."""
     bc = bcloud_from(store, buyer_of(store, prof or {}))
     bc.RETRY_FOR = 8  # каталог открывают в админке — долго не ждём
     cat = await bc.catalog()
     if cat.get('maintenance'):
-        raise BcloudError('в bcloud включён режим «продажи закрыты»')
+        raise BcloudError('в Bobr Cloud включён режим «продажи закрыты»')
     os_code = naming.pick_os([o['code'] for o in cat['os']])
     if not os_code:
-        raise BcloudError('в каталоге bcloud нет Ubuntu или Debian — установщику нужна одна из них')
+        raise BcloudError('в каталоге Bobr Cloud нет Ubuntu или Debian — установщику нужна одна из них')
     cat['locations'] = [loc for loc in cat['locations'] if loc['offers']]
     cat['os_code'] = os_code
     cat['os_label'] = next((o['label'] for o in cat['os'] if o['code'] == os_code), os_code)
@@ -82,13 +82,13 @@ async def load_catalog(store: Store, prof: dict | None = None) -> dict:
 
 
 def quote(cat: dict, location: str, idx: int | None, period: str, count: int, custom: dict | None = None) -> dict:
-    """Цена: готовый тариф idx или своя конфигурация custom ({cpu, ram, disk, price_kop} — цена из bcloud)."""
+    """Цена: готовый тариф idx или своя конфигурация custom ({cpu, ram, disk, price_kop} — цена из Bobr Cloud)."""
     loc = next((x for x in cat['locations'] if x['code'] == location), None)
     if loc is None:
-        raise ValueError('эта локация сейчас недоступна в bcloud')
+        raise ValueError('эта локация сейчас недоступна в Bobr Cloud')
     offer = custom if idx is None else next((o for o in loc['offers'] if o['idx'] == idx), None)
     if offer is None:
-        raise ValueError('этот тариф недоступен в bcloud — обновите страницу')
+        raise ValueError('этот тариф недоступен в Bobr Cloud — обновите страницу')
     per = next((x for x in cat['periods'] if x['code'] == period), None)
     if per is None:
         raise ValueError('этот срок аренды недоступен')
@@ -97,10 +97,10 @@ def quote(cat: dict, location: str, idx: int | None, period: str, count: int, cu
 
 
 def check_spec(cat: dict, raw) -> dict:
-    """Своя конфигурация из конструктора: {cpu, ram, disk} в диапазонах bcloud (min, max, шаг)."""
+    """Своя конфигурация из конструктора: {cpu, ram, disk} в диапазонах Bobr Cloud (min, max, шаг)."""
     conf = cat.get('configurator')
     if not conf:
-        raise ValueError('в bcloud нет конструктора — выберите готовый тариф')
+        raise ValueError('в Bobr Cloud нет конструктора — выберите готовый тариф')
     try:
         spec = {k: int((raw or {})[k]) for k in ('cpu', 'ram', 'disk')}
     except (KeyError, TypeError, ValueError):
@@ -115,7 +115,7 @@ def check_spec(cat: dict, raw) -> dict:
 
 
 async def custom_offer(store: Store, prof: dict, cat: dict, location: str, raw) -> dict:
-    """Своя конфигурация с ценой для покупателя группы (свежий расчёт bcloud)."""
+    """Своя конфигурация с ценой для покупателя группы (свежий расчёт Bobr Cloud)."""
     spec = check_spec(cat, raw)
     q = await bcloud_from(store, buyer_of(store, prof)).quote(location, **spec)
     return {'idx': None, **spec, 'price_kop': int(q['price_kop']), 'speed': q.get('speed') or ''}
@@ -125,7 +125,7 @@ OS_OK = ('ubuntu', 'debian')
 
 
 async def own_servers(store: Store, prof: dict) -> list[dict]:
-    """Серверы покупателя группы в bcloud (куплены здесь, в боте bcloud или где угодно) с отметками:
+    """Серверы покупателя группы в Bobr Cloud (куплены здесь, в боте Bobr Cloud или где угодно) с отметками:
     used — на нём уже нода из Bobr Nodes, ready — можно ставить (активен, Ubuntu/Debian, не занят).
     В ответе есть root_password — наружу (в админку) его не отдавать."""
     bc = bcloud_from(store, buyer_of(store, prof))
@@ -220,7 +220,7 @@ _EN: dict | None = None
 
 
 def country_name(loc: dict, lang: str = 'ru') -> str:
-    """Название страны локации: как в bcloud (русское) или английское по ISO-коду."""
+    """Название страны локации: как в Bobr Cloud (русское) или английское по ISO-коду."""
     global _EN
     if lang != 'en':
         return loc.get('name', '')
@@ -295,7 +295,7 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
                       extras: dict | None = None, custom: dict | None = None, servers: list[dict] | None = None,
                       script_id: object = 'group', note: dict | None = None) -> list[int]:
     """Задачи установки. custom — своя конфигурация (покупка по cpu/ram/disk); servers — уже купленные серверы
-    bcloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из bcloud."""
+    Bobr Cloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из Bobr Cloud."""
     if servers:
         if len(servers) != len(domains):
             raise ValueError(f'серверов {len(servers)}, доменов {len(domains)}')

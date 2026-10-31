@@ -5,6 +5,9 @@
    Все значения — токены ниже; компоненты используют только их.
    ═══════════════════════════════════════════════════════════════════════ */
 
+/* флаги стран: Windows и Telegram Desktop не рисуют эмодзи-флаги — шрифт только для этих символов (unicode-range) */
+@font-face { font-family: "Bobr Flags"; src: url(flags.woff) format("woff"); font-display: swap;
+  unicode-range: U+1F1E6-1F1FF, U+1F3F4, U+E0061-E007A, U+E007F; }
 @font-face { font-family: "Geist"; src: url(geist.woff2) format("woff2"); font-weight: 100 900; font-display: swap; }
 @font-face { font-family: "Geist Mono"; src: url(geist-mono.woff2) format("woff2"); font-weight: 100 900; font-display: swap; }
 
@@ -52,8 +55,8 @@
   --sab: max(env(safe-area-inset-bottom), var(--tg-safe-area-inset-bottom, 0px));
 
   /* шрифт: Geist для интерфейса, Geist Mono — только для машинных значений */
-  --font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font: "Bobr Flags", "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: "Bobr Flags", "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
   color-scheme: dark;
 }
 
@@ -230,6 +233,19 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .sheet .grabber { width: 36px; height: 4px; border-radius: 2px; background: var(--hint-2); opacity: .5; margin: 0 auto 6px; }
 .sheet .sheet-h { display: flex; align-items: center; justify-content: space-between; padding: 6px var(--gutter) 12px; }
 .sheet .sheet-h b { font-size: 17px; font-weight: 600; }
+
+/* ── Диалог действия (вместо window.confirm) ── */
+.dlg-scrim { z-index: 50; }
+.dlg {
+  position: fixed; z-index: 51; left: 50%; top: 50%; width: min(340px, calc(100vw - 2 * var(--gutter)));
+  transform: translate(-50%, -46%) scale(.97); opacity: 0; transition: transform var(--t-slow) var(--ease-out), opacity var(--t-fast);
+  background: #1A1D22; border-radius: var(--r-xl); box-shadow: 0 0 0 1px var(--line-strong), 0 20px 50px rgba(0, 0, 0, .5); padding: 20px 16px 12px;
+}
+.dlg.show { transform: translate(-50%, -50%); opacity: 1; }
+.dlg-t { display: block; font-size: 17px; font-weight: 600; margin: 0 4px 6px; overflow-wrap: anywhere; }
+.dlg-m { font-size: 14px; line-height: 20px; color: var(--hint); margin: 0 4px 16px; white-space: pre-line; overflow-wrap: anywhere; }
+.dlg-b { display: grid; gap: 8px; }
+.dlg .btn.destructive { background: var(--danger-soft); color: var(--danger); }
 
 /* ── Уведомление ── */
 .toast {

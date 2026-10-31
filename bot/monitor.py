@@ -3,7 +3,7 @@
 Цикл (раз в ~5 минут): опросить все чекеры → по каждой группе с подпиской сопоставить проверки с нодами панели →
 нода «недоступна», если её не пропускает большинство исправных чекеров. После FAILS_TO_ALERT таких циклов подряд —
 сообщение и, по настройке группы, починка по шагам: Final Mask и свой порт → переустановка другим скриптом →
-запасной XHTTP через CDN → смена IP в bcloud (платно) → новая нода в той же локации. После каждого шага ждём RECOVER_CYCLES
+запасной XHTTP через CDN → смена IP в Bobr Cloud (платно) → новая нода в той же локации. После каждого шага ждём RECOVER_CYCLES
 циклов: нода ожила — готово, нет — следующий шаг.
 
 Состояние ноды хранится по ключу «группа:адрес ноды» (домен не меняется при смене IP и переустановке)."""
@@ -29,9 +29,9 @@ log = logging.getLogger(__name__)
 
 STEPS = ['mask', 'script', 'xhttp', 'reip', 'replace']  # порядок по умолчанию: платная смена IP — перед покупкой
 STEP_LABEL = {'mask': 'Final Mask и свой порт', 'script': 'переустановка другим скриптом',
-              'xhttp': 'запасной XHTTP через CDN', 'reip': 'смена IP в bcloud', 'replace': 'новая нода в той же локации'}
+              'xhttp': 'запасной XHTTP через CDN', 'reip': 'смена IP в Bobr Cloud', 'replace': 'новая нода в той же локации'}
 MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам'}
-OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в bcloud', 'keep': 'ничего не трогать'}
+OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в Bobr Cloud', 'keep': 'ничего не трогать'}
 BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации', 'none': 'не покупать — сообщить'}
 SKIP_DEFAULT = 'АВТО-ВЫБОР, АВТОВЫБОР, AUTO-SELECT, NORMAL'  # общий балансировщик: его ноды проверяются и так
 DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest', 'mon_skip': SKIP_DEFAULT,
@@ -103,7 +103,7 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
 
 def clean_buy(raw) -> list[dict]:
     """Конфигурации новой ноды по приоритету: same — как у старой, preset — готовый тариф с такими vCPU/памятью/диском,
-    custom — своя конфигурация (конструктор bcloud)."""
+    custom — своя конфигурация (конструктор Bobr Cloud)."""
     if not isinstance(raw, list) or not 1 <= len(raw) <= 8:
         raise ValueError('конфигурации новой ноды: от 1 до 8 вариантов')
     out = []
@@ -594,12 +594,12 @@ class Monitor:
                 'loc_name': st['name'], 'ssh': ssh, 'monitor': True}
         if step == 'reip':
             if not bd.get('server_id'):
-                raise ValueError('нода куплена не через бота — сменить IP в bcloud нельзя')
+                raise ValueError('нода куплена не через бота — сменить IP в Bobr Cloud нельзя')
             if not ip:
                 raise ValueError('не знаю текущий IP ноды')
             data = {**base, 'kind': 'reip', 'mode': 'bcloud', 'ip': ip, 'old_ip': ip, 'new_ip': '', 'flag': '🔁',
                     'spec': 'смена IP', 'server_id': bd['server_id'], 'buyer': bd.get('buyer'), 'deploy_job': bd.get('_job')}
-            note = 'меняю IP в bcloud'
+            note = 'меняю IP в Bobr Cloud'
         elif step == 'mask':
             port = cfg['mon_port']
             data = {**base, 'kind': 'node', 'ip': ip or st['addr'], 'flag': '🛠', 'spec': 'починка: Final Mask и порт',
@@ -623,7 +623,7 @@ class Monitor:
         return jid, note
 
     async def bcloud_server(self, prof: dict, bd: dict, ip: str) -> dict | None:
-        """Сервер ноды в bcloud у покупателя группы: по задаче бота или по IP."""
+        """Сервер ноды в Bobr Cloud у покупателя группы: по задаче бота или по IP."""
         try:
             servers = {x['id']: x for x in await svc.own_servers(self.store, prof)}
         except BcloudError:
@@ -647,7 +647,7 @@ class Monitor:
                 raise ValueError('скрипт для переустановки удалён или не утверждён')
         srv = await self.bcloud_server(prof, bd, ip)
         if not srv or srv.get('status') != 'active':
-            raise ValueError('сервера ноды нет в bcloud у покупателя группы — переустановить не на что')
+            raise ValueError('сервера ноды нет в Bobr Cloud у покупателя группы — переустановить не на что')
         pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
         await asyncio.to_thread(engine.remove_node, pconf, srv['ip'], dom, lambda t: None)
         if bd.get('_job'):
@@ -678,7 +678,7 @@ class Monitor:
         loc = bd.get('location') or (st.get('country') or '').lower()
         L = next((x for x in cat['locations'] if x['code'] == loc), None)
         if not L:
-            raise ValueError(f'локации «{loc or "?"}» сейчас нет в bcloud')
+            raise ValueError(f'локации «{loc or "?"}» сейчас нет в Bobr Cloud')
         idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
         doms = await svc.auto_domains(self.store, prof, loc, 1)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
@@ -747,11 +747,11 @@ class Monitor:
             if srv:
                 try:
                     await self.runner.bcloud_factory(self.store, bd.get('buyer') or svc.buyer_of(self.store, prof)).delete(srv['id'])
-                    what += ', сервер удалён в bcloud'
+                    what += ', сервер удалён в Bobr Cloud'
                 except BcloudError as e:
-                    what += f', удалить сервер в bcloud не удалось: {e}'
+                    what += f', удалить сервер в Bobr Cloud не удалось: {e}'
             else:
-                what += ', сервера в bcloud не нашёл'
+                what += ', сервера в Bobr Cloud не нашёл'
         st.update(status='replaced', step=None, job=None, replaced_by=job['data'].get('domain'))
         self.store.set_mon(key, st)
         await self.say(prof, f'✅ {self.head(prof, st)}\nзаменена новой нодой <code>{html.escape(job["data"].get("domain", ""))}</code>; '
