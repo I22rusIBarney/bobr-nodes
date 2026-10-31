@@ -235,6 +235,7 @@ function otherView() {
 // ───────── мониторинг: чекеры в России, подписки групп, починка ─────────
 let MON = null, monTimer = 0;
 const MONF = {};  // несохранённые настройки мониторинга групп
+const CKF = {};  // несохранённый доступ по SSH на странице чекера
 const MST = { ok: ['', 'ok', 'доступна'], down: ['недоступна', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
   ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
 const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
@@ -252,8 +253,8 @@ function monitorView() {
   if (MON.error) { v.append(h('div', { class: 'notice bad' }, MON.error)); return v; }
   monPoll();
   const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
-    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : (CST[c.status] || [c.status, '']), onClick: () => UI.nav.push(() => checkerView(c.id)) }));
-  chRows.push(row({ title: 'Добавить чекер', cls: 'accent', onClick: () => UI.nav.push(checkerAddView) }));
+    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : (CST[c.status] || [c.status, '']), onClick: () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } }));
+  chRows.push(row({ title: 'Добавить чекер', cls: 'accent', onClick: () => { NEWCK = null; UI.nav.push(checkerAddView); } }));
   v.append(group(['Чекеры', h('span', { class: 'n' }, MON.checkers.length || '')], chRows,
     'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп; API чекера наружу не открыт — бот читает его по SSH.'));
   const gRows = MON.groups.map(g => {
@@ -268,14 +269,16 @@ function monitorView() {
   v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Последний опрос: ' + ago(MON.polled_at) + '. Дальше — каждые ' + Math.round(MON.every / 60) + ' мин.')));
   return v;
 }
+let NEWCK = null;  // введённое на странице «Новый чекер» — переживает перерисовку страницы
 function checkerAddView() {
-  const f = { name: '', ip: '' }, F = sshState({});
+  if (!NEWCK) NEWCK = { f: { name: '', ip: '' }, F: sshState({}) };
+  const { f, F } = NEWCK;
   const status = statusLine();
   const add = h('button', { class: 'btn', type: 'button' }, 'Поставить чекер');
   add.onclick = UI.busy(add, async () => {
     try {
       const r = await api('checkers', 'POST', { ...f, ...F });
-      MON = null; await loadMon(); UI.nav.back(); UI.nav.push(() => checkerView(r.id));
+      NEWCK = null; MON = null; await loadMon(); UI.nav.back(); UI.nav.push(() => checkerView(r.id));
     } catch (e) { showStatus(status, { ok: false, message: e.message }); }
   });
   return h('div', {}, ...title('Новый чекер', 'Мониторинг'),
@@ -300,11 +303,12 @@ function checkerView(id) {
     c.status === 'running' ? row({ title: 'Проверок', detail: `${c.online ?? 0} из ${c.proxies ?? 0} проходят` }) : null].filter(Boolean),
     c.poll_error || c.error || null));
   if ((c.log || []).length) v.append(group('Установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, c.log.join('\n'))]));
-  if (!c._ssh) c._ssh = sshState(c.ssh);
+  const F0 = CKF[id] || (CKF[id] = sshState(c.ssh));  // правки доступа переживают обновление страницы во время установки
+  c._ssh = F0;
   const re = h('button', { class: 'btn tinted', type: 'button', disabled: c.status === 'installing' }, c.status === 'failed' ? 'Повторить установку' : 'Переустановить и обновить');
   re.onclick = UI.busy(re, async () => {
     const F = c._ssh, changed = F.password || F.key_text || F.sudo_password || F.user !== c.ssh.user || F.port !== String(c.ssh.port) || F.key !== c.ssh.key;
-    if (await UI.run(() => api('checkers/' + id + '/install', 'POST', changed ? F : {}), 'Ставлю')) { await loadMon(); UI.nav.refresh(); }
+    if (await UI.run(() => api('checkers/' + id + '/install', 'POST', changed ? F : {}), 'Ставлю')) { delete CKF[id]; await loadMon(); UI.nav.refresh(); }
   });
   v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: c.access, key: 'c-ssh', body: () => sshFields(c._ssh, c.ssh, MON.bot_key) }),
     'Поменяйте, если сменился пароль или ключ, — новый доступ сохранится при переустановке.'), h('div', { class: 'pad' }, re));
@@ -710,25 +714,40 @@ function securityView() {
 // ───────── доступ по SSH: пароль, свой ключ, ключ бота (можно ключ + пароль), не-root — через sudo ─────────
 function sshState(view) { view = view || {}; return { user: view.user || 'root', port: String(view.port || 22), password: '', key: view.key || '', key_text: '', sudo_password: '' }; }
 function sshFields(F, view, botKey) {
+  // поля создаются один раз; при смене пользователя или ключа перерисовывается только нижняя часть —
+  // перерисовка страницы сбросила бы введённое и сняла фокус с поля
   view = view || {};
   const pwIn = (ph, k) => { const i = h('input', { type: 'password', autocomplete: 'off', placeholder: ph }); i.value = F[k] || ''; i.addEventListener('input', () => { F[k] = i.value; }); return i; };
-  const out = [
-    h('label', { class: 'field' }, h('label', {}, 'Пользователь'), textIn(F.user, 'root', x => { const was = F.user === 'root'; F.user = x.trim(); if (was !== (F.user === 'root')) UI.nav.refresh(); }, true, 'right')),
-    h('label', { class: 'field' }, h('label', {}, 'Порт'), textIn(F.port, '22', x => { F.port = x.replace(/\D/g, ''); }, true, 'right')),
+  const more = h('div');
+  const isRoot = () => !F.user || F.user === 'root';
+  const draw = () => {
+    const out = [];
+    if (F.key === 'own') {
+      const ta = h('textarea', { class: 'code', rows: 5, spellcheck: false, autocapitalize: 'off', placeholder: view.has_key && view.key === 'own' ? 'сохранён — вставьте новый, чтобы заменить' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----', style: 'text-align:left' });
+      ta.value = F.key_text; ta.addEventListener('input', () => { F.key_text = ta.value; });
+      out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta));
+    }
+    if (F.key === 'bot') out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, botKey || 'ssh-keygen недоступен'), copy: botKey || null, copyLabel: 'Ключ' }));
+    if (!isRoot()) out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));
+    out.push(h('div', { class: 'in-note' }, 'Можно пароль, ключ или оба сразу — если сервер требует и то, и другое (Сбер Клауд). '
+      + (isRoot() ? 'Под root — без sudo.' : `Вход под ${F.user}, команды — через sudo.`)
+      + (F.key === 'own' ? ' Ключ без парольной фразы; хранится на сервере бота файлом с доступом только для root.' : '')
+      + (F.key === 'bot' ? ` Добавьте ключ бота в ~/.ssh/authorized_keys пользователя ${F.user || 'root'}.` : '')));
+    more.replaceChildren(...out);
+  };
+  const user = h('input', { type: 'text', class: 'code', placeholder: 'root', autocomplete: 'off', autocapitalize: 'off', autocorrect: 'off', spellcheck: false, style: 'text-align:right' });
+  user.value = F.user;
+  user.addEventListener('input', () => { const was = isRoot(); F.user = user.value.trim(); if (was !== isRoot()) draw(); else more.lastChild && (more.lastChild.textContent = more.lastChild.textContent.replace(/Вход под \S+,/, `Вход под ${F.user},`)); });
+  const port = h('input', { type: 'text', class: 'code', inputmode: 'numeric', placeholder: '22', autocomplete: 'off', style: 'text-align:right' });
+  port.value = F.port;
+  port.addEventListener('input', () => { F.port = port.value.replace(/\D/g, ''); });
+  draw();
+  return [
+    h('label', { class: 'field' }, h('label', {}, 'Пользователь'), user),
+    h('label', { class: 'field' }, h('label', {}, 'Порт'), port),
     h('label', { class: 'field' }, h('label', {}, 'Пароль'), pwIn(view.has_password ? 'сохранён («-» — убрать)' : 'если нужен', 'password')),
-    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Ключ'), UI.segmented([{ value: '', label: 'Без ключа' }, { value: 'own', label: 'Свой' }, { value: 'bot', label: 'Ключ бота' }], F.key, x => { F.key = x; UI.nav.refresh(); }))];
-  if (F.key === 'own') {
-    const ta = h('textarea', { class: 'code', rows: 5, spellcheck: false, autocapitalize: 'off', placeholder: view.has_key && view.key === 'own' ? 'сохранён — вставьте новый, чтобы заменить' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----', style: 'text-align:left' });
-    ta.value = F.key_text; ta.addEventListener('input', () => { F.key_text = ta.value; });
-    out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta));
-  }
-  if (F.key === 'bot') out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, botKey || 'ssh-keygen недоступен'), copy: botKey || null, copyLabel: 'Ключ' }));
-  if (F.user && F.user !== 'root') out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));
-  out.push(h('div', { class: 'in-note' }, 'Можно пароль, ключ или оба сразу — если сервер требует и то, и другое (Сбер Клауд). '
-    + (F.user && F.user !== 'root' ? `Вход под ${F.user}, команды — через sudo.` : 'Под root — без sudo.')
-    + (F.key === 'own' ? ' Ключ без парольной фразы; хранится на сервере бота файлом с доступом только для root.' : '')
-    + (F.key === 'bot' ? ` Добавьте ключ бота в ~/.ssh/authorized_keys пользователя ${F.user || 'root'}.` : '')));
-  return out;
+    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Ключ'), UI.segmented([{ value: '', label: 'Без ключа' }, { value: 'own', label: 'Свой' }, { value: 'bot', label: 'Ключ бота' }], F.key, x => { F.key = x; draw(); })),
+    more];
 }
 
 // ───────── ноды панели ─────────
