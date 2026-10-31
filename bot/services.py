@@ -58,6 +58,21 @@ def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict
     return {'user': 'root', 'port': 22, 'password': d.get('password', ''), 'key': ''} if d else {}
 
 
+async def start_upgrade(store: Store, runner: Runner, prof: dict, n: dict, tag: str, chat_id: int) -> int:
+    """Задача «обновить ноду n из панели до tag». ValueError — нет доступа по SSH."""
+    ssh = node_ssh(store, runner, prof['id'], n['uuid'], n['address'])
+    if not ssh:
+        raise ValueError('нет доступа по SSH — укажите его на странице ноды')
+    bd = bot_jobs_by_ip(store, prof['id']).get(n['address']) or {}
+    data = {'kind': 'upgrade', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
+            'domain': bd.get('domain') or n['name'], 'flag': '⬆️', 'loc_name': n['name'],
+            'spec': f'обновление ноды до {tag}', 'tag': tag, 'ssh': ssh}
+    jid = store.add_job('up-' + n['uuid'][:8], prof['id'], chat_id, data)
+    await runner.render(jid, force=True)
+    runner.start(jid)
+    return jid
+
+
 def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
     tok = cf_token_of(store, prof)
     if not tok:

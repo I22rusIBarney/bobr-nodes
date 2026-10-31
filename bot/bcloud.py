@@ -57,7 +57,7 @@ class Bcloud:
                 detail = r.text[:200]
             hint = {401: ' — неверный токен', 404: ' — API выключен или неверный адрес (bcloud api-token)',
                     403: ' — доступ запрещён'}.get(r.status_code, '')
-            raise BcloudError(f'bcloud {r.status_code}{hint}: {detail}')
+            raise BcloudError(f'Bobr Cloud {r.status_code}{hint}: {detail}')
         return payload
 
     async def resolve(self, q: str) -> dict:
@@ -84,7 +84,7 @@ class Bcloud:
             return await self._call('GET', '/quote', params={'tg_id': self.tg_id, 'location': location,
                                                              'cpu': int(cpu), 'ram': int(ram), 'disk': int(disk)})
         except BcloudError as e:
-            if str(e).startswith('bcloud 404') and str(e).endswith(': Not Found'):  # старый bcloud: конструктора в API нет
+            if str(e).startswith('Bobr Cloud 404') and str(e).endswith(': Not Found'):  # старый bcloud: конструктора в API нет
                 raise BcloudError('Bobr Cloud не считает цену своей конфигурации — обновите его: bcloud update') from None
             raise
 
@@ -93,7 +93,7 @@ class Bcloud:
         try:
             return (await self._call('GET', '/servers', params={'tg_id': self.tg_id}))['servers']
         except BcloudError as e:
-            if str(e).startswith('bcloud 405'):  # старый bcloud: списка серверов в служебном API ещё нет
+            if str(e).startswith('Bobr Cloud 405'):  # старый bcloud: списка серверов в служебном API ещё нет
                 raise BcloudError('Bobr Cloud не отдаёт список серверов — обновите его: bcloud update') from None
             raise
 
@@ -112,3 +112,19 @@ class Bcloud:
     async def delete(self, sid: int) -> dict:
         """Удалить сервер владельца в Bobr Cloud (возврат остатка — по настройкам Bobr Cloud)."""
         return await self._call('POST', f'/servers/{sid}/delete', json={'tg_id': self.tg_id})
+
+    async def renew(self, sid: int) -> dict:
+        """Продлить сервер владельца на 30 дней с его баланса."""
+        return await self._new_api(self._call('POST', f'/servers/{sid}/renew', json={'tg_id': self.tg_id}))
+
+    async def set_autorenew(self, sid: int, value: bool) -> dict:
+        return await self._new_api(self._call('POST', f'/servers/{sid}/autorenew', json={'tg_id': self.tg_id, 'value': bool(value)}))
+
+    @staticmethod
+    async def _new_api(coro):
+        try:
+            return await coro
+        except BcloudError as e:
+            if str(e).startswith(('Bobr Cloud 404', 'Bobr Cloud 405')) and str(e).endswith(('Not Found', 'Method Not Allowed')):
+                raise BcloudError('Bobr Cloud не умеет продлевать через API — обновите его: bcloud update') from None
+            raise

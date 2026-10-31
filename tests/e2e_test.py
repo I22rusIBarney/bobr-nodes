@@ -116,6 +116,8 @@ class FakeAstra:
             s.made[sid]['ip'] = f'203.0.113.{sid - 500}'
         if a == 'rename':
             s.made[sid]['renamed'] = body['name']
+        if a == 'renew':
+            s.made[sid]['renewed'] = s.made[sid].get('renewed', 0) + 1
         return {'ok': True}
 
     async def close(s): pass
@@ -212,7 +214,11 @@ async def main():
     monitor = Monitor(store, runner, bot, {1}, access=access)
     monitor.soon = lambda *a, **kw: None  # в тесте опросы — только вручную
     dp['monitor'] = monitor
-    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor, access=access)
+    from bot.autopilot import Autopilot
+    pilot = Autopilot(store, runner, bot, access, 'https://nodes.test')
+    dp['autopilot'] = pilot
+    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor,
+                     access=access, autopilot=pilot)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
@@ -1416,6 +1422,78 @@ async def main():
        and all(not c['mine'] and 'ip' not in c and 'log' not in c and 'ssh' not in c for c in mv['checkers']),
        f'пользователь видит общие чекеры без адресов и доступа и только свои группы: {mv["checkers"][:1]}')
     ok((await vwapi(f'checkers/{cids[1]}', 'DELETE'))[0] == 403 and len(store.checkers()) == 2, 'чужой чекер пользователь не удаляет')
+
+    # ── автопилот: массовые действия, нагрузка, аренда, автообновление, утренняя сводка
+    st, L = await wapi(f'profiles/{pid}/nodes')
+    two = [x['uuid'] for x in L['nodes'] if x['has_ssh'] and not x['disabled']][:2]
+    st, js = await wapi(f'profiles/{pid}/nodes/apply-many', 'POST', {'uuids': two, 'final_mask': True})
+    await runner.wait_all()
+    ok(st == 200 and len(js['ids']) == len(two) == 2 and all(store.job(i)['status'] == 'done' for i in js['ids']),
+       f'Final Mask сразу на двух нодах: {js}')
+    ok((await wapi(f'profiles/{pid}/nodes/apply-many', 'POST', {'uuids': two}))[0] == 400, 'массово: нечего менять — отказ')
+
+    behaviour['load'] = 'high'
+    n0 = len(sess.sent)
+    for _ in range(3):
+        await pilot.check_load()
+    hotmsg = [m.text for name, m in sess.sent[n0:] if name == 'SendMessage' and '🔥' in m.text]
+    ok(fakes_remote.load_calls and hotmsg and 'процессор 95%' in hotmsg[0] and 'ещё одну ноду' in hotmsg[0], f'высокая нагрузка ~45 минут — совет: {hotmsg[:1]}')
+    st, L = await wapi(f'profiles/{pid}/nodes')
+    ok(any(x['load'].get('hot') == ['cpu'] for x in L['nodes']), 'нагрузка видна в списке нод')
+    behaviour['load'] = 'low'
+    n0 = len(sess.sent)
+    await pilot.check_load()
+    ok(any('нагрузка спала' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'нагрузка спала — сообщение')
+
+    st, rent = await wapi(f'profiles/{pid}/rent')
+    ok(st == 200 and rent['servers'] and all(x['expires_at'] and x['auto_renew'] is not None for x in rent['servers']),
+       f'аренда: серверы группы со сроком и автопродлением: {rent.get("servers", [])[:1]}')
+    rs = rent['servers'][0]
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    st, js = await wapi(f'profiles/{pid}/rent/{rs["id"]}/renew', 'POST', {})
+    st2, rent2 = await wapi(f'profiles/{pid}/rent')
+    ok(st == 200 and next(x for x in rent2['servers'] if x['id'] == rs['id'])['expires_at'] > rs['expires_at'], f'продление из бота: {js}')
+    st, js = await wapi(f'profiles/{pid}/rent/{rs["id"]}/autorenew', 'POST', {'value': False})
+    st2, rent2 = await wapi(f'profiles/{pid}/rent')
+    ok(st == 200 and next(x for x in rent2['servers'] if x['id'] == rs['id'])['auto_renew'] is False, 'автопродление выключено из бота')
+    ok((await wapi(f'profiles/{pid}/rent/999999/renew', 'POST', {}))[0] == 404, 'чужой сервер не продлить')
+    st, js = await wapi(f'profiles/{pid}/auto', 'POST', {'renew': True, 'tz': 0})
+    await pilot.check_rent()
+    st2, rent2 = await wapi(f'profiles/{pid}/rent')
+    ok(st == 200 and js['renew'] is True and all(x['auto_renew'] for x in rent2['servers']), 'автопилот сам включил автопродление серверам группы')
+
+    import time as _tm
+    hour = _tm.gmtime().tm_hour
+    pilot._load_at = pilot._rent_at = _tm.time()  # замеры и аренду здесь не ждём — они проверены выше
+    target = next(x for x in world.nodes if x['uuid'] == two[0])
+    target['nodeVersion'] = '2.2.0'
+    st, js = await wapi(f'profiles/{pid}/auto', 'POST', {'update': True, 'hour': hour, 'weekday': None, 'tz': 0})
+    ok(st == 200 and js['update'] and js['hour'] == hour, 'автообновление включено')
+    n0, u0 = len(sess.sent), len(fakes_remote.upgrades)
+    for _ in range(3):
+        await pilot.tick()
+        await runner.wait_all()
+    rep_ = [m.text for name, m in sess.sent[n0:] if name == 'SendMessage' and 'Автообновление' in m.text]
+    ok(len(fakes_remote.upgrades) > u0 and fakes_remote.upgrades[-1][1] == '2.3.1' and rep_ and 'Обновлено: 1' in rep_[0],
+       f'автообновление по расписанию: устаревшая нода обновлена, итог одним сообщением: {rep_[:1]}')
+    ok(not any(name in ('SendMessage', 'EditMessageText') and 'обновление ноды до' in (getattr(m, 'text', '') or '')
+               for name, m in sess.sent[n0:]), 'ночью ход задач в чат не пишется')
+    await pilot.tick()
+    ok(len([m for name, m in sess.sent[n0:] if name == 'SendMessage' and 'Автообновление' in m.text]) == 1, 'сегодня второй раз не запускается')
+
+    st, js = await wapi('summary', 'POST', {'on': True, 'hour': hour, 'tz': 0})
+    n0 = len(sess.sent)
+    await pilot.tick()
+    sm = [m for name, m in sess.sent[n0:] if name == 'SendMessage' and 'Сводка Bobr Nodes' in m.text]
+    ok(st == 200 and js['on'] and sm and sm[0].chat_id == 1 and 'Основная' in sm[0].text and 'на связи' in sm[0].text,
+       f'утренняя сводка в назначенный час: {sm[0].text[:300] if sm else ""}')
+    n0 = len(sess.sent)
+    await pilot.tick()
+    ok(not any('Сводка Bobr Nodes' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'сводка — раз в день')
+    st, js = await wapi('summary/now', 'POST', {}, headers=HV)
+    ok(st == 200 and any(m.chat_id == 77 and 'Сводка' in m.text and 'Основная' not in m.text
+                         for name, m in sess.sent[-3:] if name == 'SendMessage'), 'сводка пользователю — только по его группам')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')

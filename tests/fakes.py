@@ -334,11 +334,17 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
         checker_polls: list = []
         files: dict = {}
         upgrades: list = []    # (ip, версия | 'rollback')
+        load_calls: list = []  # ip нод, где автопилот мерил нагрузку
         relay_cfg: dict = {}   # ip российского сервера → конфиг HAProxy входа через Россию
 
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
             assert self.n.get('ssh_password') or self.n.get('ssh_key'), 'нет ни пароля root, ни ключа'
+            if 'BNODES_LOAD' in cmd:  # замер нагрузки автопилотом
+                FakeRemote.load_calls.append(ip)
+                busy = behaviour.get('load') == 'high'
+                return 0, ('CPU1 cpu 100 0 100 1000 0 0 0 0 0 0\n' + ('CPU2 cpu 190 0 105 1005 0 0 0 0 0 0\n' if busy
+                           else 'CPU2 cpu 105 0 102 1093 0 0 0 0 0 0\n') + 'MEM 1000 600\nDISK 30%\nNET eth0 1000 2000\nNPROC 2\n')
             if 'BNODES_UPGRADE' in cmd:  # обновление ноды: образ, проверка, откат
                 st = behaviour.get(f'upgrade-{ip}', 'ok')
                 if 'BNODES_UPGRADE_ROLLBACK' in cmd:

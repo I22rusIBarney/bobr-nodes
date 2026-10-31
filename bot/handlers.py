@@ -203,6 +203,14 @@ async def main_cb(c: CallbackQuery, state: FSMContext, store: Store, public_url:
     await show(c, menu_text(store, access, role, uid, username), main_kb(store, public_url))
 
 
+@router.message(Command('summary'))
+async def summary_cmd(m: Message, autopilot=None, uid: int = 0):
+    if autopilot is None:
+        return await m.answer('Сводка недоступна')
+    await m.answer('Собираю сводку…')
+    await m.answer(await autopilot.summary(uid or m.from_user.id), parse_mode='HTML', disable_web_page_preview=True)
+
+
 @router.message(Command('cancel'))
 async def cancel(m: Message, state: FSMContext, store: Store, public_url: str, access: Access | None = None,
                  role: str = 'admin', uid: int = 0, username: str = ''):

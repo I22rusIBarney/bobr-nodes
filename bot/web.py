@@ -110,7 +110,7 @@ def client_ip(request) -> str:
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
-              access: Access | None = None) -> web.Application:
+              access: Access | None = None, autopilot=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     fails: dict[str, list[float]] = {}
@@ -611,6 +611,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         for n in nodes:
             pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
             out.append({'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
+                        'load': autopilot.load_of(p['id'], n['uuid']) if autopilot else {},
                         'has_ssh': bool(runner.ssh_of(p['id'], n['uuid']) or n['address'] in bot), 'busy': n['uuid'] in busy,
                         'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                         'disabled': bool(n.get('isDisabled')), 'country': n.get('countryCode') or '',
@@ -641,7 +642,6 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         want = None if b.get('all') else {u for u in (b.get('uuids') or []) if isinstance(u, str)}
         if want is not None and not want:
             raise ApiError('Выберите ноды')
-        bj = bot_jobs_by_ip(p['id'])
         busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
         ids, skipped = [], []
         for n in nodes:
@@ -653,18 +653,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if n['uuid'] in busy:
                 skipped.append({'name': n['name'], 'why': 'по ноде уже идёт задача'})
                 continue
-            ssh = node_ssh(p['id'], n['uuid'], n['address'])
-            if not ssh:
-                skipped.append({'name': n['name'], 'why': 'нет доступа по SSH — укажите его на странице ноды'})
-                continue
-            bd = bj.get(n['address']) or {}
-            data = {'kind': 'upgrade', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
-                    'domain': bd.get('domain') or n['name'], 'flag': '⬆️', 'loc_name': n['name'],
-                    'spec': f'обновление ноды до {tag}', 'tag': tag, 'ssh': ssh}
-            jid = store.add_job('up-' + n['uuid'][:8], p['id'], uid_of(request), data)
-            await runner.render(jid, force=True)
-            runner.start(jid)
-            ids.append(jid)
+            try:
+                ids.append(await svc.start_upgrade(store, runner, p, n, tag, uid_of(request)))
+            except ValueError as e:
+                skipped.append({'name': n['name'], 'why': str(e)})
         return J({'ids': ids, 'skipped': skipped})
 
     @r.get('/api/profiles/{pid}/nodes/{uuid}')
@@ -1017,11 +1009,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         runner.start(jid)
         return J({'id': jid})
 
-    @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
-    async def panel_node_apply(request):
-        """Задача «дополнения на ноде»: Psiphon/WARP (с переводом ноды в вариант профиля), порт, Final Mask."""
-        p = profile_or_404(request.match_info['pid'], request)
-        uuid, b = request.match_info['uuid'], await body(request)
+    def parse_apply(p: dict, b: dict) -> tuple[dict, object, object]:
+        """Дополнения, порт и Final Mask из запроса; ApiError — если что-то не так или менять нечего."""
         try:
             extras = parse_extras(b)
             port = b.get('port')
@@ -1032,23 +1021,66 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         if not extras and port == '' and fm is None:
             raise ApiError('Нечего менять')
-        nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
-        n = next((x for x in nodes if x['uuid'] == uuid), None)
-        if not n:
-            raise ApiError('Ноды нет в панели', 404)
-        ssh = node_ssh(p['id'], uuid, n['address'])
+        return extras, port, fm
+
+    async def node_apply(p: dict, n: dict, parsed, uid: int) -> int:
+        """Задача «дополнения на ноде» для ноды n из панели; ApiError — почему нельзя."""
+        extras, port, fm = parsed
+        ssh = node_ssh(p['id'], n['uuid'], n['address'])
         if (extras or port != '') and not ssh:
-            raise ApiError('Укажите доступ по SSH к ноде — без него Psiphon, WARP, XHTTP и порт не поставить')
+            raise ApiError('нет доступа по SSH — без него Psiphon, WARP, XHTTP и порт не поставить')
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
-        data = {'kind': 'node', 'node_uuid': uuid, 'name': n['name'], 'ip': bd.get('ip') or n['address'],
+        data = {'kind': 'node', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
                 'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
                 'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
                 'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'xhttp': extras.get('xhttp'),
                 'port': port, 'final_mask': fm}
-        jid = store.add_job('node-' + uuid[:8], p['id'], int(request['user']['id']), data)
+        jid = store.add_job('node-' + n['uuid'][:8], p['id'], uid, data)
         await runner.render(jid, force=True)
         runner.start(jid)
-        return J({'id': jid})
+        return jid
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/apply')
+    async def panel_node_apply(request):
+        """Задача «дополнения на ноде»: Psiphon/WARP (с переводом ноды в вариант профиля), порт, Final Mask."""
+        p = profile_or_404(request.match_info['pid'], request)
+        uuid, b = request.match_info['uuid'], await body(request)
+        parsed = parse_apply(p, b)
+        nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        try:
+            return J({'id': await node_apply(p, n, parsed, uid_of(request))})
+        except ApiError as e:
+            raise ApiError(str(e)[:1].upper() + str(e)[1:]) from None
+
+    @r.post('/api/profiles/{pid}/nodes/apply-many')
+    async def panel_nodes_apply(request):
+        """То же сразу на нескольких нодах: задача на каждую; кого нельзя — в skipped с причиной."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        want = {u for u in (b.get('uuids') or []) if isinstance(u, str)}
+        if not want:
+            raise ApiError('Выберите ноды')
+        parsed = parse_apply(p, b)
+        try:
+            nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
+        ids, skipped = [], []
+        for n in nodes:
+            if n['uuid'] not in want:
+                continue
+            if n['uuid'] in busy:
+                skipped.append({'name': n['name'], 'why': 'по ноде уже идёт задача'})
+                continue
+            try:
+                ids.append(await node_apply(p, n, parsed, uid_of(request)))
+            except ApiError as e:
+                skipped.append({'name': n['name'], 'why': str(e)})
+        return J({'ids': ids, 'skipped': skipped})
 
     # ── перенос хостов между панелями ──
     @r.post('/api/hosts/export')
@@ -1617,6 +1649,98 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Проверка уже идёт')
         asyncio.get_running_loop().create_task(m.tick())
         return J({'ok': True})
+
+    # ── автопилот: автообновление, нагрузка, аренда, утренняя сводка ──
+    def pilot():
+        if autopilot is None:
+            raise ApiError('Автопилот выключен', 404)
+        return autopilot
+
+    @r.get('/api/profiles/{pid}/auto')
+    async def auto_get(request):
+        from . import autopilot as ap
+        p = profile_or_404(request.match_info['pid'], request)
+        st = pilot().get(f'ap:upd:{p["id"]}')
+        return J({**ap.auto_cfg(p), 'last': {k: st.get(k) for k in ('date', 'tag', 'done', 'failed', 'stopped', 'queue', 'reported')},
+                  'weekdays': ap.WEEKDAYS})
+
+    @r.post('/api/profiles/{pid}/auto')
+    async def auto_save(request):
+        from . import autopilot as ap
+        p = profile_or_404(request.match_info['pid'], request)
+        try:
+            a = ap.clean_auto(await body(request), p)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        store.save_profile({**p, 'auto': a})
+        return J({'ok': True, **a})
+
+    @r.get('/api/profiles/{pid}/rent')
+    async def rent_get(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        try:
+            r = await pilot().rent(p)
+        except BcloudError as e:
+            raise ApiError(str(e)) from None
+        risky = {x['id']: x['why'] for x in pilot().rent_risks(r)}
+        for x in r['servers']:
+            x['risk'] = risky.get(x['id'], '')
+        return J(r)
+
+    async def rent_server(request) -> tuple[dict, int]:
+        p = profile_or_404(request.match_info['pid'], request)
+        sid = int(request.match_info['sid'])
+        if not any(int(d.get('server_id') or 0) == sid for d in bot_jobs_by_ip(p['id']).values()):
+            raise ApiError('Сервер не из этой группы', 404)
+        return p, sid
+
+    @r.post('/api/profiles/{pid}/rent/{sid}/renew')
+    async def rent_renew(request):
+        p, sid = await rent_server(request)
+        try:
+            await bcloud_from(store, buyer_of(store, p)).renew(sid)
+        except BcloudError as e:
+            raise ApiError(str(e)) from None
+        return J({'ok': True, 'message': 'Продлено на 30 дней'})
+
+    @r.post('/api/profiles/{pid}/rent/{sid}/autorenew')
+    async def rent_auto(request):
+        p, sid = await rent_server(request)
+        v = bool((await body(request)).get('value'))
+        try:
+            await bcloud_from(store, buyer_of(store, p)).set_autorenew(sid, v)
+        except BcloudError as e:
+            raise ApiError(str(e)) from None
+        return J({'ok': True, 'auto_renew': v})
+
+    @r.get('/api/summary')
+    async def summary_get(request):
+        from . import autopilot as ap
+        return J(ap.summary_cfg(store, uid_of(request)))
+
+    @r.post('/api/summary')
+    async def summary_save(request):
+        from . import autopilot as ap
+        b, cur = await body(request), ap.summary_cfg(store, uid_of(request))
+        try:
+            if 'on' in b:
+                cur['on'] = bool(b['on'])
+            if 'hour' in b:
+                if not isinstance(b['hour'], int) or isinstance(b['hour'], bool) or not 0 <= b['hour'] <= 23:
+                    raise ValueError('Час: от 0 до 23')
+                cur['hour'] = b['hour']
+            if 'tz' in b:
+                cur['tz'] = ap.tz_of(b['tz'])
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        store.set(f'summary:{uid_of(request)}', json.dumps(cur))
+        return J(cur)
+
+    @r.post('/api/summary/now')
+    async def summary_now(request):
+        text = await pilot().summary(uid_of(request))
+        await pilot().send(uid_of(request), text, pilot().button())
+        return J({'ok': True, 'message': 'Сводка отправлена в чат с ботом'})
 
     # ── пользователи и приглашения (только администратор) ──
     def invite_view(inv: dict) -> dict:

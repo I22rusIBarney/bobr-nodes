@@ -240,7 +240,7 @@ class Runner:
             return
         self._edited[jid] = now
         job = self.store.job(jid)
-        if not job:
+        if not job or not job['chat_id']:  # без чата — тихая задача (автообновление ночью): итог придёт сводкой
             return
         prof = self.store.profile(job['profile_id']) or {}
         text = job_text(job, prof.get('name', ''), self.last.get(jid, ''))

@@ -1,0 +1,496 @@
+"""Автопилот: то, что бот делает сам по расписанию.
+
+- автообновление нод группы: в выбранный час (каждый день или раз в неделю) — по одной ноде, с проверкой и откатом;
+  после первого отката очередь останавливается (скорее всего, версия не подходит к панели); итог — одним сообщением;
+- нагрузка нод: раз в 15 минут по SSH — процессор, память, диск, трафик; держится высокой ~45 минут — сообщение
+  с советом (тариф помощнее или ещё одна нода в той же стране), спала — сообщение;
+- аренда: раз в 6 часов — срок серверов группы в Bobr Cloud и баланс; кончается через 3 дня без автопродления или
+  денег не хватит — сообщение; по настройке группы бот сам включает автопродление серверам;
+- утренняя сводка: в выбранный час каждому, кто её включил, — по его группам.
+
+Время — по часовому поясу человека, который настраивал (браузер сообщает смещение).
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import html
+import json
+import logging
+import re
+import time
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+
+from . import engine, services as svc, sshaccess, upgrade as up
+from .bcloud import BcloudError
+from .runner import bcloud_from, buyer_of
+from .store import ACTIVE, Store
+
+log = logging.getLogger(__name__)
+
+LOAD_EVERY = 15 * 60
+RENT_EVERY = 6 * 3600
+HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
+HIGH_CYCLES = 3              # подряд высоких замеров до сообщения (~45 минут)
+REALERT = 12 * 3600
+RENT_DAYS = 3
+WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
+MARK = 'BNODES_LOAD'
+
+LOAD_CMD = (f': {MARK}; a=$(head -1 /proc/stat); sleep 1; b=$(head -1 /proc/stat); echo "CPU1 $a"; echo "CPU2 $b"; '
+            "free -b | awk '/^Mem:/{print \"MEM\",$2,$7}'; df -P / | awk 'NR==2{print \"DISK\",$5}'; "
+            "awk 'NR>2{gsub(\":\",\" \"); print \"NET\",$1,$2,$10}' /proc/net/dev; echo \"NPROC $(nproc)\"")
+
+
+# ───────── настройки ─────────
+def auto_cfg(prof: dict) -> dict:
+    a = prof.get('auto') or {}
+    return {'update': bool(a.get('update')), 'hour': int(a.get('hour', 4)), 'weekday': a.get('weekday'),
+            'tz': int(a.get('tz', 0)), 'load': a.get('load', True) is not False, 'renew': a.get('renew')}
+
+
+def clean_auto(raw: dict, cur: dict) -> dict:
+    a = auto_cfg(cur)
+    if 'update' in raw:
+        a['update'] = bool(raw['update'])
+    if 'hour' in raw:
+        h = raw['hour']
+        if not isinstance(h, int) or isinstance(h, bool) or not 0 <= h <= 23:
+            raise ValueError('Час: от 0 до 23')
+        a['hour'] = h
+    if 'weekday' in raw:
+        w = raw['weekday']
+        if w is not None and (not isinstance(w, int) or isinstance(w, bool) or not 0 <= w <= 6):
+            raise ValueError('День недели: 0 (пн) … 6 (вс) или каждый день')
+        a['weekday'] = w
+    if 'tz' in raw:
+        a['tz'] = tz_of(raw['tz'])
+    if 'load' in raw:
+        a['load'] = bool(raw['load'])
+    if 'renew' in raw:
+        a['renew'] = None if raw['renew'] is None else bool(raw['renew'])
+    return a
+
+
+def tz_of(v) -> int:
+    if not isinstance(v, int) or isinstance(v, bool) or not -14 * 60 <= v <= 14 * 60:
+        raise ValueError('Часовой пояс: смещение в минутах')
+    return v
+
+
+def summary_cfg(store: Store, uid: int) -> dict:
+    try:
+        s = json.loads(store.get(f'summary:{uid}') or '{}')
+    except ValueError:
+        s = {}
+    return {'on': bool(s.get('on')), 'hour': int(s.get('hour', 9)), 'tz': int(s.get('tz', 0))}
+
+
+def local_now(tz: int, now: float | None = None) -> dt.datetime:
+    return dt.datetime.fromtimestamp(now if now is not None else time.time(), dt.timezone.utc) + dt.timedelta(minutes=tz)
+
+
+def due(hour: int, tz: int, last_date: str, weekday=None, now: float | None = None) -> str | None:
+    """Пора ли запускать: местный час наступил, сегодня ещё не запускали, и день недели подходит. Вернёт дату."""
+    t = local_now(tz, now)
+    if t.hour != hour or (weekday is not None and t.weekday() != weekday):
+        return None
+    d = t.strftime('%Y-%m-%d')
+    return None if d == last_date else d
+
+
+# ───────── нагрузка ─────────
+def parse_load(out: str, prev: dict | None, now: float) -> dict:
+    cpu1 = re.search(r'CPU1 cpu\s+([\d\s]+)', out)
+    cpu2 = re.search(r'CPU2 cpu\s+([\d\s]+)', out)
+    res: dict = {'at': now}
+    if cpu1 and cpu2:
+        a, b = [list(map(int, m.group(1).split())) for m in (cpu1, cpu2)]
+        tot = sum(b) - sum(a)
+        idle = (b[3] + (b[4] if len(b) > 4 else 0)) - (a[3] + (a[4] if len(a) > 4 else 0))
+        res['cpu'] = round(100 * (1 - idle / tot)) if tot > 0 else 0
+    m = re.search(r'MEM (\d+) (\d+)', out)
+    if m and int(m.group(1)):
+        res['mem'] = round(100 * (1 - int(m.group(2)) / int(m.group(1))))
+    m = re.search(r'DISK (\d+)%', out)
+    if m:
+        res['disk'] = int(m.group(1))
+    rx = tx = 0
+    for name, r, t in re.findall(r'NET (\S+) (\d+) (\d+)', out):
+        if name != 'lo' and not name.startswith(('docker', 'veth', 'br-')):
+            rx, tx = rx + int(r), tx + int(t)
+    res['rx_total'], res['tx_total'] = rx, tx
+    if prev and prev.get('at') and now > prev['at'] and rx >= prev.get('rx_total', 0) and tx >= prev.get('tx_total', 0):
+        secs = now - prev['at']
+        res['rx'] = round((rx - prev['rx_total']) * 8 / secs / 1e6, 1)
+        res['tx'] = round((tx - prev['tx_total']) * 8 / secs / 1e6, 1)
+    m = re.search(r'NPROC (\d+)', out)
+    if m:
+        res['cores'] = int(m.group(1))
+    return res
+
+
+def hot(sample: dict) -> list[str]:
+    """Что упирается: ['cpu', 'mem', 'disk']."""
+    return [k for k, lim in HIGH.items() if (sample.get(k) or 0) >= lim]
+
+
+def load_text(s: dict) -> str:
+    parts = []
+    if s.get('cpu') is not None:
+        parts.append(f'процессор {s["cpu"]}%')
+    if s.get('mem') is not None:
+        parts.append(f'память {s["mem"]}%')
+    if s.get('disk') is not None:
+        parts.append(f'диск {s["disk"]}%')
+    if s.get('rx') is not None:
+        parts.append(f'трафик ↓{s["rx"]:g} ↑{s["tx"]:g} Мбит/с')
+    return ', '.join(parts)
+
+
+ADVICE = {'cpu': 'не хватает процессора', 'mem': 'не хватает памяти', 'disk': 'кончается место на диске'}
+
+
+class Autopilot:
+    def __init__(self, store: Store, runner, bot, access, public_url: str = '', every: float = 60):
+        self.store, self.runner, self.bot, self.access = store, runner, bot, access
+        self.public_url = public_url
+        self.every = every
+        self._load_at = 0.0
+        self._rent_at = 0.0
+        self._bg: set[asyncio.Task] = set()
+        self._lock = asyncio.Lock()
+
+    # ── служебное ──
+    def get(self, key: str) -> dict:
+        try:
+            v = json.loads(self.store.get(key) or '{}')
+        except ValueError:
+            v = {}
+        return v if isinstance(v, dict) else {}
+
+    def put(self, key: str, v: dict) -> None:
+        self.store.set(key, json.dumps(v, ensure_ascii=False))
+
+    def panel(self, prof: dict) -> engine.Panel:
+        return engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
+
+    def button(self):
+        if not self.public_url.startswith('https://'):
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text='⚙️ Панель управления', web_app=WebAppInfo(url=self.public_url.rstrip('/') + '/admin'))]])
+
+    async def say(self, prof: dict, text: str, markup=None) -> None:
+        for uid in self.access.recipients(prof):
+            await self.send(uid, text, markup)
+
+    async def send(self, uid: int, text: str, markup=None) -> None:
+        try:
+            await self.bot.send_message(uid, text, parse_mode='HTML', reply_markup=markup, disable_web_page_preview=True)
+        except Exception as e:  # noqa: BLE001
+            log.info('autopilot notify %s: %s', uid, e)
+
+    def _bg_task(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._bg.add(t)
+        t.add_done_callback(self._bg.discard)
+
+    # ── цикл ──
+    async def run(self) -> None:
+        await asyncio.sleep(45)
+        while True:
+            try:
+                await self.tick()
+            except Exception:  # noqa: BLE001 — автопилот не должен ронять бота
+                log.exception('autopilot tick')
+            await asyncio.sleep(self.every)
+
+    async def tick(self, now: float | None = None) -> None:
+        now = now if now is not None else time.time()
+        async with self._lock:
+            for prof in self.store.profiles():
+                try:
+                    await self.drive_update(prof, now)
+                except Exception:  # noqa: BLE001
+                    log.exception('autopilot update %s', prof.get('id'))
+            await self.summaries(now)
+        if now - self._load_at >= LOAD_EVERY:
+            self._load_at = now
+            self._bg_task(self.check_load())
+        if now - self._rent_at >= RENT_EVERY:
+            self._rent_at = now
+            self._bg_task(self.check_rent())
+
+    # ───────── автообновление ─────────
+    async def drive_update(self, prof: dict, now: float) -> None:
+        cfg, key = auto_cfg(prof), f'ap:upd:{prof["id"]}'
+        st = self.get(key)
+        if st.get('job'):
+            j = self.store.job(int(st['job']))
+            if j and j['status'] in ACTIVE:
+                return
+            (st.setdefault('done', []) if j and j['status'] == 'done' else st.setdefault('failed', [])).append(
+                {'name': (j or {}).get('data', {}).get('name', '?'), 'result': (j or {}).get('data', {}).get('result')
+                 or (j or {}).get('error', '')[:160]})
+            st['job'] = None
+            if j and j['status'] == 'failed':
+                st['stopped'] = st.get('queue') or []
+                st['queue'] = []  # после отката не продолжаем: скорее всего, версия не подходит к панели
+            self.put(key, st)
+        if st.get('queue'):
+            uuid = st['queue'].pop(0)
+            self.put(key, st)
+            try:
+                nodes = await asyncio.to_thread(lambda: self.panel(prof).call('GET', '/api/nodes'))
+                n = next((x for x in nodes if x['uuid'] == uuid), None)
+                if n:
+                    st['job'] = await svc.start_upgrade(self.store, self.runner, prof, n, st['tag'], 0)
+            except (engine.StepError, ValueError) as e:
+                st.setdefault('failed', []).append({'name': uuid[:8], 'result': str(e)[:160]})
+            self.put(key, st)
+            return
+        if st.get('started') and not st.get('reported'):
+            st['reported'] = True
+            self.put(key, st)
+            await self.report_update(prof, st)
+            return
+        if not cfg['update']:
+            return
+        date = due(cfg['hour'], cfg['tz'], st.get('date', ''), cfg['weekday'], now)
+        if not date:
+            return
+        st = {'date': date}
+        self.put(key, st)
+        try:
+            pl = self.panel(prof)
+            nodes, tags, pv = await asyncio.gather(asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
+                                                   asyncio.to_thread(up.hub_tags), asyncio.to_thread(up.panel_version, pl))
+        except engine.StepError as e:
+            log.info('autopilot update %s: %s', prof['id'], e)
+            return
+        tag = up.pick_target(tags, pv)
+        if tag == 'latest':  # без списка версий не знаем, что устарело — ночью наугад не обновляем
+            return
+        old = [n['uuid'] for n in nodes if not n.get('isDisabled') and n.get('isConnected')
+               and up.semver(n.get('nodeVersion')) and up.semver(n['nodeVersion']) < up.semver(tag)]
+        if old:
+            st.update(tag=tag, queue=old, done=[], failed=[], started=now, reported=False)
+            self.put(key, st)
+
+    async def report_update(self, prof: dict, st: dict) -> None:
+        done, failed = st.get('done') or [], st.get('failed') or []
+        lines = [f'⬆️ <b>Автообновление</b> · {html.escape(prof["name"])} → {html.escape(st.get("tag", ""))}']
+        if done:
+            lines.append(f'Обновлено: {len(done)} — ' + ', '.join(html.escape(x['name']) for x in done[:15]))
+        for x in failed:
+            lines.append(f'❌ {html.escape(x["name"])}: {html.escape(x["result"] or "")}')
+        if st.get('stopped'):
+            lines.append(f'Остальные ({len(st["stopped"])}) не трогал: после отката новая версия, похоже, не подходит. '
+                         'Проверьте версию панели и обновите вручную.')
+        await self.say(prof, '\n'.join(lines))
+
+    # ───────── нагрузка ─────────
+    async def check_load(self) -> None:
+        sem = asyncio.Semaphore(4)
+        tasks = []
+        for prof in self.store.profiles():
+            if not auto_cfg(prof)['load']:
+                continue
+            try:
+                nodes = await asyncio.to_thread(lambda p=prof: self.panel(p).call('GET', '/api/nodes'))
+            except engine.StepError:
+                continue
+            for n in nodes:
+                if n.get('isDisabled'):
+                    continue
+                ssh = svc.node_ssh(self.store, self.runner, prof['id'], n['uuid'], n['address'])
+                if ssh:
+                    tasks.append(self.sample(prof, n, ssh, sem))
+        await asyncio.gather(*tasks)
+
+    async def sample(self, prof: dict, n: dict, ssh: dict, sem: asyncio.Semaphore) -> None:
+        key = f'ap:load:{prof["id"]}:{n["uuid"]}'
+        prev = self.get(key)
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(n['address']) or {}
+        node = {'ip': bd.get('ip') or n['address'], **sshaccess.to_node(ssh, self.runner.bot_key()[0]),
+                'known_hosts': self.runner.known_hosts()}
+        async with sem:
+            try:
+                _, out = await asyncio.to_thread(engine.Remote(node, None).run, LOAD_CMD, 40)
+            except Exception as e:  # noqa: BLE001 — нет входа: просто пропускаем замер
+                self.put(key, {**prev, 'error': str(e)[:160], 'error_at': time.time()})
+                return
+        now = time.time()
+        s = parse_load(engine.strip_ansi(out), prev, now)
+        h = hot(s)
+        s['high'] = (int(prev.get('high') or 0) + 1) if h else 0
+        s['alerted'] = prev.get('alerted') or 0
+        s['name'], s['country'] = n['name'], n.get('countryCode') or ''
+        if h and s['high'] >= HIGH_CYCLES and now - s['alerted'] >= REALERT:
+            s['alerted'] = now
+            why = ' и '.join(ADVICE[k] for k in h)
+            await self.say(prof, f'🔥 <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\n'
+                                 f'{load_text(s)} — уже ~{s["high"] * LOAD_EVERY // 60} мин.\n\n'
+                                 f'Ноде {why}: возьмите тариф помощнее или поставьте ещё одну ноду в этой стране — '
+                                 'нагрузка разделится.', self.button())
+        elif not h and prev.get('alerted') and prev.get('high', 0) >= HIGH_CYCLES:
+            s['alerted'] = 0
+            await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.')
+        self.put(key, s)
+
+    def load_of(self, pid: int, uuid: str) -> dict:
+        s = self.get(f'ap:load:{pid}:{uuid}')
+        return {k: s.get(k) for k in ('cpu', 'mem', 'disk', 'rx', 'tx', 'at', 'cores')} | {'hot': hot(s), 'error': s.get('error')} if s else {}
+
+    # ───────── аренда ─────────
+    async def rent(self, prof: dict) -> dict:
+        """Серверы группы в Bobr Cloud: срок, автопродление, цена; баланс покупателя."""
+        bc = bcloud_from(self.store, buyer_of(self.store, prof))
+        bc.RETRY_FOR = 8
+        mine = {}
+        for d in svc.bot_jobs_by_ip(self.store, prof['id']).values():
+            if d.get('server_id'):
+                mine[int(d['server_id'])] = d
+        servers = [x for x in await bc.servers() if int(x['id']) in mine] if mine else []
+        bal = await bc.balance()
+        now = dt.datetime.now(dt.timezone.utc)
+        out = []
+        for x in servers:
+            exp = None
+            if x.get('expires_at'):
+                try:
+                    exp = dt.datetime.fromisoformat(x['expires_at'].replace('Z', '+00:00'))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=dt.timezone.utc)
+                except ValueError:
+                    exp = None
+            d = mine[int(x['id'])]
+            out.append({'id': int(x['id']), 'name': x.get('name') or '', 'ip': x.get('ip') or '', 'domain': d.get('domain', ''),
+                        'flag': x.get('flag') or d.get('flag', ''), 'price_kop': int(x.get('price_kop') or 0),
+                        'auto_renew': x.get('auto_renew'), 'expires_at': x.get('expires_at'),
+                        'days_left': round((exp - now).total_seconds() / 86400, 1) if exp else None})
+        out.sort(key=lambda x: (x['days_left'] is None, x['days_left'] or 0))
+        return {'servers': out, 'balance_kop': bal, 'buyer': prof.get('owner_label') or 'ваш аккаунт'}
+
+    @staticmethod
+    def rent_risks(r: dict) -> list[dict]:
+        """Серверы, которые кончатся в ближайшие дни и сами не продлятся (выключено или не хватит денег)."""
+        soon = [x for x in r['servers'] if x['days_left'] is not None and x['days_left'] <= RENT_DAYS]
+        need = sum(x['price_kop'] for x in soon if x['auto_renew'] is not False)
+        out = []
+        for x in soon:
+            if x['auto_renew'] is False:
+                out.append({**x, 'why': 'автопродление выключено'})
+            elif r['balance_kop'] < need:
+                out.append({**x, 'why': f'на балансе {r["balance_kop"] // 100} ₽, на продление нужно {need // 100} ₽'})
+        return out
+
+    async def check_rent(self) -> None:
+        for prof in self.store.profiles():
+            try:
+                r = await self.rent(prof)
+            except BcloudError as e:
+                log.info('autopilot rent %s: %s', prof['id'], e)
+                continue
+            if auto_cfg(prof)['renew'] is True:
+                bc = bcloud_from(self.store, buyer_of(self.store, prof))
+                for x in r['servers']:
+                    if x['auto_renew'] is False:
+                        try:
+                            await bc.set_autorenew(x['id'], True)
+                            x['auto_renew'] = True
+                        except BcloudError as e:
+                            log.info('autorenew %s: %s', x['id'], e)
+            for x in self.rent_risks(r):
+                stage = 2 if x['days_left'] <= 1 else 1
+                k = f'ap:rent:{x["id"]}'
+                st = self.get(k)
+                if st.get('stage', 0) >= stage and st.get('exp') == x['expires_at']:
+                    continue
+                self.put(k, {'stage': stage, 'exp': x['expires_at']})
+                await self.say(prof, f'💳 <b>Скоро конец аренды</b> · {html.escape(prof["name"])}\n'
+                                     f'{x["flag"]} {html.escape(x["domain"] or x["name"])} · <code>{x["ip"]}</code> — '
+                                     f'осталось {max(0, int(x["days_left"]))} дн.: {html.escape(x["why"])}.\n\n'
+                                     'Продлите в «Аренде» группы или пополните баланс Bobr Cloud.', self.button())
+
+    # ───────── утренняя сводка ─────────
+    async def summaries(self, now: float) -> None:
+        uids = sorted(self.access.admins) + [u['tg_id'] for u in self.store.users() if not u.get('blocked')]
+        for uid in uids:
+            cfg = summary_cfg(self.store, uid)
+            if not cfg['on']:
+                continue
+            last = self.store.get(f'summary_last:{uid}')
+            date = due(cfg['hour'], cfg['tz'], last, None, now)
+            if not date:
+                continue
+            self.store.set(f'summary_last:{uid}', date)
+            try:
+                await self.send(uid, await self.summary(uid, now), self.button())
+            except Exception:  # noqa: BLE001
+                log.exception('summary %s', uid)
+
+    async def summary(self, uid: int, now: float | None = None) -> str:
+        now = now if now is not None else time.time()
+        cfg = summary_cfg(self.store, uid)
+        profs = self.access.profiles_for(uid)
+        head = f'☀️ <b>Сводка Bobr Nodes</b> · {local_now(cfg["tz"], now).strftime("%d.%m")}'
+        if not profs:
+            return head + '\n\nГрупп пока нет.'
+        tags = await asyncio.to_thread(up.hub_tags)
+        blocks = []
+        day_ago = now - 86400
+        jobs = [j for j in self.store.jobs(2000, include_hidden=True) if j['created_at'] >= day_ago]
+        for prof in profs:
+            lines = []
+            try:
+                pl = self.panel(prof)
+                nodes, pv = await asyncio.gather(asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
+                                                 asyncio.to_thread(up.panel_version, pl))
+            except engine.StepError as e:
+                blocks.append(f'🗂 <b>{html.escape(prof["name"])}</b> — панель не отвечает: {html.escape(str(e)[:120])}')
+                continue
+            on = [n for n in nodes if not n.get('isDisabled')]
+            conn = [n for n in on if n.get('isConnected')]
+            online = sum(int(n.get('usersOnline') or 0) for n in on)
+            head_g = f'🗂 <b>{html.escape(prof["name"])}</b> — нод {len(on)}, на связи {len(conn)}, онлайн {online}'
+            if len(conn) < len(on):
+                lines.append('🔌 нет связи: ' + ', '.join(html.escape(n['name']) for n in on if not n.get('isConnected'))[:300])
+            bad = [st for st in self.store.mon_all(f'{prof["id"]}:').values() if st.get('status') in ('down', 'repairing', 'gave_up')]
+            if bad:
+                lines.append('🔴 недоступны из России: ' + ', '.join(
+                    html.escape(st.get('name') or st.get('addr', '')) + (' (чиню)' if st['status'] == 'repairing' else '') for st in bad)[:300])
+            mine = [j for j in jobs if j['profile_id'] == prof['id']]
+            ups = [j for j in mine if j['data'].get('kind') == 'upgrade']
+            if ups:
+                ok_n = sum(1 for j in ups if j['status'] == 'done')
+                lines.append(f'⬆️ обновлено за сутки: {ok_n}' + (f', откатов {len(ups) - ok_n}' if len(ups) > ok_n else ''))
+            fixes = [j for j in mine if j['batch'].startswith('mon-') or j['data'].get('kind') == 'reip']
+            if fixes:
+                lines.append(f'🛠 починок за сутки: {len(fixes)}')
+            fails = [j for j in mine if j['status'] == 'failed' and j['data'].get('kind') != 'upgrade']
+            if fails:
+                lines.append(f'❌ задач с ошибкой: {len(fails)}')
+            hotl = []
+            for n in on:
+                s = self.get(f'ap:load:{prof["id"]}:{n["uuid"]}')
+                if s and hot(s) and s.get('high', 0) >= HIGH_CYCLES:
+                    hotl.append(f'{html.escape(n["name"])} ({load_text({k: s.get(k) for k in hot(s)})})')
+            if hotl:
+                lines.append('🔥 нагрузка: ' + ', '.join(hotl)[:300])
+            target = up.pick_target(tags, pv)
+            if target != 'latest':
+                old = [n for n in on if up.semver(n.get('nodeVersion')) and up.semver(n['nodeVersion']) < up.semver(target)]
+                if old:
+                    lines.append(f'🆕 устарели: {len(old)} {"нода" if len(old) == 1 else "ноды" if len(old) < 5 else "нод"} (есть {target})')
+            try:
+                risks = self.rent_risks(await self.rent(prof))
+                if risks:
+                    lines.append('💳 скоро конец аренды: ' + ', '.join(
+                        f'{html.escape(x["domain"] or x["name"])} через {max(0, int(x["days_left"]))} дн.' for x in risks)[:300])
+            except BcloudError:
+                pass
+            blocks.append(head_g + ('\n' + '\n'.join('   ' + x for x in lines) if lines else '\n   ✅ всё в порядке'))
+        return head + '\n\n' + '\n\n'.join(blocks)
