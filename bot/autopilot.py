@@ -161,6 +161,7 @@ class Autopilot:
         self._rent_at = 0.0
         self._bg: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
+        self.hostload = None  # нагрузка сервера бота (задаётся в main)
 
     # ── служебное ──
     def get(self, key: str) -> dict:
@@ -216,6 +217,7 @@ class Autopilot:
                 except Exception:  # noqa: BLE001
                     log.exception('autopilot update %s', prof.get('id'))
             await self.summaries(now)
+            await self.host_alert(now)
         if now - self._load_at >= LOAD_EVERY:
             self._load_at = now
             self._bg_task(self.check_load())
@@ -415,6 +417,32 @@ class Autopilot:
                                      f'осталось {max(0, int(x["days_left"]))} дн.: {html.escape(x["why"])}.\n\n'
                                      'Продлите в «Аренде» группы или пополните баланс Bobr Cloud.', self.button())
 
+    # ───────── сервер бота ─────────
+    def host_line(self) -> str:
+        h = self.hostload
+        if not h or not h.now:
+            return ''
+        n = h.now
+        level, why = h.verdict()
+        icon = {'ok': '🖥', 'warn': '⚠️', 'bad': '🔥'}[level]
+        txt = (f'{icon} <b>Сервер бота</b> — процессор {n.get("cpu", "?")}%, память {n.get("mem", "?")}%, '
+               f'диск {n.get("disk", "?")}%')
+        return txt + (': ' + html.escape('; '.join(why)) if why else '')
+
+    async def host_alert(self, now: float) -> None:
+        """Сервер бота перегружен весь последний час — администраторам, не чаще раза в 12 часов."""
+        if not self.hostload:
+            return
+        level, why = self.hostload.verdict()
+        last = float(self.store.get('host_alerted') or 0)
+        if level != 'bad' or now - last < REALERT:
+            return
+        self.store.set('host_alerted', str(now))
+        for uid in sorted(self.access.admins):
+            await self.send(uid, f'🔥 <b>Серверу бота не хватает ресурсов</b>\n{html.escape("; ".join(why))}.\n\n'
+                                 'Возьмите VPS помощнее или перенесите соседей (например, Bobr Cloud) на другой сервер. '
+                                 'Подробно — «Нагрузка» в панели управления.', self.button())
+
     # ───────── утренняя сводка ─────────
     async def summaries(self, now: float) -> None:
         uids = sorted(self.access.admins) + [u['tg_id'] for u in self.store.users() if not u.get('blocked')]
@@ -493,4 +521,6 @@ class Autopilot:
             except BcloudError:
                 pass
             blocks.append(head_g + ('\n' + '\n'.join('   ' + x for x in lines) if lines else '\n   ✅ всё в порядке'))
+        if self.access.is_admin(uid) and self.host_line():
+            blocks.append(self.host_line())
         return head + '\n\n' + '\n\n'.join(blocks)

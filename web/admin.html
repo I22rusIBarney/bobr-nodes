@@ -141,12 +141,62 @@ function home() {
   const sec = ST.security || {}, hd = sec.hardened;
   const ok = k => s[k] && s[k].set;
   const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
+  const HL = { ok: ['', 'ok', 'хватает'], warn: ['на пределе', 'warn'], bad: ['не хватает', 'bad'] };
   v.append(group('Сервер бота', [
+    row({ title: 'Нагрузка', detail: ST.host && ST.host.cpu != null && ST.host.level === 'ok' ? `CPU ${ST.host.cpu}% · RAM ${ST.host.mem}%` : null,
+      status: ST.host ? (ST.host.level === 'ok' ? null : HL[ST.host.level]) : null, onClick: () => { HOST = null; UI.nav.push(hostView); } }),
     row({ title: 'Безопасность', status: hd ? (hd.password_login ? ['вход по паролю', 'warn'] : ['', 'ok', 'защищён']) : ['не защищён', 'bad'], onClick: () => UI.nav.push(securityView) }),
     row({ title: 'Bobr Cloud', status: conn(ok('bcloud_url') && ok('bcloud_token')), onClick: () => UI.nav.push(bcloudView) }),
     row({ title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ title: 'Gemini', status: conn(ok('gemini_key'), null), detail: ok('gemini_key') ? null : 'не задан', onClick: () => UI.nav.push(geminiView) }),
     row({ title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })]));
+  return v;
+}
+
+// ───────── нагрузка сервера бота ─────────
+let HOST = null, hostTimer = 0;
+const gb = b => b == null ? '—' : b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1).replace('.0', '') + ' ГБ' : Math.round(b / 2 ** 20) + ' МБ';
+const dur = s => { const d = Math.floor(s / 86400), hr = Math.floor(s % 86400 / 3600); return d ? `${d} дн. ${hr} ч` : hr ? `${hr} ч ${Math.floor(s % 3600 / 60)} мин` : `${Math.floor(s / 60)} мин`; };
+// линия за сутки: процессор и память, пунктир — порог
+function spark(hist, key, color, limit) {
+  const W = 320, H = 64, pts = hist.filter(x => x[key] != null);
+  if (pts.length < 2) return h('div', { class: 'in-note' }, 'График появится через несколько минут.');
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const xy = pts.map(p => `${(W * (p.t - t0) / Math.max(1, t1 - t0)).toFixed(1)},${(H - H * Math.min(100, p[key]) / 100).toFixed(1)}`).join(' ');
+  const ly = (H - H * limit / 100).toFixed(1);
+  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:64px;display:block" aria-hidden="true">`
+    + `<line x1="0" y1="${ly}" x2="${W}" y2="${ly}" stroke="var(--hint-2)" stroke-dasharray="3 4" stroke-width="1" vector-effect="non-scaling-stroke"/>`
+    + `<polyline points="${xy}" fill="none" stroke="${color}" stroke-width="1.8" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+  const box = h('div', { style: 'padding:6px 16px 12px' }); box.innerHTML = svg; return box;
+}
+function hostView() {
+  if (HOST === null) { HOST = undefined; api('host').then(r => { HOST = r; UI.nav.refresh(); }).catch(e => { HOST = { error: e.message }; UI.nav.refresh(); }); }
+  const v = h('div', { class: 'host-page' }, ...title('Нагрузка'));
+  if (!HOST) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+  if (HOST.error) { v.append(h('div', { class: 'notice bad' }, HOST.error)); return v; }
+  clearTimeout(hostTimer);
+  hostTimer = setTimeout(() => { if (document.querySelector('#root .host-page')) api('host').then(r => { HOST = r; UI.nav.refresh(); }).catch(() => {}); }, 60000);
+  const n = HOST.now || {};
+  v.append(h('div', { class: 'notice ' + (HOST.level === 'ok' ? 'ok' : HOST.level === 'warn' ? '' : 'bad') },
+    HOST.level === 'ok' ? h('span', {}, h('b', {}, 'VPS подходит. '), `Свободно ${gb(n.mem_avail)} памяти и ${gb(n.disk_free)} на диске, процессор загружен в среднем умеренно.`)
+      : h('span', {}, h('b', {}, HOST.level === 'warn' ? 'Сервер на пределе: ' : 'Серверу не хватает ресурсов: '), HOST.why.join('; ') + '. Возьмите VPS помощнее или уберите с него лишнее.')));
+  const hist = HOST.history || [];
+  v.append(group('Процессор', [
+    row({ title: 'Сейчас', detail: `${n.cpu ?? '—'}% · ядер ${n.cores || '—'}`, chevron: false }),
+    row({ title: 'Средняя очередь', detail: n.load ? n.load.map(x => x.toFixed(2)).join(' · ') : '—', chevron: false }),
+    spark(hist, 'cpu', 'var(--accent)', HOST.limits.cpu)], 'За сутки. Средняя очередь — за 1, 5 и 15 минут: больше числа ядер долгое время — процессора не хватает.'));
+  v.append(group('Память и диск', [
+    row({ title: 'Память', detail: `${n.mem ?? '—'}% · свободно ${gb(n.mem_avail)} из ${gb(n.mem_total)}`, chevron: false }),
+    n.swap ? row({ title: 'Подкачка', detail: gb(n.swap), chevron: false }) : null,
+    spark(hist, 'mem', 'var(--ok)', HOST.limits.mem),
+    row({ title: 'Диск', detail: `${n.disk ?? '—'}% · свободно ${gb(n.disk_free)} из ${gb(n.disk_total)}`, chevron: false })].filter(Boolean),
+    'Это весь сервер: если на нём ещё и Bobr Cloud или что-то своё, их нагрузка тоже здесь.'));
+  v.append(group('Сам бот', [
+    row({ title: 'Память бота', detail: gb(n.bot_rss) + (n.ct_limit ? ` · контейнер ${gb(n.ct_mem)} из ${gb(n.ct_limit)}` : ''), chevron: false }),
+    row({ title: 'Процессор бота', detail: n.bot_cpu != null ? n.bot_cpu + '%' : '—', chevron: false }),
+    row({ title: 'База и журналы', detail: `${gb(n.db)} · ${gb(n.logs)}`, chevron: false }),
+    row({ title: 'Работает', detail: dur(HOST.bot_uptime) + (n.uptime ? ` · сервер ${dur(n.uptime)}` : ''), chevron: false })],
+    'Боту самому обычно хватает 1 vCPU и 1 ГБ памяти; больше нужно, когда ставится много нод сразу (очередь в «SSH-ключ и очередь»). Замер раз в минуту; если сервер перегружен целый час — бот напишет администраторам.'));
   return v;
 }
 

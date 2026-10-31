@@ -216,9 +216,12 @@ async def main():
     dp['monitor'] = monitor
     from bot.autopilot import Autopilot
     pilot = Autopilot(store, runner, bot, access, 'https://nodes.test')
+    from bot.hostload import HostLoad
+    hostl = HostLoad(TMP, store)
+    pilot.hostload = hostl
     dp['autopilot'] = pilot
     wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor,
-                     access=access, autopilot=pilot)
+                     access=access, autopilot=pilot, hostload=hostl)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
@@ -1494,6 +1497,14 @@ async def main():
     st, js = await wapi('summary/now', 'POST', {}, headers=HV)
     ok(st == 200 and any(m.chat_id == 77 and 'Сводка' in m.text and 'Основная' not in m.text
                          for name, m in sess.sent[-3:] if name == 'SendMessage'), 'сводка пользователю — только по его группам')
+
+    # нагрузка сервера бота: администратору — в панели и в сводке, пользователю — нет
+    st, hv = await wapi('host')
+    ok(st == 200 and hv['now'].get('cores') and hv['level'] in ('ok', 'warn', 'bad') and 'mem' in hv['now'],
+       f'нагрузка сервера бота: {dict(list(hv.get("now", {}).items())[:6])}')
+    ok((await wapi('state'))[1]['host']['level'] == hv['level'] and (await wapi('state', headers=HV))[1]['host'] is None
+       and (await wapi('host', headers=HV))[0] == 403, 'нагрузка сервера — только администратору')
+    ok('Сервер бота' in await pilot.summary(1) and 'Сервер бота' not in await pilot.summary(77), 'строка о сервере бота — в сводке администратора')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')

@@ -88,6 +88,7 @@ ADMIN_ONLY = [
     (r'POST|PUT|DELETE', r'/api/scripts(/.*)?'),
     (r'GET', r'/api/scripts/.+'),
     (r'.*', r'/api/(users|invites)(/.*)?'),
+    (r'.*', r'/api/host'),
 ]
 
 
@@ -110,7 +111,7 @@ def client_ip(request) -> str:
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
-              access: Access | None = None, autopilot=None) -> web.Application:
+              access: Access | None = None, autopilot=None, hostload=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     fails: dict[str, list[float]] = {}
@@ -370,6 +371,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'issues': issues(request), 'bot_username': bot_username,
                   'security': security.info() if security and admin else None, 'theme': theme(uid_of(request)),
                   'users': sum(1 for u in store.users() if not u.get('blocked')) if admin else None,
+                  'host': ({'level': hostload.verdict()[0], 'cpu': hostload.now.get('cpu'), 'mem': hostload.now.get('mem')}
+                           if admin and hostload else None),
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
@@ -1649,6 +1652,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Проверка уже идёт')
         asyncio.get_running_loop().create_task(m.tick())
         return J({'ok': True})
+
+    @r.get('/api/host')
+    async def host_view(_):
+        """Нагрузка сервера бота: сейчас, за сутки и вывод — хватает ли VPS."""
+        if hostload is None:
+            raise ApiError('Замеры выключены', 404)
+        if not hostload.now:
+            await asyncio.to_thread(hostload.sample)
+        return J(hostload.view())
 
     # ── автопилот: автообновление, нагрузка, аренда, утренняя сводка ──
     def pilot():
