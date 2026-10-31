@@ -1521,6 +1521,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             out['last'] = runner.last.get(j['id'], '')
             out['password'] = d.get('password', '') if j['status'] == 'done' else ''
             out['server_id'] = d.get('server_id')
+            out['location'] = d.get('location')
+            out['create_failed'] = bool(d.get('create_failed')) and j['status'] == 'failed'
             path = runner.log_path(j['id'])
             if path.exists():
                 with open(path, 'rb') as f:

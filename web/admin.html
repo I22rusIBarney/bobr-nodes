@@ -1938,7 +1938,7 @@ function act(text, fn, cls) {
 function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'both' } : undefined }; }
 const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
 
-let D = null;
+let D = null, DEPLOY_HINT = null;  // DEPLOY_HINT — локация, с которой открыть мастер
 const PERIOD = { '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год' };
 const ACTIVE_ST = ['queued', 'buying', 'provisioning', 'deploying'];
 function fetchCat() {
@@ -1948,7 +1948,10 @@ function fetchCat() {
   api('catalog?pid=' + d.pid).then(c => {
     if (D !== d) return;
     d.cat = c;
-    if (c.locations[0]) { const it = [{ loc: c.locations[0].code, idx: null, count: 1 }]; if (d.src === 'own') d.newItems = it; else d.items = it; }
+    // после неудачи — та же локация, чтобы сменить только конфигурацию (или выбрать другую локацию)
+    const hint = DEPLOY_HINT && c.locations.find(l => l.code === DEPLOY_HINT); DEPLOY_HINT = null;
+    const first = hint || c.locations[0];
+    if (first) { const it = [{ loc: first.code, idx: null, count: 1 }]; if (d.src === 'own') d.newItems = it; else d.items = it; }
     UI.nav.refresh();
   }).catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
   api('profiles/' + d.pid + '/panel').then(m => { if (D !== d) return; d.meta = m; d.squads = new Set(m.default_squads); UI.nav.refresh(); })
@@ -2453,7 +2456,12 @@ function jobView(id) {
       if (!j.server_id && !(await UI.ask({ title: 'Повторить?', message: 'Сервер ещё не был куплен — повтор купит новый.', buttons: [{ id: 'y', text: 'Повторить' }] }))) return;
       if (await UI.run(() => api('jobs/' + id + '/retry', 'POST'), 'Запущено снова')) reload();
     });
-    v.append(h('div', { class: 'notice bad' }, h('b', {}, (j.stages[cur] || {}).label ? 'Остановилось на шаге «' + j.stages[cur].label + '». ' : 'Ошибка. '), j.error, retry));
+    // Bobr Cloud дважды не создал сервер — главное действие: другая конфигурация или локация
+    const other = j.create_failed ? h('button', { class: 'btn', type: 'button', onclick: () => { D = null; DEPLOY_HINT = j.location || null; UI.nav.push(() => deployView(j.profile_id)); } },
+      'Другая конфигурация или локация') : null;
+    if (other) retry.className = 'btn tinted';
+    v.append(h('div', { class: 'notice bad' }, h('b', {}, (j.stages[cur] || {}).label ? 'Остановилось на шаге «' + j.stages[cur].label + '». ' : 'Ошибка. '), j.error,
+      other, other ? h('div', { style: 'height:8px' }) : null, retry));
   }
   if (j.status === 'done' && j.ip) v.append(group('Доступ', [
     row({ title: 'IP', detail: j.ip, mono: true, copy: j.ip, copyLabel: 'IP' }),

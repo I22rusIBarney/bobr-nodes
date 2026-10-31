@@ -95,9 +95,14 @@ class FakeAstra:
 
     async def balance(s): return {'balance_rub': 9999}
 
+    fail_next = 0
+
     async def create(s, **kw):
         s.n += 1
         s.made[s.n] = kw
+        if s.fail_next:
+            s.fail_next -= 1
+            kw['fail'] = True
         p = PRESETS[kw['idx']] if kw.get('idx') is not None else kw
         return {'id': s.n, 'spec': {'cpu': p['cpu'], 'ram': p['ram'], 'disk': p['disk'], 'os': kw['os']},
                 'charged_rub': 200, 'expires_in_days': 30}
@@ -109,6 +114,8 @@ class FakeAstra:
         return {'ok': True}
 
     async def server(s, sid):
+        if s.made[sid].get('fail'):  # провайдер не выдал сервер
+            return {'id': sid, 'status': 'deleted'}
         return {'id': sid, 'status': 'active', 'ip': s.made[sid].get('ip') or f'198.51.100.{sid - 500}', 'root_password': s.made[sid]['password']}
 
     async def action(s, sid, a, body=None):
@@ -1552,6 +1559,29 @@ async def main():
     ok((await wapi('state'))[1]['host']['level'] == hv['level'] and (await wapi('state', headers=HV))[1]['host'] is None
        and (await wapi('host', headers=HV))[0] == 403, 'нагрузка сервера — только администратору')
     ok('Сервер бота' in await pilot.summary(1) and 'Сервер бота' not in await pilot.summary(77), 'строка о сервере бота — в сводке администратора')
+
+    # Bobr Cloud не создал сервер: бот сам покупает второй раз; две неудачи — предложить другую конфигурацию
+    runner.rebuy_wait = 0
+    async with BD.session() as s_:
+        bal0 = (await s_.get(BD.User, 1)).balance_kop
+    st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'nl', 'count': 2})
+    astra.fail_next, made0 = 1, len(astra.made)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'nl', 'idx': 0, 'period': '1m', 'domains': dj['domains'][:1]})
+    await runner.wait_all()
+    rj = store.job(js['ids'][0])
+    ok(rj['status'] == 'done' and len(astra.made) == made0 + 2 and rj['data'].get('create_tries') == 1,
+       f'первая покупка не создалась — бот сам купил ещё раз и поставил ноду: {rj["status"]} {rj["error"]}')
+    astra.fail_next, made0 = 2, len(astra.made)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'location': 'nl', 'idx': 0, 'period': '1m', 'domains': dj['domains'][1:2]})
+    await runner.wait_all()
+    fj = store.job(js['ids'][0])
+    st, fv = await wapi(f'jobs/{fj["id"]}')
+    ok(fj['status'] == 'failed' and 'дважды' in fj['error'] and len(astra.made) == made0 + 2 and fv['create_failed'] and fv['location'] == 'nl',
+       f'две неудачи — ошибка с советом сменить конфигурацию или локацию: {fj["error"][:120]}')
+    async with BD.session() as s_:
+        bal1 = (await s_.get(BD.User, 1)).balance_kop
+        paid = (await s_.get(BD.Server, rj['data']['server_id'])).period_paid_kop
+    ok(bal0 - bal1 == paid > 0, f'за несозданные серверы деньги вернулись: списано только за удачный ({(bal0 - bal1) / 100:.0f} из {paid / 100:.0f} ₽)')
 
     # кошелёк: баланс своего аккаунта Bobr Cloud и пополнение
     st, wv = await wapi('wallet')

@@ -58,6 +58,9 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
 STATUS_ICON = {'queued': '🕓', 'buying': '⏳', 'provisioning': '⏳', 'deploying': '⏳', 'done': '✅', 'failed': '❌'}
 
 
+CREATE_TRIES = 2  # сколько раз бот сам покупает сервер, если Bobr Cloud не смог его создать
+
+
 class Fail(Exception):
     pass
 
@@ -131,6 +134,7 @@ class Runner:
         self.bcloud_factory = bcloud_factory
         self.poll_every = poll_every
         self.ip_timeout = ip_timeout
+        self.rebuy_wait = min(5.0, poll_every)  # Bobr Cloud возвращает деньги за несозданный сервер сразу
         self.edit_every = edit_every
         self.tasks: dict[int, asyncio.Task] = {}
         self.last: dict[int, str] = {}
@@ -405,39 +409,57 @@ class Runner:
                 return
             bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
 
-            if not d.get('server_id'):
-                if job['status'] == 'buying':
-                    raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в Bobr Cloud. '
-                               'Повтор купит новый сервер.')
-                await self._set(jid, status='buying', stage='buy', error='')
-                srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
-                d = self.store.patch_job_data(jid, server_id=srv['id'])
+            # Bobr Cloud (Astra) иногда не выдаёт сервер — деньги возвращаются, а бот сам пробует купить ещё раз;
+            # после второй неудачи предлагает другую конфигурацию или локацию
+            while True:
+                if not d.get('server_id'):
+                    if job['status'] == 'buying' and not d.get('create_tries'):
+                        raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в Bobr Cloud. '
+                                   'Повтор купит новый сервер.')
+                    await self._set(jid, status='buying', stage='buy', error='')
+                    srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
+                    d = self.store.patch_job_data(jid, server_id=srv['id'])
 
-            await self._set(jid, status='provisioning', stage='ip', error='')
-            self.last[jid] = 'ждём, пока Bobr Cloud создаст сервер'
-            end = time.monotonic() + self.ip_timeout
-            while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
-                try:
-                    srv = await bc.server(d['server_id'])
-                except BcloudUnavailable as e:
+                await self._set(jid, status='provisioning', stage='ip', error='')
+                self.last[jid] = 'ждём, пока Bobr Cloud создаст сервер'
+                end = time.monotonic() + self.ip_timeout
+                rebuy = False
+                while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
+                    try:
+                        srv = await bc.server(d['server_id'])
+                    except BcloudUnavailable as e:
+                        if time.monotonic() > end:
+                            raise Fail(f'{e} — проверьте, что Bobr Cloud запущен, и нажмите «Повторить»') from e
+                        self.last[jid] = 'Bobr Cloud не отвечает — жду'
+                        await self.render(jid)
+                        await asyncio.sleep(self.poll_every)
+                        continue
+                    if srv['status'] == 'active' and srv.get('ip'):
+                        if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
+                            engine.forget_host(self.known_hosts(), srv['ip'])
+                        d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
+                        break
+                    if srv['status'] in ('deleted', 'failed', 'error'):
+                        if d.get('existing'):
+                            raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
+                        tries = int(d.get('create_tries') or 0) + 1
+                        if tries < CREATE_TRIES:
+                            d = self.store.patch_job_data(jid, server_id=None, create_tries=tries)
+                            self.last[jid] = 'Bobr Cloud не смог создать сервер — покупаю ещё раз'
+                            await self.render(jid)
+                            await asyncio.sleep(self.rebuy_wait)  # пусть Bobr Cloud вернёт деньги за первую попытку
+                            rebuy = True
+                            break
+                        # следующий «Повторить» — снова с двумя попытками
+                        d = self.store.patch_job_data(jid, server_id=None, create_tries=0, create_failed=True)
+                        raise Fail(f'Bobr Cloud дважды не смог создать сервер (статус {srv["status"]}) — похоже, в этой локации '
+                                   'сейчас нет мощностей под такую конфигурацию. Выберите другую конфигурацию или локацию. '
+                                   'Деньги за обе попытки Bobr Cloud возвращает сам')
                     if time.monotonic() > end:
-                        raise Fail(f'{e} — проверьте, что Bobr Cloud запущен, и нажмите «Повторить»') from e
-                    self.last[jid] = 'Bobr Cloud не отвечает — жду'
-                    await self.render(jid)
+                        raise Fail('сервер слишком долго создаётся — проверьте его в Bobr Cloud и нажмите «Повторить»')
                     await asyncio.sleep(self.poll_every)
-                    continue
-                if srv['status'] == 'active' and srv.get('ip'):
-                    if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
-                        engine.forget_host(self.known_hosts(), srv['ip'])
-                    d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
+                if not rebuy:
                     break
-                if srv['status'] in ('deleted', 'failed', 'error'):
-                    if d.get('existing'):
-                        raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
-                    raise Fail(f'Bobr Cloud не смог создать сервер (статус {srv["status"]}); деньги Bobr Cloud возвращает сам')
-                if time.monotonic() > end:
-                    raise Fail('сервер слишком долго создаётся — проверьте его в Bobr Cloud и нажмите «Повторить»')
-                await asyncio.sleep(self.poll_every)
             if not d.get('renamed'):
                 try:
                     await bc.rename(d['server_id'], d['name'])
