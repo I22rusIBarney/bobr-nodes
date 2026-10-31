@@ -8,7 +8,7 @@ import logging
 import time
 from pathlib import Path
 
-from . import engine
+from . import engine, upgrade
 from .bcloud import Bcloud, BcloudError, BcloudUnavailable
 from .store import Store
 
@@ -18,6 +18,7 @@ STAGES = [('buy', 'Покупка в Bobr Cloud'), ('ip', 'Создание се
           ('ssh', 'Вход по SSH'), ('install', 'Установка ноды'), ('extras', 'Дополнения на ноде'), ('panel', 'Регистрация в панели'),
           ('check', 'Проверка')]
 STAGE_ORDER = [s for s, _ in STAGES]
+SERVICE_KINDS = ('node', 'reip', 'upgrade')  # задачи по уже работающей ноде: без покупки и сервера в Bobr Cloud
 
 
 def xhttp_label(x) -> str:
@@ -37,6 +38,8 @@ REIP_IP = {'bcloud': 'Смена IP в Bobr Cloud', 'sync': 'Новый IP из 
 
 def stages_for(d: dict) -> list[tuple[str, str]]:
     """Этапы задачи с подписями. Дополнения — только если они есть; у задач по готовой ноде — без покупки и установки."""
+    if d.get('kind') == 'upgrade':
+        return [('ssh', 'Вход по SSH'), ('install', f'Образ ноды {d.get("tag") or "latest"}'), ('check', 'Нода на связи')]
     if d.get('kind') == 'reip':
         return [('ip', REIP_IP.get(d.get('mode'), 'Новый IP')), ('dns', 'DNS в Cloudflare'), ('ssh', 'Вход по SSH на новом IP'),
                 ('panel', 'Адрес в панели'), ('check', 'Нода на связи')]
@@ -102,7 +105,9 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
         lines += ['', f'<b>Ошибка:</b> {html.escape(job["error"][:600])}']
     elif job['status'] in ('provisioning', 'deploying', 'buying') and last:
         lines += ['', f'<i>{html.escape(last[:160])}</i>']
-    elif job['status'] == 'done' and d.get('kind') not in ('node', 'reip'):
+    elif job['status'] == 'done' and d.get('kind') == 'upgrade' and d.get('result'):
+        lines += ['', html.escape(d['result'])]
+    elif job['status'] == 'done' and d.get('kind') not in SERVICE_KINDS:
         lines += ['', f'Root-пароль: <tg-spoiler><code>{html.escape(d.get("password", ""))}</code></tg-spoiler>']
     return '\n'.join(lines)
 
@@ -110,6 +115,7 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
 class Runner:
     def __init__(self, store: Store, bot, logdir: str | Path = 'data/logs', *, deploy=engine.deploy,
                  deploy_recipe=engine.deploy_recipe, update_node=engine.update_node, reip=engine.reip,
+                 upgrade_node=upgrade.upgrade_node,
                  bcloud_factory=bcloud_from, poll_every: float = 10, ip_timeout: float = 20 * 60, edit_every: float = 3):
         self.store = store
         self.bot = bot
@@ -118,6 +124,7 @@ class Runner:
         self.deploy = deploy
         self.deploy_recipe = deploy_recipe
         self.update_node = update_node
+        self.upgrade_node = upgrade_node
         self.reip = reip
         self.reip_timeout = 15 * 60
         self.keydir = self.logdir.parent / 'ssh'
@@ -169,7 +176,7 @@ class Runner:
         done = []
         for j in self.store.jobs(5000):
             d = j['data']
-            if j['status'] != 'done' or d.get('kind') in ('node', 'reip') or not d.get('server_id') or d.get('removed'):
+            if j['status'] != 'done' or d.get('kind') in SERVICE_KINDS or not d.get('server_id') or d.get('removed'):
                 continue
             prof = self.store.profile(j['profile_id'])
             if not prof:
@@ -349,6 +356,31 @@ class Runner:
                 lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} дополнения на ноде #{jid}: {d.get("name")} {d.get("ip")}\n')
                 await asyncio.to_thread(self.update_node, node, pconf, lf, on_log, on_stage)
 
+    async def _run_upgrade(self, jid: int, d: dict, prof: dict) -> None:
+        """Новая версия remnawave/node на ноде: образ, перезапуск, проверка связи с панелью, откат при неудаче."""
+        loop = asyncio.get_running_loop()
+        node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''), 'tag': d.get('tag') or 'latest',
+                **self._node_ssh(d, prof)}
+        self.last[jid] = 'ждём свободный слот'
+        await self.render(jid)
+        async with self.sem():
+            await self._set(jid, status='deploying', stage='ssh', error='')
+
+            def on_log(text: str) -> None:
+                self.last[jid] = text
+                lf.write(f'\n### {time.strftime("%H:%M:%S")} {text}\n')
+                lf.flush()
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            def on_stage(name: str) -> None:
+                self.store.update_job(jid, stage=name)
+                loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
+
+            with open(self.log_path(jid), 'a', encoding='utf-8') as lf:
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} обновление ноды #{jid}: {d.get("name")} → {node["tag"]}\n')
+                res = await asyncio.to_thread(self.upgrade_node, node, prof, lf, on_log, on_stage)
+        self.store.patch_job_data(jid, result=res)
+
     async def _run(self, jid: int) -> None:
         job = self.store.job(jid)
         if not job:
@@ -361,6 +393,10 @@ class Runner:
                 raise Fail('группа удалена')
             if d.get('kind') == 'reip':
                 await self._run_reip(jid, d, prof)
+                await self._set(jid, status='done', error='')
+                return
+            if d.get('kind') == 'upgrade':
+                await self._run_upgrade(jid, d, prof)
                 await self._set(jid, status='done', error='')
                 return
             if d.get('kind') == 'node':

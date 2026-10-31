@@ -333,11 +333,22 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
         psiphon_calls: list = []
         checker_polls: list = []
         files: dict = {}
+        upgrades: list = []    # (ip, версия | 'rollback')
         relay_cfg: dict = {}   # ip российского сервера → конфиг HAProxy входа через Россию
 
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
             assert self.n.get('ssh_password') or self.n.get('ssh_key'), 'нет ни пароля root, ни ключа'
+            if 'BNODES_UPGRADE' in cmd:  # обновление ноды: образ, проверка, откат
+                st = behaviour.get(f'upgrade-{ip}', 'ok')
+                if 'BNODES_UPGRADE_ROLLBACK' in cmd:
+                    FakeRemote.upgrades.append((ip, 'rollback'))
+                    return 0, 'RB_DONE\n'
+                if 'BNODES_UPGRADE_CHECK' in cmd:
+                    return 0, 'UP_STOPPED false true\n' if st == 'broken' else 'UP_RUNNING\n'
+                import re as _re
+                FakeRemote.upgrades.append((ip, _re.search(r'NEW="\$REPO:"(\S+?);', cmd).group(1)))
+                return 0, 'UP_SAME\n' if st == 'same' else 'UP_DONE remnawave/node@sha256:' + 'b' * 64 + '\n'
             if 'BOBR_RELAY' in cmd:  # вход через Россию: HAProxy на российском сервере
                 import base64 as _b64, re as _re, shlex as _sh
                 if behaviour.get(f'relay-{ip}') == 'down':

@@ -9,7 +9,7 @@ import string
 
 from . import engine, naming
 from .bcloud import BcloudError
-from .runner import Runner, bcloud_from, buyer_of, cf_token_of
+from .runner import SERVICE_KINDS, Runner, bcloud_from, buyer_of, cf_token_of
 from .store import Store
 
 PERIOD_LABEL = {'1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 год'}
@@ -40,7 +40,7 @@ def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
     out = {}
     for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
         d = j['data']
-        if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done'
+        if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in SERVICE_KINDS and j['status'] == 'done'
                 and not d.get('removed')):
             d = {**d, '_job': j['id']}
             out[d['ip']] = d
@@ -133,7 +133,7 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
     used_ids, used_ips = set(), set()
     for j in store.jobs(5000):
         d = j['data']
-        if d.get('kind') in ('node', 'reip') or d.get('removed') or j['status'] == 'failed':  # с ошибкой — сервер свободен
+        if d.get('kind') in SERVICE_KINDS or d.get('removed') or j['status'] == 'failed':  # с ошибкой — сервер свободен
             continue
         if d.get('server_id'):
             used_ids.add(int(d['server_id']))

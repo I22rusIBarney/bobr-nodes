@@ -17,10 +17,10 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, relay as rl, scripts as sc, services as svc
+from . import engine, forms, naming, relay as rl, scripts as sc, services as svc, upgrade as up
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
-from .runner import Runner, bcloud_from, buyer_of, stages_for
+from .runner import SERVICE_KINDS, Runner, bcloud_from, buyer_of, stages_for
 from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
@@ -335,7 +335,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'script_profile': ((((store.script(p['script_id']) or {}).get('recipe') or {}).get('profile') or {}).get('mode')
                                    if p.get('script_id') else None),
                 'panel_profile_uuid': p.get('panel_profile_uuid') or '',
-                'servers': sum(1 for j in mine if j['status'] == 'done' and j['data'].get('kind') not in ('node', 'reip')),
+                'servers': sum(1 for j in mine if j['status'] == 'done' and j['data'].get('kind') not in SERVICE_KINDS),
                 'active': sum(1 for j in mine if j['status'] in ACTIVE),
                 'failed': sum(1 for j in mine if j['status'] == 'failed')}
 
@@ -606,15 +606,66 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except engine.StepError as e:
             raise ApiError(f'Панель: {e}') from None
         bot = bot_jobs_by_ip(p['id'])
+        busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
         out = []
         for n in nodes:
             pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
-            out.append({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
+            out.append({'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
+                        'has_ssh': bool(runner.ssh_of(p['id'], n['uuid']) or n['address'] in bot), 'busy': n['uuid'] in busy,
+                        'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                         'disabled': bool(n.get('isDisabled')), 'country': n.get('countryCode') or '',
                         'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                         'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
-        return J({'nodes': out, 'bot_key': runner.bot_key()[1]})
+        return J({'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': await node_versions(p)})
+
+    async def node_versions(p: dict) -> dict:
+        """Версия панели и последняя подходящая к ней версия ноды (Docker Hub) — цель обновления по умолчанию."""
+        tags, pv = await asyncio.gather(asyncio.to_thread(up.hub_tags),
+                                        asyncio.to_thread(lambda: up.panel_version(panel_of(p))))
+        return {'panel': pv, 'latest': tags[0] if tags else '', 'target': up.pick_target(tags, pv)}
+
+    @r.post('/api/profiles/{pid}/nodes/upgrade')
+    async def nodes_upgrade(request):
+        """Обновить ноды (выбранные или все) до версии tag: задача на каждую, с проверкой и откатом."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        try:
+            tag = up.check_tag(b.get('tag') or 'latest')
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        try:
+            nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        want = None if b.get('all') else {u for u in (b.get('uuids') or []) if isinstance(u, str)}
+        if want is not None and not want:
+            raise ApiError('Выберите ноды')
+        bj = bot_jobs_by_ip(p['id'])
+        busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
+        ids, skipped = [], []
+        for n in nodes:
+            if want is not None and n['uuid'] not in want:
+                continue
+            if n.get('isDisabled'):
+                skipped.append({'name': n['name'], 'why': 'выключена в панели'})
+                continue
+            if n['uuid'] in busy:
+                skipped.append({'name': n['name'], 'why': 'по ноде уже идёт задача'})
+                continue
+            ssh = node_ssh(p['id'], n['uuid'], n['address'])
+            if not ssh:
+                skipped.append({'name': n['name'], 'why': 'нет доступа по SSH — укажите его на странице ноды'})
+                continue
+            bd = bj.get(n['address']) or {}
+            data = {'kind': 'upgrade', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
+                    'domain': bd.get('domain') or n['name'], 'flag': '⬆️', 'loc_name': n['name'],
+                    'spec': f'обновление ноды до {tag}', 'tag': tag, 'ssh': ssh}
+            jid = store.add_job('up-' + n['uuid'][:8], p['id'], uid_of(request), data)
+            await runner.render(jid, force=True)
+            runner.start(jid)
+            ids.append(jid)
+        return J({'ids': ids, 'skipped': skipped})
 
     @r.get('/api/profiles/{pid}/nodes/{uuid}')
     async def panel_node(request):
@@ -655,6 +706,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'ip': ip, 'domain': dom, 'address_is_ip': engine.is_ip(n['address']), 'bcloud': bc,
                   'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1],
                   'relays': [relay_view(x) for x in store.relays() if x['pid'] == p['id'] and x['node_uuid'] == uuid],
+                  'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
                   'relay_port': rl.target_port_of(hosts)})
 
     # ── вход через Россию: проброс со своего сервера в России на эту ноду ──
@@ -1425,7 +1477,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Повторить можно только задачу с ошибкой')
         store.update_job(j['id'], status='queued', error='')
         runner.start(j['id'])
-        return J({'ok': True, 'rebuy': not j['data'].get('server_id') and j['data'].get('kind') not in ('node', 'reip')})
+        return J({'ok': True, 'rebuy': not j['data'].get('server_id') and j['data'].get('kind') not in SERVICE_KINDS})
 
     @r.post('/api/jobs/{jid}/hide')
     async def hide(request):

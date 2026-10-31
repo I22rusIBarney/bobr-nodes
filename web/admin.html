@@ -889,14 +889,48 @@ function nodesView(pid) {
   if (L.error) { v.append(h('div', { class: 'notice bad' }, L.error)); return v; }
   if (!L.nodes.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'В панели нет нод'))); return v; }
   const total = L.nodes.reduce((a, n) => a + (n.online || 0), 0);
-  v.append(h('div', { class: 'subtitle' }, `${L.nodes.length} ${UI.plural(L.nodes.length, 'нода', 'ноды', 'нод')}, онлайн ${total}`));
+  const VS = L.versions || {}, U = UPG[pid] || (UPG[pid] = { sel: null, tag: VS.target || 'latest' });
+  const old = n => n.version && semverLt(n.version, U.tag);
+  const stale = L.nodes.filter(n => !n.disabled && old(n)).length;
+  v.append(h('div', { class: 'subtitle' }, `${L.nodes.length} ${UI.plural(L.nodes.length, 'нода', 'ноды', 'нод')}, онлайн ${total}`
+    + (VS.panel ? ` · панель ${VS.panel}` : '') + (VS.target && VS.target !== 'latest' ? ` · нода ${VS.target}` : '')));
+  const picking = !!U.sel;
   v.append(group(null, L.nodes.map(n => row({ flag: flagOf(n.country), title: n.name,
-    sub: [mid(n.address, 30), n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(', '),
-    status: n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : ['', 'ok', 'на связи'],
-    detail: n.connected && !n.disabled && n.online != null ? String(n.online) : null,
-    onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
+    sub: [mid(n.address, 30), n.version ? 'v' + n.version + (old(n) ? ' → ' + U.tag : '') : '', n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(', '),
+    status: picking ? null : n.busy ? ['задача идёт', 'run'] : n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : ['', 'ok', 'на связи'],
+    detail: !picking && n.connected && !n.disabled && n.online != null ? String(n.online) : null, chevron: picking ? false : undefined,
+    right: picking ? UI.toggle(U.sel.has(n.uuid), on => { on ? U.sel.add(n.uuid) : U.sel.delete(n.uuid); UI.nav.refresh(); }, n.name) : null,
+    onClick: picking ? null : () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
     'Зелёная точка — нода на связи, число — пользователи онлайн. Внутри ноды — Psiphon, WARP, порт, Final Mask, смена IP и SSH.'));
+  // обновление нод: выбранных или всех, с проверкой связи и откатом
+  const run = async all => {
+    const uuids = all ? null : [...U.sel];
+    const n = all ? L.nodes.filter(x => !x.disabled).length : uuids.length;
+    if (!n) return UI.toast('Выберите ноды', true);
+    const yes = await UI.ask({ title: `Обновить ${n} ${UI.plural(n, 'ноду', 'ноды', 'нод')}?`, message: `remnawave/node:${U.tag}. Каждая нода перезапустится на несколько секунд; если новая версия не выйдет на связь с панелью, бот вернёт прежнюю.`, buttons: [{ id: 'y', text: 'Обновить' }] });
+    if (!yes) return;
+    const r = await UI.run(() => api(`profiles/${pid}/nodes/upgrade`, 'POST', all ? { all: true, tag: U.tag } : { uuids, tag: U.tag }));
+    if (!r) return;
+    U.sel = null; delete NODES[pid]; delete GJ[pid];
+    if (r.skipped.length) UI.alert(`Запущено: ${r.ids.length}. Пропущены:\n` + r.skipped.map(x => `• ${x.name} — ${x.why}`).join('\n'));
+    else UI.toast(`Запущено обновлений: ${r.ids.length}`);
+    UI.nav.refresh();
+  };
+  v.append(group('Обновление нод', [
+    h('label', { class: 'field' }, h('label', {}, 'Версия'), textIn(U.tag, VS.target || 'latest', x => { U.tag = x.trim() || 'latest'; }, true, 'right')),
+    picking ? act(`Обновить выбранные (${U.sel.size})`, () => run(false)) : act('Выбрать ноды', () => { U.sel = new Set(); UI.nav.refresh(); }),
+    picking ? act('Отменить выбор', () => { U.sel = null; UI.nav.refresh(); }) : act('Обновить все' + (stale ? ` · устарели ${stale}` : ''), () => run(true))],
+    (VS.panel ? `Панель ${VS.panel} — по умолчанию последняя версия ноды той же ветки${VS.target && VS.target !== 'latest' ? ' (' + VS.target + ')' : ''}. ` : 'Версию панели узнать не удалось — по умолчанию latest; нода и панель должны совпадать по основной версии. ')
+    + 'Нужен доступ по SSH к ноде (у купленных ботом он есть). Ход — в задачах.'));
   return v;
+}
+const UPG = {};  // обновление нод: выбор и версия по группам
+function semverLt(a, b) {
+  const p = s => (String(s).match(/^v?(\d+)\.(\d+)\.(\d+)$/) || []).slice(1).map(Number);
+  const x = p(a), y = p(b);
+  if (x.length !== 3 || y.length !== 3) return false;
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] < y[i];
+  return false;
 }
 function nodeView(pid, uuid) {
   let n = NODE[uuid];
@@ -915,7 +949,15 @@ function nodeView(pid, uuid) {
   if (n.profile) v.append(h('div', { class: 'subtitle' }, 'Профиль ' + n.profile));
   v.append(group(null, [
     row({ title: 'Состояние', status: n.connected ? ['на связи', 'ok'] : ['нет связи', 'bad'] }),
-    row({ title: 'Онлайн', detail: n.online == null ? '—' : String(n.online) })]));
+    row({ title: 'Онлайн', detail: n.online == null ? '—' : String(n.online) }),
+    n.version ? row({ title: 'Версия ноды', detail: n.version + (n.xray ? ' · Xray ' + n.xray : '') }) : null,
+    act('Обновить ноду', async () => {
+      const tag = ((UPG[pid] || {}).tag) || 'latest';
+      const yes = await UI.ask({ title: 'Обновить ноду?', message: `remnawave/node:${tag}. Нода перезапустится на несколько секунд; не выйдет на связь — бот вернёт прежнюю версию. Другую версию можно выбрать в «Нодах в панели».`, buttons: [{ id: 'y', text: 'Обновить' }] });
+      if (!yes) return;
+      const r = await UI.run(() => api(`profiles/${pid}/nodes/upgrade`, 'POST', { uuids: [uuid], tag }));
+      if (r && r.ids.length) done(r.ids[0]); else if (r) UI.alert(r.skipped.map(x => x.why).join('\n'));
+    })].filter(Boolean)));
 
   // адрес и перепривязка IP
   const ipSt = statusLine();

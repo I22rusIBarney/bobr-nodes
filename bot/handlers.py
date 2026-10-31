@@ -13,7 +13,7 @@ from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, Inli
 from . import services as svc
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
-from .runner import STATUS_ICON, Runner, job_text
+from .runner import SERVICE_KINDS, STATUS_ICON, Runner, job_text
 from .store import ACTIVE, Store
 
 router = Router()
@@ -624,7 +624,7 @@ async def job_retry(c: CallbackQuery, store: Store, runner: Runner, access: Acce
         return await c.answer('Повторить можно только задачу с ошибкой', show_alert=True)
     store.update_job(jid, status='queued', error='')
     runner.start(jid)
-    rebuy = not j['data'].get('server_id') and j['data'].get('kind') != 'node'
+    rebuy = not j['data'].get('server_id') and j['data'].get('kind') not in SERVICE_KINDS
     await c.answer('Запущено снова' + (' — будет новая покупка' if rebuy else ''))
 
 

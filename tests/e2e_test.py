@@ -167,6 +167,8 @@ async def main():
     os.environ['NV_SRC'] = NV_SRC
     engine.Remote = fakes.make_fake_remote(engine, str(ROOT / 'tests' / 'mock_installer.sh'), behaviour)
     fakes_remote = engine.Remote
+    from bot import upgrade as upmod
+    upmod.hub_tags = lambda *a, **kw: ['2.3.1', '2.2.0', '1.9.9']  # Docker Hub в тесте не трогаем
 
     # bcloud
     await BD.init_db()
@@ -196,6 +198,7 @@ async def main():
     dp.include_router(handlers.router)
     runner = Runner(store, bot, TMP / 'logs', deploy=functools.partial(engine.deploy, check_tries=1, check_every=0),
                     update_node=functools.partial(engine.update_node, check_tries=1, check_every=0),
+                    upgrade_node=functools.partial(upmod.upgrade_node, check_tries=2, check_every=0),
                     poll_every=0.05, edit_every=0)
     dp['store'], dp['runner'], dp['public_url'] = store, runner, 'https://nodes.test'
     dp['access'] = access
@@ -910,6 +913,31 @@ async def main():
     st, js = await wapi(f'relays/{rid}?force=1', 'DELETE')
     ok(st == 200 and store.relay(rid) is None and len(world.hosts) == h0, 'убран только из бота и панели по подтверждению')
     behaviour.pop(f'relay-{RU}')
+
+    # обновление нод: новый образ remnawave/node, проверка связи с панелью, откат при неудаче
+    st, L = await wapi(f'profiles/{pid}/nodes')
+    ok(st == 200 and L['versions']['target'] == '2.3.1' and L['versions']['latest'] == '2.3.1'
+       and next(x for x in L['nodes'] if x['uuid'] == tn['uuid'])['has_ssh'], f'версии: цель обновления и доступ к ноде: {L.get("versions")}')
+    UPURL = f'profiles/{pid}/nodes/upgrade'
+    ok((await wapi(UPURL, 'POST', {'uuids': [tn['uuid']], 'tag': 'rm -rf /'}))[0] == 400
+       and (await wapi(UPURL, 'POST', {'uuids': []}))[0] == 400, 'обновление: неверная версия и пустой выбор отклонены')
+    st, js = await wapi(UPURL, 'POST', {'uuids': [tn['uuid']], 'tag': '2.3.1'})
+    await runner.wait_all()
+    uj = store.job(js['ids'][0])
+    ok(st == 200 and uj['status'] == 'done' and uj['data']['kind'] == 'upgrade' and ('2.3.1' in fakes_remote.upgrades[-1])
+       and not any(x[1] == 'rollback' for x in fakes_remote.upgrades), f'нода обновлена: {uj["error"]} {fakes_remote.upgrades}')
+    behaviour[f'upgrade-{uj["data"]["ip"]}'] = 'broken'
+    st, js = await wapi(UPURL, 'POST', {'uuids': [tn['uuid']], 'tag': '2.3.1'})
+    await runner.wait_all()
+    uj2 = store.job(js['ids'][0])
+    ok(uj2['status'] == 'failed' and 'вернул прежнюю' in uj2['error'] and fakes_remote.upgrades[-1][1] == 'rollback',
+       f'новая версия не поднялась — откат: {uj2["error"]}')
+    behaviour.pop(f'upgrade-{uj["data"]["ip"]}')
+    st, js = await wapi(UPURL, 'POST', {'all': True, 'tag': '2.3.1'})
+    await runner.wait_all()
+    ok(st == 200 and js['ids'] and len(js['ids']) + len(js['skipped']) == len(L['nodes'])
+       and all(x['why'] for x in js['skipped']), f'«обновить все»: задачи и пропущенные с причиной: {js.get("skipped")}')
+    ok((await wapi(UPURL, 'POST', {'all': True}, headers=HV))[0] == 404, 'чужие ноды пользователь не обновляет')
     bal0 = await _bcf(store, 1).balance()
     st, js = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}/ip', 'POST', {'mode': 'bcloud'})
     ok(st == 200, f'смена IP через bcloud запущена: {js}')
