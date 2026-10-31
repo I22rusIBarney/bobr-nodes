@@ -1423,6 +1423,17 @@ async def main():
     await monitor.tick()
     ok(store.mon(okey)['status'] == 'ok' and any('🟢' in m.text for name, m in sess.sent[n3:] if name == 'SendMessage'),
        'нода ожила — сообщение и обычное состояние')
+    # новая нода после установки: проверка из России на чекерах — итог в задаче
+    oj = next((j for j in store.jobs(500) if j['data'].get('domain') == other['address'] and j['status'] == 'done'), None)
+    if oj:
+        monitor.ru_first = monitor.ru_every = 0
+        monitor.expect(oj['id'])
+        await asyncio.gather(*list(monitor._bg))
+        st, ojv = await wapi(f'jobs/{oj["id"]}')
+        ok(ojv['ru_check'] == 'ok' and 'проходит у' in ojv['ru_note'], f'новая нода проверена из России: {ojv.get("ru_check")} {ojv.get("ru_note")}')
+    else:
+        ok(False, 'задача ноды для проверки из России не найдена')
+
     # уведомления: выключены у ноды — проверка идёт, сообщений нет; у всей группы — так же
     oaddr = store.mon(okey)['addr']
     st, js = await wapi(f'profiles/{pid}/monitor/notify', 'POST', {'addr': oaddr, 'mute': True})

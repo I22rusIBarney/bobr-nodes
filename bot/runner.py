@@ -55,6 +55,10 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
     return [(c, names.get(c, lbl)) for c, lbl in STAGES if c not in skip]
 
 
+# доступность новой ноды из России — по чекерам мониторинга, уже после установки
+RU_CHECK = {'wait': ('⏳', 'проверяю на чекерах, обычно 2–5 минут'), 'ok': ('🟢', 'доступна'),
+            'bad': ('🔴', 'не проходит проверку'), 'none': ('▫️', 'чекеры не успели проверить')}
+
 STATUS_ICON = {'queued': '🕓', 'buying': '⏳', 'provisioning': '⏳', 'deploying': '⏳', 'done': '✅', 'failed': '❌'}
 
 
@@ -104,6 +108,9 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
         if code == 'ip' and d.get('ip') and (i < cur_i or job['status'] == 'done'):
             extra = f' · <code>{d["ip"]}</code>'
         lines.append(f'{mark} {label}{extra}')
+    ru = RU_CHECK.get(d.get('ru_check') or '')
+    if job['status'] == 'done' and ru:
+        lines.append(f'{ru[0]} Из России: {html.escape(d.get("ru_note") or ru[1])}')
     if job['status'] == 'failed' and job['error']:
         lines += ['', f'<b>Ошибка:</b> {html.escape(job["error"][:600])}']
     elif job['status'] in ('provisioning', 'deploying', 'buying') and last:
@@ -134,7 +141,8 @@ class Runner:
         self.bcloud_factory = bcloud_factory
         self.poll_every = poll_every
         self.ip_timeout = ip_timeout
-        self.rebuy_wait = min(5.0, poll_every)  # Bobr Cloud возвращает деньги за несозданный сервер сразу
+        self.rebuy_wait = min(5.0, poll_every)
+        self.after_deploy = None  # (jid) -> None: мониторинг проверяет новую ноду из России  # Bobr Cloud возвращает деньги за несозданный сервер сразу
         self.edit_every = edit_every
         self.tasks: dict[int, asyncio.Task] = {}
         self.last: dict[int, str] = {}
@@ -501,6 +509,11 @@ class Runner:
                     lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} запуск задачи #{jid}: {d["domain"]} {d["ip"]}\n')
                     await asyncio.to_thread(fn, node, pconf, lf, on_log, on_stage)
             await self._set(jid, status='done', error='')
+            if self.after_deploy is not None:  # проверка из России — фоном, задача уже готова
+                try:
+                    self.after_deploy(jid)
+                except Exception:  # noqa: BLE001
+                    log.exception('after_deploy %s', jid)
         except (Fail, engine.StepError, BcloudError) as e:
             await self._set(jid, status='failed', error=str(e))
         except Exception as e:  # noqa: BLE001

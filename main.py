@@ -68,6 +68,7 @@ async def main():
     dp.include_router(router)
     runner = Runner(store, bot, f'{data_dir}/logs')
     monitor = Monitor(store, runner, bot, admins, access=access)
+    runner.after_deploy = monitor.expect  # новая нода — сразу проверка из России
     dp['store'], dp['runner'], dp['public_url'], dp['monitor'] = store, runner, public_url, monitor
     dp['access'] = access
     autopilot = Autopilot(store, runner, bot, access, public_url)

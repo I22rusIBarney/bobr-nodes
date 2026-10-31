@@ -148,6 +148,7 @@ class Monitor:
         self.polled_at = 0.0
         self._lock = asyncio.Lock()
         self._bg: set[asyncio.Task] = set()
+        self.ru_first, self.ru_every = 75.0, 60.0  # проверка новой ноды: первый опрос и дальше
 
     # ───────── чекеры ─────────
     def subs(self) -> list[tuple[int, str]]:
@@ -215,6 +216,43 @@ class Monitor:
         if done:
             self.soon()
         return done
+
+    # ───────── новая нода: доступна ли из России ─────────
+    RU_WAIT = 15 * 60
+
+    def expect(self, jid: int) -> None:
+        """После установки: если у группы есть мониторинг и чекеры — проверить новую ноду и дописать итог в задачу."""
+        job = self.store.job(jid)
+        prof = self.store.profile(job['profile_id']) if job else None
+        if not job or not prof or not prof.get('mon_sub') or not any(
+                c.get('status') in ('running', 'idle') for c in self.store.checkers()):
+            return
+        self.store.patch_job_data(jid, ru_check='wait', ru_note='')
+        self._bg_task(self._expect(jid, prof['id'], job['data'].get('domain') or ''))
+
+    async def _expect(self, jid: int, pid: int, addr: str) -> None:
+        await self.runner.render(jid, force=True)
+        try:
+            await self._resync(force=True)  # чекеры сразу перечитают подписку с новой нодой и проверят её
+        except Exception:  # noqa: BLE001
+            log.exception('ru check resync')
+        end = time.time() + self.RU_WAIT
+        await asyncio.sleep(self.ru_first)
+        while time.time() < end:
+            try:
+                await self.tick()
+            except Exception:  # noqa: BLE001
+                log.exception('ru check tick')
+            st = self.store.mon(f'{pid}:{addr}') or {}
+            if st.get('data'):
+                down = st['fail'] * 2 > st['data']
+                note = (f'не проходит у {st["fail"]} из {st["data"]} чекеров — мониторинг продолжит следить' if down
+                        else f'проходит у {st["data"] - st["fail"]} из {st["data"]} чекеров')
+                self.store.patch_job_data(jid, ru_check='bad' if down else 'ok', ru_note=note)
+                return await self.runner.render(jid, force=True)
+            await asyncio.sleep(self.ru_every)
+        self.store.patch_job_data(jid, ru_check='none', ru_note='чекеры не успели проверить — итог будет в мониторинге')
+        await self.runner.render(jid, force=True)
 
     def soon(self, delay: float = 60) -> None:
         """Опрос вскоре — после установки чекера или смены подписок: xray-checker успеет пройти первую проверку."""

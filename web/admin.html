@@ -120,7 +120,8 @@ function restoreCache() {
     if (ST.theme) applyTheme(ST.theme);
   } catch (e) {}
 }
-const needsLoad = L => L === undefined || (!!L && !!L._stale && !L._loading);
+// список нод: нет — загрузить; сохранённый или старше минуты — обновить в фоне (новая нода появится сама)
+const needsLoad = L => L === undefined || (!!L && !L.error && !L._loading && (!!L._stale || Date.now() - (L._at || 0) > 60000));
 // оформление: фон и эффект перезапускаются, только если что-то поменялось
 let themeKey = '';
 function applyGlass(g) {
@@ -344,10 +345,13 @@ function loadNodes(pid, quiet) {
   const had = NODES[pid];
   if (had && !had.error && had.nodes) had._loading = true;  // старые данные видны, пока грузятся новые
   else NODES[pid] = null;
-  api('profiles/' + pid + '/nodes').then(r => { NODES[pid] = r; saveCache(); })
+  api('profiles/' + pid + '/nodes').then(r => { r._at = Date.now(); NODES[pid] = r; saveCache(); })
     .catch(e => { NODES[pid] = had && !had.error && had.nodes ? { ...had, _loading: false } : { error: e.message }; })
     // фоновая загрузка не перерисовывает экраны с полями ввода — только списки
-    .then(() => { if (!quiet || document.querySelector('#root .home-page, #root .servers-page')) UI.nav.refresh(); });
+    .then(() => {
+      const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+      if (!quiet || (!typing && document.querySelector('#root .home-page, #root .servers-page, #root .group-page'))) UI.nav.refresh();
+    });
 }
 function nodeStats(pid) {
   const ps = pid ? [pid] : (ST.profiles || []).map(p => p.id);
@@ -1057,7 +1061,13 @@ function groupView(pid) {
   const g = ST.profiles.find(p => p.id === pid);
   if (!g) return h('div', {}, ...pageHead('Группа'), h('div', { class: 'notice' }, 'Группа удалена'));
   const S = GV[pid] || (GV[pid] = { tab: 'nodes', q: '', f: 'all', sort: 'attn', all: false, jall: false });
-  const reload = async () => { try { GJ[pid] = (await api('jobs?pid=' + pid)).jobs; } catch (e) { GJ[pid] = { error: e.message }; } if (document.querySelector('#root .group-page')) UI.nav.refresh(); };
+  const activeOf = x => Array.isArray(x) ? x.filter(j => ACTIVE_ST.includes(j.status)).length : 0;
+  const reload = async () => {
+    const was = activeOf(GJ[pid]);
+    try { GJ[pid] = (await api('jobs?pid=' + pid)).jobs; } catch (e) { GJ[pid] = { error: e.message }; }
+    if (activeOf(GJ[pid]) < was) loadNodes(pid, true);  // установка закончилась — новая нода уже в панели
+    if (document.querySelector('#root .group-page')) UI.nav.refresh();
+  };
   const jobs = GJ[pid];
   if (jobs === undefined) { GJ[pid] = null; reload(); }
   else if (Array.isArray(jobs) && jobs.some(x => ACTIVE_ST.includes(x.status))) poll(() => { if (document.querySelector('#root .group-page')) reload(); }, 4000);
@@ -2474,6 +2484,13 @@ function jobView(id) {
       s.code === 'ip' && j.ip && done ? h('span', { class: 'val' }, j.ip) : null);
   }));
   v.append(group('Этапы', [rail]));
+  // после установки: проходит ли нода проверку из России (чекеры мониторинга)
+  const RU = { wait: ['проверяю', 'run'], ok: ['доступна', 'ok'], bad: ['не проходит', 'bad'], none: ['нет данных', 'quiet'] };
+  if (j.status === 'done' && RU[j.ru_check]) {
+    v.append(group(null, [row({ icon: 'activity', color: j.ru_check === 'bad' ? 'pink' : 'blue', title: 'Доступность из России', cls: 'wrap', chevron: false,
+      sub: j.ru_note || (j.ru_check === 'wait' ? 'чекеры проверяют новую ноду, обычно 2–5 минут' : ''), status: RU[j.ru_check] })]));
+    if (j.ru_check === 'wait') poll(() => { if (document.querySelector('#root .job-page')) reload(); }, 15000);
+  }
   const lines = j.log ? j.log.split('\n').length : 0;
   if (j.log) {
     const [fb, fbox] = UI.fold({ title: 'Журнал', summary: lines + ' ' + UI.plural(lines, 'строка', 'строки', 'строк'), key: 'log', open: j.status === 'failed',
