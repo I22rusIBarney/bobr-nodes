@@ -108,3 +108,7 @@ class Bcloud:
 
     async def rename(self, sid: int, name: str) -> None:
         await self._call('POST', f'/servers/{sid}/rename', json={'tg_id': self.tg_id, 'name': name})
+
+    async def delete(self, sid: int) -> dict:
+        """Удалить сервер владельца в bcloud (возврат остатка — по настройкам bcloud)."""
+        return await self._call('POST', f'/servers/{sid}/delete', json={'tg_id': self.tg_id})

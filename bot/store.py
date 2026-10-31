@@ -11,6 +11,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scripts (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS checkers (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mon (key TEXT PRIMARY KEY, data TEXT NOT NULL);  -- состояние нод в мониторинге
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -90,6 +92,49 @@ class Store:
 
     def delete_script(self, sid: int) -> None:
         self._q('DELETE FROM scripts WHERE id=?', (sid,))
+
+    # ── чекеры доступности (xray-checker на серверах в России) ──
+    def checkers(self) -> list[dict]:
+        return [{**json.loads(r['data']), 'id': r['id']} for r in self._q('SELECT * FROM checkers ORDER BY id')]
+
+    def checker(self, cid: int) -> dict | None:
+        rows = self._q('SELECT * FROM checkers WHERE id=?', (cid,))
+        return {**json.loads(rows[0]['data']), 'id': rows[0]['id']} if rows else None
+
+    def save_checker(self, data: dict) -> int:
+        body = json.dumps({k: v for k, v in data.items() if k != 'id'}, ensure_ascii=False)
+        if data.get('id'):
+            self._q('UPDATE checkers SET data=? WHERE id=?', (body, data['id']))
+            return data['id']
+        with self.lock:
+            return self.db.execute('INSERT INTO checkers(data) VALUES(?)', (body,)).lastrowid
+
+    def patch_checker(self, cid: int, **values) -> dict:
+        with self.lock:
+            row = self.db.execute('SELECT data FROM checkers WHERE id=?', (cid,)).fetchone()
+            if not row:
+                return {}
+            data = {**json.loads(row['data']), **values}
+            self.db.execute('UPDATE checkers SET data=? WHERE id=?', (json.dumps(data, ensure_ascii=False), cid))
+        return {**data, 'id': cid}
+
+    def delete_checker(self, cid: int) -> None:
+        self._q('DELETE FROM checkers WHERE id=?', (cid,))
+
+    # ── состояние мониторинга: ключ «группа:нода» ──
+    def mon(self, key: str) -> dict:
+        rows = self._q('SELECT data FROM mon WHERE key=?', (key,))
+        return json.loads(rows[0]['data']) if rows else {}
+
+    def mon_all(self, prefix: str = '') -> dict[str, dict]:
+        return {r['key']: json.loads(r['data']) for r in self._q('SELECT * FROM mon WHERE key LIKE ?', (prefix + '%',))}
+
+    def set_mon(self, key: str, data: dict | None) -> None:
+        if data is None:
+            self._q('DELETE FROM mon WHERE key=?', (key,))
+        else:
+            self._q('INSERT INTO mon(key, data) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET data=excluded.data',
+                    (key, json.dumps(data, ensure_ascii=False)))
 
     # ── задачи ──
     def add_job(self, batch: str, profile_id: int, chat_id: int, data: dict) -> int:

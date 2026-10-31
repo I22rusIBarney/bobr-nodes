@@ -486,6 +486,21 @@ async def own_create(c: CallbackQuery, store: Store, runner: Runner, w: dict) ->
         await svc.create_jobs(store, runner, c.message.chat.id, w['pid'], w['cat'], loc, None, '1m', doms, servers=servers)
 
 
+# ───────────────────────── мониторинг ─────────────────────────
+
+@router.callback_query(F.data.regexp(r'^mon:[fri]:[0-9a-f]{8}$'))
+async def monitor_button(c: CallbackQuery, monitor=None):
+    if monitor is None:
+        return await c.answer('Мониторинг выключен', show_alert=True)
+    what = {'f': 'fix', 'r': 'replace', 'i': 'ignore'}[c.data[4]]
+    msg = await monitor.action(c.data[6:], what)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(msg, show_alert=True)
+
+
 # ───────────────────────── задачи ─────────────────────────
 
 @router.callback_query(F.data == 'm:jobs')

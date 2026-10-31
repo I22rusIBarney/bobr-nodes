@@ -330,10 +330,32 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
         calls: list = []
         post: list = []
         psiphon_calls: list = []
+        checker_polls: list = []
+        files: dict = {}
 
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
-            assert self.n.get('ssh_password'), 'нет пароля root'
+            assert self.n.get('ssh_password') or self.n.get('ssh_key'), 'нет ни пароля root, ни ключа'
+            # чекер доступности (xray-checker под управлением бота)
+            if '/api/v1/proxies' in cmd:
+                FakeRemote.checker_polls.append(ip)
+                res = behaviour['checker'](ip)
+                return (0, json.dumps({'success': True, 'data': res})) if res is not None else (7, 'curl: (7) Failed to connect\n')
+            if 'os-release' in cmd:
+                return 0, 'OS=ubuntu\nx86_64\n'
+            if cmd.startswith('command -v docker'):
+                return 0, 'HAVE_DOCKER\n'
+            if '| base64 -d >' in cmd:
+                import base64 as _b64, re as _re
+                m = _re.search(r'echo (\S+) \| base64 -d > (\S+)\.new', cmd)
+                FakeRemote.files[(ip, m.group(2))] = _b64.b64decode(m.group(1)).decode()
+                return 0, 'PUT_OK\n'
+            if 'docker pull' in cmd:
+                return 0, 'PULL_OK\n'
+            if 'docker compose up' in cmd:
+                return 0, 'UP_OK\n'
+            if 'docker compose down' in cmd or cmd.startswith('mkdir -p /opt/bnodes-checker'):
+                return 0, ''
             if cmd == 'id -u':
                 return 0, '0\n'
             if 'authorized_keys' in cmd:

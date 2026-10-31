@@ -34,6 +34,30 @@ def gen_password() -> str:
             return pw
 
 
+def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
+    """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер bcloud) этой группы.
+    Ноды регистрируются по домену, старые — по IP, поэтому ключи — оба."""
+    out = {}
+    for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
+        d = j['data']
+        if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done'
+                and not d.get('removed')):
+            d = {**d, '_job': j['id']}
+            out[d['ip']] = d
+            if d.get('domain'):
+                out[d['domain']] = d
+    return out
+
+
+def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict:
+    """Доступ для задачи: сохранённый, иначе — пароль из задачи покупки."""
+    saved = runner.ssh_of(pid, uuid)
+    if saved.get('mode'):
+        return saved
+    d = bot_jobs_by_ip(store, pid).get(ip)
+    return {'mode': 'password', 'user': 'root', 'port': 22, 'password': d.get('password', '')} if d else {}
+
+
 def cf_for(store: Store, prof: dict) -> engine.Cloudflare:
     return engine.Cloudflare(prof.get('cf_token') or store.get('cf_token'))
 
@@ -265,7 +289,8 @@ def host_places(order: list, domains_of: dict[str, list[str]], known: set[str]) 
 async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int | None,
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
                       host: dict | None = None, lang: str = 'ru', places: dict | None = None,
-                      extras: dict | None = None, custom: dict | None = None, servers: list[dict] | None = None) -> list[int]:
+                      extras: dict | None = None, custom: dict | None = None, servers: list[dict] | None = None,
+                      script_id: object = 'group', note: dict | None = None) -> list[int]:
     """Задачи установки. custom — своя конфигурация (покупка по cpu/ram/disk); servers — уже купленные серверы
     bcloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из bcloud."""
     if servers:
@@ -294,7 +319,8 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
                 **({'custom': {k: custom[k] for k in ('cpu', 'ram', 'disk')}} if custom and not srv else {}),
                 **({'server_id': int(srv['id']), 'existing': True, 'skipped_stages': ['buy']} if srv else {}),
                 'host': host, 'squads': squads, 'place': (places or {}).get(dom),
-                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id'),
+                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id') if script_id == 'group' else script_id,
+                **(note or {}),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
         ids.append(jid)

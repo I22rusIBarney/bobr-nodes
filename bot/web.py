@@ -90,7 +90,7 @@ def client_ip(request) -> str:
 
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
-              bot_username: str = '', security=None, data_dir: str | Path = 'data') -> web.Application:
+              bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None) -> web.Application:
     media = Path(data_dir) / 'media'
     fails: dict[str, list[float]] = {}
 
@@ -397,6 +397,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if any(j['profile_id'] == p['id'] for j in store.active_jobs()):
             raise ApiError('У группы есть задачи в работе — дождитесь их')
         store.delete_profile(p['id'])
+        for key in store.mon_all(f'{p["id"]}:'):
+            store.set_mon(key, None)
+        if p.get('mon_sub') and monitor is not None:  # подписку группы — убрать с чекеров
+            monitor.resync()
         return J({'ok': True})
 
     async def panel_check(p: dict) -> dict:
@@ -442,18 +446,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', ''))
 
     def bot_jobs_by_ip(pid: int) -> dict[str, dict]:
-        """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер bcloud) этой группы.
-        Ноды регистрируются по домену, старые — по IP, поэтому ключи — оба."""
-        out = {}
-        for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
-            d = j['data']
-            if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in ('node', 'reip') and j['status'] == 'done'
-                    and not d.get('removed')):
-                d = {**d, '_job': j['id']}
-                out[d['ip']] = d
-                if d.get('domain'):
-                    out[d['domain']] = d
-        return out
+        return svc.bot_jobs_by_ip(store, pid)
 
     def ssh_view(pid: int, uuid: str, ip: str) -> dict:
         saved = runner.ssh_of(pid, uuid)
@@ -466,12 +459,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return {'mode': '', 'user': 'root', 'port': 22, 'has_password': False, 'source': ''}
 
     def node_ssh(pid: int, uuid: str, ip: str) -> dict:
-        """Доступ для задачи: сохранённый, иначе — ключ бота и пароль из задачи покупки."""
-        saved = runner.ssh_of(pid, uuid)
-        if saved.get('mode'):
-            return saved
-        d = bot_jobs_by_ip(pid).get(ip)
-        return {'mode': 'password', 'user': 'root', 'port': 22, 'password': d.get('password', '')} if d else {}
+        return svc.node_ssh(store, runner, pid, uuid, ip)
 
     @r.get('/api/profiles/{pid}/nodes')
     async def panel_nodes(request):
@@ -1132,6 +1120,108 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if j['status'] in ACTIVE:
             raise ApiError('Задача ещё в работе')
         store.update_job(j['id'], hidden=1)
+        return J({'ok': True})
+
+    # ── мониторинг доступности из России ──
+    def mon():
+        if monitor is None:
+            raise ApiError('Мониторинг выключен', 404)
+        return monitor
+
+    def checker_or_404(cid) -> dict:
+        ch = store.checker(int(cid))
+        if not ch:
+            raise ApiError('Чекер не найден', 404)
+        return ch
+
+    @r.get('/api/monitor')
+    async def monitor_view(_):
+        v = mon().view()
+        for g in v['groups']:
+            g['sub_hint'] = hint((store.profile(g['id']) or {}).get('mon_sub') or '')
+        v['scripts'] = [{'id': x['id'], 'title': x.get('title') or x.get('path')} for x in store.scripts() if x.get('status') == 'approved']
+        return J(v)
+
+    @r.post('/api/checkers')
+    async def checker_add(request):
+        b = await body(request)
+        name = str(b.get('name') or '').strip()[:40] or 'Чекер'
+        ip = str(b.get('ip') or '').strip()
+        if not engine.is_ip(ip) or ':' in ip:
+            raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
+        if any(x['ip'] == ip for x in store.checkers()):
+            raise ApiError('Чекер с этим IP уже есть')
+        try:
+            port = int(b.get('port') or 22)
+        except (TypeError, ValueError):
+            port = 0
+        if not 1 <= port <= 65535:
+            raise ApiError('SSH-порт: от 1 до 65535')
+        pw = str(b.get('password') or '')
+        if not pw and not b.get('use_key'):
+            raise ApiError('Нужен root-пароль сервера (или ключ бота уже добавлен на сервер)')
+        cid = store.save_checker({'name': name, 'ip': ip, 'port': port, 'user': str(b.get('user') or 'root').strip() or 'root',
+                                  'password': pw, 'auth': 'key' if b.get('use_key') and not pw else 'password',
+                                  'status': 'new', 'created_at': int(time.time())})
+        mon().install(cid)
+        return J({'id': cid})
+
+    @r.post('/api/checkers/{cid}/install')
+    async def checker_install(request):
+        ch = checker_or_404(request.match_info['cid'])
+        if ch.get('status') == 'installing':
+            raise ApiError('Установка уже идёт')
+        pw = str((await body(request)).get('password') or '')
+        if pw:
+            store.patch_checker(ch['id'], password=pw, auth='password')
+        mon().install(ch['id'])
+        return J({'ok': True})
+
+    @r.delete('/api/checkers/{cid}')
+    async def checker_delete(request):
+        ch = checker_or_404(request.match_info['cid'])
+        store.delete_checker(ch['id'])
+        if ch.get('api_password'):  # остановить чекер на сервере — по возможности, не дожидаясь
+            path, _, kh = mon().keyfiles()
+            asyncio.get_running_loop().run_in_executor(None, lambda: ck_stop(ch, path, kh))
+        return J({'ok': True})
+
+    def ck_stop(ch, path, kh):
+        from . import checker as ck
+        try:
+            ck.remote(ch, path, kh).run(f'cd {ck.DIR} 2>/dev/null && docker compose down >/dev/null 2>&1; true', 120)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @r.post('/api/profiles/{pid}/monitor')
+    async def monitor_settings(request):
+        from . import monitor as M
+        p = profile_or_404(request.match_info['pid'])
+        b = await body(request)
+        try:
+            cfg = M.clean_settings(b, p, store.scripts())
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        changed = (cfg['mon_sub'] or '') != (p.get('mon_sub') or '')
+        store.save_profile({**p, **cfg})
+        if changed:
+            mon().resync()
+        return J({'ok': True, 'resync': changed})
+
+    @r.post('/api/monitor/action')
+    async def monitor_action(request):
+        b = await body(request)
+        what = b.get('action')
+        if what not in ('fix', 'replace', 'ignore'):
+            raise ApiError('Неизвестное действие')
+        return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what)})
+
+    @r.post('/api/monitor/check')
+    async def monitor_check(_):
+        m = mon()
+        if m._lock.locked():
+            raise ApiError('Проверка уже идёт')
+        asyncio.get_running_loop().create_task(m.tick())
         return J({'ok': True})
 
     app.add_routes(r)

@@ -125,6 +125,7 @@ function home() {
   const jobsStatus = j.active ? ['в работе: ' + j.active, 'run'] : j.failed ? ['ошибок: ' + j.failed, 'bad'] : null;
   v.append(group(null, [
     row({ title: 'Задачи', status: jobsStatus, detail: jobsStatus ? null : String(j.done || ''), onClick: () => UI.nav.push(jobsView) }),
+    row({ title: 'Мониторинг', sub: 'доступность нод из России', onClick: () => { MON = null; UI.nav.push(monitorView); } }),
     row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }),
     row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }),
     row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })]));
@@ -229,6 +230,145 @@ function otherView() {
   return h('div', {}, ...title('SSH-ключ и очередь'), ...settingsForm('Доступ и скорость', ['ssh_pubkey', 'parallel'],
     'Публичный ключ (содержимое .pub) добавляется на каждый новый сервер — входить можно будет без пароля. Пусто или «-» — не добавлять. Параллельно ставится не больше указанного числа нод, остальные ждут в очереди.',
     null, { fields: { ssh_pubkey: { area: true, ph: 'ssh-ed25519 AAAA… me@laptop' }, parallel: { inputmode: 'numeric' } } }));
+}
+
+// ───────── мониторинг: чекеры в России, подписки групп, починка ─────────
+let MON = null, monTimer = 0;
+const MST = { ok: ['', 'ok', 'доступна'], down: ['недоступна', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
+  ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
+const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
+async function loadMon() { try { MON = await api('monitor'); } catch (e) { MON = { error: e.message }; } }
+function monPoll() {  // пока ставится чекер или идёт починка — обновляем страницу
+  clearTimeout(monTimer);
+  const busy = MON && !MON.error && (MON.checkers.some(c => ['new', 'installing'].includes(c.status)) || MON.groups.some(g => g.nodes.some(n => n.status === 'repairing')));
+  if (busy) monTimer = setTimeout(() => { if (document.querySelector('#root .mon-page')) loadMon().then(() => UI.nav.refresh()); }, 4000);
+}
+const ago = ts => { if (!ts) return 'ещё не было'; const m = Math.round((Date.now() / 1000 - ts) / 60); return m < 1 ? 'только что' : m < 60 ? m + ' мин назад' : Math.round(m / 60) + ' ч назад'; };
+function monitorView() {
+  if (MON === null) { loadMon().then(() => UI.nav.refresh()); return h('div', {}, ...title('Мониторинг'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); }
+  const v = h('div', { class: 'mon-page' }, ...title('Мониторинг'),
+    h('div', { class: 'subtitle' }, 'Чекеры на серверах в России проверяют подписки групп. Нода недоступна, если её не пропускает большинство чекеров 3 проверки подряд (~15 мин).'));
+  if (MON.error) { v.append(h('div', { class: 'notice bad' }, MON.error)); return v; }
+  monPoll();
+  const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
+    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : (CST[c.status] || [c.status, '']), onClick: () => UI.nav.push(() => checkerView(c.id)) }));
+  chRows.push(row({ title: 'Добавить чекер', cls: 'accent', onClick: () => UI.nav.push(checkerAddView) }));
+  v.append(group(['Чекеры', h('span', { class: 'n' }, MON.checkers.length || '')], chRows,
+    'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп; API чекера наружу не открыт — бот читает его по SSH.'));
+  const gRows = MON.groups.map(g => {
+    const bad = g.nodes.filter(n => ['down', 'repairing', 'gave_up'].includes(n.status)).length;
+    return row({ title: g.name, sub: g.enabled ? `нод ${g.nodes.length}, ${MON.modes[g.mon_mode]}` : 'подписка не задана',
+      status: !g.enabled ? null : bad ? ['проблем: ' + bad, 'bad'] : g.nodes.length ? ['', 'ok', 'всё доступно'] : null,
+      onClick: () => UI.nav.push(() => monGroupView(g.id)) });
+  });
+  v.append(group('Группы', gRows.length ? gRows : [row({ title: 'Групп пока нет', cls: 'is-dim' })]));
+  const go = h('button', { class: 'btn tinted', type: 'button', disabled: !MON.checkers.some(c => c.status === 'running') }, 'Проверить сейчас');
+  go.onclick = UI.busy(go, async () => { if (await UI.run(() => api('monitor/check', 'POST'), 'Проверяю — результат через минуту')) setTimeout(() => loadMon().then(() => UI.nav.refresh()), 30000); });
+  v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Последний опрос: ' + ago(MON.polled_at) + '. Дальше — каждые ' + Math.round(MON.every / 60) + ' мин.')));
+  return v;
+}
+function checkerAddView() {
+  const f = { name: '', ip: '', port: '22', password: '' };
+  const status = statusLine();
+  const pw = h('input', { type: 'password', autocomplete: 'off', placeholder: 'root-пароль' });
+  pw.addEventListener('input', () => { f.password = pw.value; });
+  const add = h('button', { class: 'btn', type: 'button' }, 'Поставить чекер');
+  add.onclick = UI.busy(add, async () => {
+    try {
+      const r = await api('checkers', 'POST', f);
+      MON = null; await loadMon(); UI.nav.back(); UI.nav.push(() => checkerView(r.id));
+    } catch (e) { showStatus(status, { ok: false, message: e.message }); }
+  });
+  return h('div', {}, ...title('Новый чекер', 'Мониторинг'),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
+      h('label', { class: 'field stack' }, h('label', {}, 'Название'), textIn(f.name, 'Москва, МТС', x => { f.name = x; })),
+      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'SSH-порт'), textIn(f.port, '22', x => { f.port = x.replace(/\D/g, ''); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Пароль root'), pw)),
+      h('div', { class: 'group-f' }, 'Бот зайдёт по паролю, добавит свой SSH-ключ, поставит Docker и xray-checker. Дальше входит по ключу, пароль не хранит. Лучше брать серверы у разных операторов: так видно, где блокировка, а где сбой у одного провайдера.'), status),
+    h('div', { class: 'pad' }, add));
+}
+function checkerView(id) {
+  const c = MON && !MON.error && MON.checkers.find(x => x.id === id);
+  if (!c) return h('div', {}, ...title('Чекер', 'Мониторинг'), h('div', { class: 'notice' }, 'Чекер удалён'));
+  monPoll();
+  const v = h('div', { class: 'mon-page' }, ...title(c.name, 'Мониторинг'));
+  v.append(group(null, [
+    row({ title: 'Состояние', status: CST[c.status] || [c.status, ''] }),
+    row({ title: 'Сервер', detail: c.ip + (c.port && c.port !== 22 ? ':' + c.port : ''), mono: true, copy: c.ip }),
+    row({ title: 'Вход', detail: c.auth === 'key' ? 'по ключу бота' : 'по паролю' }),
+    row({ title: 'Последний опрос', detail: ago(c.polled_at), status: c.poll_error ? ['ошибка', 'bad'] : null }),
+    c.status === 'running' ? row({ title: 'Проверок', detail: `${c.online ?? 0} из ${c.proxies ?? 0} проходят` }) : null].filter(Boolean),
+    c.poll_error || c.error || null));
+  if ((c.log || []).length) v.append(group('Установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, c.log.join('\n'))]));
+  const pw = h('input', { type: 'password', autocomplete: 'off', placeholder: c.auth === 'key' ? 'не нужен — вход по ключу' : 'root-пароль, если сменился' });
+  const re = h('button', { class: 'btn tinted', type: 'button', disabled: c.status === 'installing' }, c.status === 'failed' ? 'Повторить установку' : 'Переустановить и обновить');
+  re.onclick = UI.busy(re, async () => { if (await UI.run(() => api('checkers/' + id + '/install', 'POST', { password: pw.value }), 'Ставлю')) { await loadMon(); UI.nav.refresh(); } });
+  v.append(h('section', { class: 'group' }, h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Пароль root'), pw))), h('div', { class: 'pad' }, re));
+  v.append(group(null, [row({ title: 'Удалить чекер', cls: 'destructive', onClick: async () => {
+    const ok = await UI.ask({ title: 'Удалить чекер?', message: 'Бот остановит xray-checker на сервере и перестанет его опрашивать. Сам сервер не трогаем.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
+    if (ok && await UI.run(() => api('checkers/' + id, 'DELETE'), 'Чекер удалён') !== undefined) { await loadMon(); UI.nav.back(); }
+  } })]));
+  return v;
+}
+function monGroupView(pid) {
+  const g = MON && !MON.error && MON.groups.find(x => x.id === pid);
+  if (!g) return h('div', {}, ...title('Мониторинг'), h('div', { class: 'notice' }, 'Группа удалена'));
+  monPoll();
+  const v = h('div', { class: 'mon-page' }, ...title(g.name, 'Мониторинг'));
+  // ноды
+  if (g.enabled) {
+    const rows = g.nodes.map(n => {
+      const r = row({ title: n.name || n.addr, cls: 'wrap',
+        sub: [n.addr !== n.name ? n.addr : '', n.data ? `не проходит у ${n.fail} из ${n.data}` : 'чекеры её пока не видят',
+          n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
+          n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
+        status: n.status === 'ok' && n.fail ? ['частично', 'warn'] : (MST[n.status] || [n.status, '']),
+        onClick: ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok ? async () => {
+          const btns = [];
+          if (g.mon_steps.length) btns.push({ id: 'fix', text: 'Чинить по шагам' });
+          if (g.mon_steps.includes('replace')) btns.push({ id: 'replace', text: 'Сразу новая нода' });
+          if (n.status !== 'ignored') btns.push({ id: 'ignore', text: 'Не трогать' });
+          const a = await UI.ask({ title: n.name || n.addr, message: 'Нода недоступна из России. Что делаем?', buttons: btns });
+          if (a) { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } }
+        } : null });
+      return r;
+    });
+    v.append(group(['Ноды', h('span', { class: 'n' }, g.nodes.length || '')], rows.length ? rows : [row({ cls: 'wrap is-dim', title: 'Пока нет данных', sub: 'Появятся после опроса чекеров (до 5 минут).' })],
+      g.nodes.some(n => ['down', 'gave_up', 'ignored'].includes(n.status)) ? 'Нажмите на недоступную ноду, чтобы запустить починку.' : null));
+  }
+  // настройки
+  const S = { mon_sub: '', mon_mode: g.mon_mode, mon_steps: new Set(g.mon_steps), mon_script: g.mon_script, mon_port: String(g.mon_port || 8443), mon_old: g.mon_old, mon_max_buys: String(g.mon_max_buys) };
+  const sub = h('input', { type: 'password', class: 'code', autocomplete: 'off', placeholder: g.sub_hint ? 'оставить ' + g.sub_hint + ' («-» — убрать)' : 'https://sub.example.com/…' });
+  sub.addEventListener('input', () => { S.mon_sub = sub.value.trim(); });
+  const stepRows = Object.entries(MON.steps).map(([k, t]) => {
+    const extra = k === 'script' ? h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Чем переустановить'),
+      UI.chips([{ value: null, label: 'Nuvrion Vision' }, ...MON.scripts.map(x => ({ value: x.id, label: x.title }))], S.mon_script, x => { S.mon_script = x; }))
+      : k === 'mask' ? h('label', { class: 'field' }, h('label', {}, 'Порт для клиентов'), textIn(S.mon_port, '8443', x => { S.mon_port = x.replace(/\D/g, ''); }, true, 'right')) : null;
+    return [row({ title: t, right: UI.toggle(S.mon_steps.has(k), on => { on ? S.mon_steps.add(k) : S.mon_steps.delete(k); }, t) }), extra];
+  }).flat().filter(Boolean);
+  const status = statusLine();
+  const save = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
+  save.onclick = UI.busy(save, async () => {
+    const r = await UI.run(() => api('profiles/' + pid + '/monitor', 'POST', { ...S, mon_steps: [...S.mon_steps], mon_max_buys: S.mon_max_buys, mon_port: S.mon_port }));
+    if (!r) return;
+    UI.toast(r.resync ? 'Сохранено — обновляю подписки на чекерах' : 'Сохранено');
+    sub.value = ''; await loadMon(); UI.nav.refresh();
+  });
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Подписка для проверки'),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Ссылка подписки'), sub)),
+    h('div', { class: 'group-f' }, 'Заведите в панели группы отдельного пользователя со всеми сквадами нод и вставьте его ссылку подписки. Бот запишет её на все чекеры с пометкой этой группы.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Когда нода недоступна'),
+    h('div', { class: 'seg-row' }, UI.chips(Object.entries(MON.modes).map(([k, t]) => ({ value: k, label: t })), S.mon_mode, x => { S.mon_mode = x; })),
+    h('div', { class: 'group-f' }, '«Предлагать» — сообщение с кнопками «Починить», «Сразу новая нода», «Не трогать». «Чинить сам» — шаги ниже по порядку без вопросов.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Шаги починки, по порядку'), h('div', { class: 'list' }, stepRows),
+    h('div', { class: 'group-f' }, 'После каждого шага бот ждёт две проверки (~10 мин): нода ожила — готово, нет — следующий шаг. Смена IP — только для нод, купленных ботом; переустановка — на том же сервере с тем же доменом.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новая нода'), h('div', { class: 'list' },
+    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Старый сервер после замены'), UI.chips(Object.entries(MON.old).map(([k, t]) => ({ value: k, label: t })), S.mon_old, x => { S.mon_old = x; })),
+    h('label', { class: 'field' }, h('label', {}, 'Покупок за сутки, не больше'), textIn(S.mon_max_buys, '2', x => { S.mon_max_buys = x.replace(/\D/g, ''); }, true, 'right'))),
+    h('div', { class: 'group-f' }, `Та же локация и тариф, что у старой ноды, имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в bcloud сервер не вернуть — остаток срока возвращается по правилам bcloud.`)));
+  v.append(h('div', { class: 'pad', style: 'margin-bottom:var(--s2)' }, status), h('div', { class: 'actions' }, save));
+  return v;
 }
 
 // ───────── мои скрипты ─────────

@@ -104,6 +104,10 @@ class FakeAstra:
 
     async def servers(s): return []
 
+    async def delete(s, sid):
+        s.made[sid]['deleted'] = True
+        return {'ok': True}
+
     async def server(s, sid):
         return {'id': sid, 'status': 'active', 'ip': s.made[sid].get('ip') or f'198.51.100.{sid - 500}', 'root_password': s.made[sid]['password']}
 
@@ -196,7 +200,10 @@ async def main():
     from bot.web import build_web
     from bot.security import Watch
     watch = Watch(store, bot, {1}, TMP, every=0)
-    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP)
+    from bot.monitor import Monitor
+    monitor = Monitor(store, runner, bot, {1})
+    dp['monitor'] = monitor
+    wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor)
     web = TestClient(TestServer(wapp))
     await web.start_server()
 
@@ -1104,6 +1111,125 @@ async def main():
     cj = store.jobs(1)[0]
     ok(cj['status'] == 'done' and cj['data']['server_id'] == own[1] and set(astra.made) == made0,
        f'чат: нода на своём сервере без покупки: {cj["error"]}')
+
+    # ── мониторинг доступности из России: чекеры, голосование, починка по шагам, замена ноды
+    from bot import checker as CK
+    blocked, dead_checker = set(), set()
+
+    def checker_results(ip):  # что видит xray-checker на сервере ip: ноды подписки каждой группы с мониторингом
+        if ip in dead_checker:
+            return None
+        env = fakes_remote.files.get((ip, CK.DIR + '/.env'), '')
+        out = []
+        for p_ in store.profiles():
+            if p_.get('mon_sub') and f'#{CK.sub_name(p_["id"])}' in env:
+                for n in world.nodes:
+                    out.append({'subName': CK.sub_name(p_['id']), 'server': n['address'], 'port': 443, 'name': n['name'],
+                                'online': (n['address'], ip) not in blocked and n['address'] not in blocked, 'latencyMs': 80, 'lastCheck': 1})
+        return out
+    behaviour['checker'] = checker_results
+    st, js = await wapi('checkers', 'POST', {'name': 'Москва', 'ip': 'не ip', 'password': 'x'})
+    ok(st == 400 and 'IPv4' in js['detail'], 'чекер: неверный IP отклонён')
+    cids = []
+    for i, nm in enumerate(('Москва МТС', 'СПб Билайн', 'Казань Ростелеком')):
+        st, js = await wapi('checkers', 'POST', {'name': nm, 'ip': f'192.0.2.{50 + i}', 'password': 'RootPassw0rd'})
+        ok(st == 200, f'чекер {nm} добавлен: {js}')
+        cids.append(js['id'])
+    await asyncio.gather(*list(monitor._bg))
+    chs = store.checkers()
+    ok(all(c['status'] == 'idle' and c['auth'] == 'key' and not c['password'] and c['api_password'] for c in chs),
+       f'чекеры поставлены: вход по ключу бота, пароль root не хранится, без подписок — ждут: {[(c["status"], c.get("error")) for c in chs]}')
+    st, mv = await wapi('monitor')
+    ok(st == 200 and len(mv['checkers']) == 3 and all('api_password' not in c and 'password' not in c for c in mv['checkers']),
+       'админка: чекеры без паролей')
+    st, js = await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_sub': 'https://sub.example.com/x#y'})
+    ok(st == 400 and 'без пробелов' in js['detail'], 'ссылка подписки с # отклонена')
+    st, js = await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_sub': 'https://sub.example.com/AbC123', 'mon_mode': 'auto',
+                                                             'mon_steps': ['mask', 'replace'], 'mon_old': 'delete', 'mon_max_buys': 1, 'mon_port': '8443'})
+    ok(st == 200 and js['resync'], f'мониторинг группы включён: {js}')
+    await asyncio.gather(*list(monitor._bg))
+    env = fakes_remote.files.get(('192.0.2.50', CK.DIR + '/.env'), '')
+    ok(f'https://sub.example.com/AbC123#bnodes-g{pid}' in env and 'METRICS_PROTECTED="true"' in env
+       and all(c['status'] == 'running' for c in store.checkers()), 'подписка группы записана на чекеры с пометкой группы, чекеры работают')
+    st, mv = await wapi('monitor')
+    ok(all('mon_sub' not in g for g in mv['groups']) and next(g for g in mv['groups'] if g['id'] == pid)['sub_hint'] == '••••C123',
+       'ссылка подписки в админку не отдаётся')
+
+    # одна нода — недоступна у двух чекеров из трёх; ещё одна — только у одного (не тревога)
+    bj = __import__('bot.services', fromlist=['x']).bot_jobs_by_ip(store, pid)
+    victim = next(n for n in world.nodes if n['address'] in bj and bj[n['address']].get('location') == 'de')
+    other = next(n for n in world.nodes if n['address'] in bj and n['address'] != victim['address'])
+    vd = bj[victim['address']]
+    blocked |= {(victim['address'], '192.0.2.50'), (victim['address'], '192.0.2.51'), (other['address'], '192.0.2.52')}
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    n0 = len(sess.sent)
+    await monitor.tick()
+    await monitor.tick()
+    vkey = f'{pid}:{victim["address"]}'
+    ok(store.mon(vkey)['status'] == 'ok' and store.mon(vkey)['fails'] == 2 and store.mon(f'{pid}:{other["address"]}')['fails'] == 0,
+       f'две проверки подряд — ещё не тревога; 1 из 3 чекеров — не считается: {store.mon(vkey)}')
+    await monitor.tick()
+    await runner.wait_all()
+    msgs = [m.text for name, m in sess.sent[n0:] if name == 'SendMessage']
+    stv = store.mon(vkey)
+    ok(any('🔴' in m and 'у 2 из 3' in m for m in msgs) and stv['status'] == 'repairing' and stv['step'] == 'mask',
+       f'третья проверка — тревога и первый шаг: Final Mask и порт: {stv.get("status")}, {[m[:60] for m in msgs]}')
+    mj = store.job(stv['job'])
+    ok(mj['status'] == 'done' and mj['data']['port'] == 8443 and mj['data']['final_mask'],
+       f'шаг Final Mask + порт 8443 выполнен задачей по ноде: {mj["error"]}')
+    await monitor.tick()  # задача шага завершилась — ждём
+    await monitor.tick()
+    ok(store.mon(vkey)['status'] == 'repairing' and store.mon(vkey)['step'] == 'mask', 'после шага ждём две проверки')
+    made0 = set(astra.made)
+    await monitor.tick()  # не помогло — следующий шаг: новая нода
+    stv = store.mon(vkey)
+    ok(stv['step'] == 'replace', f'не помогло — новая нода: {stv}')
+    await runner.wait_all()
+    nj = store.job(stv['job'])
+    ok(nj['status'] == 'done' and nj['data']['location'] == vd['location'] and nj['data']['replaces'] == victim['address']
+       and len(set(astra.made) - made0) == 1, f'куплена и поставлена новая нода в той же локации: {nj["error"]}')
+    n1 = len(sess.sent)
+    await monitor.tick()
+    msgs = [m.text for name, m in sess.sent[n1:] if name == 'SendMessage']
+    async with BD.session() as s_:
+        old_srv = await s_.get(BD.Server, int(vd['server_id']))
+    ok(store.mon(vkey)['status'] == 'replaced' and not any(n['address'] == victim['address'] for n in world.nodes)
+       and old_srv.status == 'deleted' and any('✅' in m and nj['data']['domain'] in m for m in msgs),
+       f'старая нода убрана из панели, сервер удалён в bcloud: {[m[:80] for m in msgs]}')
+    ok(store.mon(f'{pid}:{nj["data"]["domain"]}').get('status') == 'ok', 'новая нода сама попала в мониторинг и доступна')
+
+    # режим «предлагать»: кнопки, лимит покупок, восстановление само
+    await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_mode': 'ask'})
+    blocked.add(other['address'])
+    n2 = len(sess.sent)
+    for _ in range(3):
+        await monitor.tick()
+    okey = f'{pid}:{other["address"]}'
+    alert = [m for name, m in sess.sent[n2:] if name == 'SendMessage' and '🔴' in m.text]
+    ok(alert and 'mon:f:' in str(alert[0].reply_markup) and store.mon(okey)['status'] == 'down', 'режим «предлагать»: сообщение с кнопками')
+    tok = store.mon(okey)['tok']
+    st, js = await wapi('monitor/action', 'POST', {'tok': tok, 'action': 'replace'})
+    msgs = [m.text for name, m in sess.sent[n2:] if name == 'SendMessage']
+    ok(any('лимит покупок' in m for m in msgs) and store.mon(okey)['status'] == 'gave_up',
+       f'лимит покупок за сутки соблюдается: {js}')
+    await tap(f'mon:i:{tok}')
+    ok(store.mon(okey)['status'] == 'ignored', 'кнопка «Не трогать» в чате')
+    blocked.discard(other['address'])
+    n3 = len(sess.sent)
+    await monitor.tick()
+    ok(store.mon(okey)['status'] == 'ok' and any('🟢' in m.text for name, m in sess.sent[n3:] if name == 'SendMessage'),
+       'нода ожила — сообщение и обычное состояние')
+    # чекер, у которого не проходит ничего, не голосует (лежит его сеть)
+    blocked |= {(n['address'], '192.0.2.52') for n in world.nodes} | {(other['address'], '192.0.2.51')}
+    for _ in range(3):
+        await monitor.tick()
+    ok(store.mon(okey)['status'] == 'ok' and store.mon(okey)['data'] == 2, 'чекер без единой удачной проверки не считается')
+    dead_checker.add('192.0.2.50')
+    await monitor.tick()
+    ok(store.checker(cids[0]).get('poll_error'), 'неответивший чекер помечен')
+    st, js = await wapi(f'checkers/{cids[0]}', 'DELETE')
+    ok(st == 200 and len(store.checkers()) == 2, 'чекер удалён')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')
