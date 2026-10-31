@@ -424,7 +424,11 @@ async def main():
        'в общем профиле путь к сертификату через ссылку, без домена ноды')
     ok(world.squads['11111111-1111-1111-1111-111111111111']['inbounds'] == [{'uuid': nv[0]['inbounds'][0]['uuid']}],
        'общий inbound добавлен в сквад один раз')
-    ok(sorted(m.get('renamed') for m in astra.made.values()) == ['de2', 'de3'], 'серверы переименованы в bcloud')
+    async with BD.session() as s_:
+        bnames = sorted([(await s_.get(BD.Server, j['data']['server_id'])).name for j in jobs])
+    ok(bnames == ['de2', 'de3'] and not any(m.get('renamed') for m in astra.made.values())
+       and all(m['name'].startswith('🇩🇪 ') for m in astra.made.values()),
+       f'в Bobr Cloud — имена нод, у провайдера — флаг и кто купил: {bnames}, {[m["name"] for m in astra.made.values()]}')
     ok(all(m['os'] == 'debian12' for m in astra.made.values()), 'выбрана Debian 12 (Ubuntu 24.04 в каталоге нет)')
     card = sess.messages[jobs[0]['msg_id']]
     ok(card.count('✅') >= 7 and 'Root-пароль' in card, 'карточка задачи в чате: все этапы ✅ и пароль')
