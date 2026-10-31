@@ -1161,6 +1161,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         mon().install(ch['id'])
         return J({'ok': True})
 
+    @r.post('/api/checkers/{cid}/forget-hostkey')
+    async def checker_forget(request):
+        """Забыть ключ сервера чекера — после переустановки или если облако отдало IP новому серверу."""
+        ch = checker_or_404(request.match_info['cid'])
+        engine.forget_host(runner.known_hosts(), ch['ip'], int(ch.get('port') or 22))
+        return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
+
     @r.delete('/api/checkers/{cid}')
     async def checker_delete(request):
         ch = checker_or_404(request.match_info['cid'])

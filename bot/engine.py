@@ -996,15 +996,17 @@ class Panel:
 # ─────────────────────────────── SSH ─────────────────────────────────
 
 HOSTKEY_CHANGED = ('ключ SSH сервера изменился с прошлого входа — возможна подмена сервера, пароль не отправлен. '
-                   'Если сервер переустанавливали, нажмите «Забыть ключ SSH» на странице ноды и повторите')
+                   'Если сервер переустанавливали или IP достался новому серверу, нажмите «Забыть ключ сервера» '
+                   '(на странице ноды или чекера) и повторите')
 
 
-def forget_host(known_hosts: str, host: str) -> None:
-    """Забыть ключ сервера (новый сервер на старом IP или переустановка)."""
-    try:
-        subprocess.run(['ssh-keygen', '-R', host, '-f', known_hosts], capture_output=True, timeout=20)
-    except (OSError, subprocess.SubprocessError):
-        pass
+def forget_host(known_hosts: str, host: str, port: int = 22) -> None:
+    """Забыть ключ сервера (новый сервер на старом IP или переустановка). Нестандартный порт ssh пишет как [IP]:порт."""
+    for h in [host] + ([f'[{host}]:{int(port)}'] if int(port or 22) != 22 else []):
+        try:
+            subprocess.run(['ssh-keygen', '-R', h, '-f', known_hosts], capture_output=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            pass
 
 
 SUDO_PROMPT = '[bnodes-sudo] '

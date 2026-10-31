@@ -312,7 +312,19 @@ function checkerView(id) {
   });
   v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: c.access, key: 'c-ssh', body: () => sshFields(c._ssh, c.ssh, MON.bot_key) }),
     'Поменяйте, если сменился пароль или ключ, — новый доступ сохранится при переустановке.'), h('div', { class: 'pad' }, re));
-  v.append(group(null, [row({ title: 'Удалить чекер', cls: 'destructive', onClick: async () => {
+  const hk = /ключ SSH сервера изменился/.test((c.error || '') + (c.poll_error || ''));
+  const forget = async () => {
+    const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, если сервер переустанавливали или облако отдало этот IP новому серверу. Если ничего такого не было — смена ключа может означать подмену сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
+    if (!yes) return;
+    const r = await UI.run(() => api('checkers/' + id + '/forget-hostkey', 'POST'));
+    if (!r) return;
+    UI.toast(r.message);
+    if (hk && await UI.ask({ title: 'Повторить установку?', message: 'Бот запомнит новый ключ сервера при входе.', buttons: [{ id: 'y', text: 'Повторить' }] })
+        && await UI.run(() => api('checkers/' + id + '/install', 'POST', {}), 'Ставлю')) { await loadMon(); UI.nav.refresh(); }
+  };
+  if (hk) v.insertBefore(h('div', { class: 'notice' }, h('b', {}, 'Сменился ключ сервера. '), 'Если сервер переустанавливали или это новый сервер на том же IP — забудьте старый ключ и повторите.',
+    h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn tinted', type: 'button', onclick: forget }, 'Забыть ключ сервера'))), v.children[2] || null);
+  v.append(group(null, [row({ title: 'Забыть ключ сервера', onClick: forget }), row({ title: 'Удалить чекер', cls: 'destructive', onClick: async () => {
     const ok = await UI.ask({ title: 'Удалить чекер?', message: 'Бот остановит xray-checker на сервере и перестанет его опрашивать. Сам сервер не трогаем.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
     if (ok && await UI.run(() => api('checkers/' + id, 'DELETE'), 'Чекер удалён') !== undefined) { await loadMon(); UI.nav.back(); }
   } })]));
