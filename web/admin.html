@@ -160,7 +160,6 @@ function heroImg(key, cls) {
 // ───────── главная ─────────
 function home() {
   const v = h('div', { class: 'home-page' }, h('div', { class: 'appbar' },
-    h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Все разделы', onclick: allSections }, icon('menu')),
     h('span', { class: 'brand' }, h('img', { class: 'logo', src: '/static/logo.png', alt: '', width: 30, height: 30 }), h('span', { class: 'bt' }, 'Bobr', h('span', { class: 'net' }, 'Net'))), h('div', { class: 'sp' }), ST && !ST.error ? walletChip() : null, bellBtn()));
   if (!ST) {
     v.append(h('div', { 'aria-busy': 'true', 'aria-label': 'Загрузка' }, h('div', { class: 'hero skeleton', style: 'background-color:var(--cell)' }),
@@ -280,18 +279,6 @@ function bellBtn() {
   const j = (ST && ST.jobs) || {};
   return h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Задачи' + (j.failed ? `, ошибок ${j.failed}` : j.active ? `, идёт ${j.active}` : ''),
     onclick: () => { JOBS = null; UI.nav.push(jobsView); } }, icon('bell'), j.failed ? h('span', { class: 'pip' }) : j.active ? h('span', { class: 'pip run' }) : null);
-}
-function allSections() {
-  const admin = isAdmin(), push = (fn, pre) => () => { if (pre) pre(); UI.nav.push(fn); };
-  actionSheet('Разделы', [
-    { text: 'Задачи', icon: 'list', color: 'violet', fn: push(jobsView, () => { JOBS = null; }) },
-    { text: 'Мониторинг', icon: 'activity', color: 'blue', fn: push(monitorView, () => { MON = null; }) },
-    admin || ST.profiles.length > 1 ? { text: 'Перенос хостов', icon: 'swap', color: 'green', fn: push(transferView, () => { TX = null; }) } : null,
-    admin ? { text: 'Мои скрипты', icon: 'code', color: 'violet', fn: push(scriptsView, () => { SCR = null; }) } : null,
-    admin ? { text: 'Пользователи', icon: 'users', color: 'green', fn: push(usersView, () => { USERS = null; }) } : null,
-    { text: 'Утренняя сводка', icon: 'sun', color: 'amber', fn: push(summaryView, () => { SUM = null; }) },
-    { text: 'Оформление', icon: 'palette', color: 'pink', fn: push(themeView) },
-    admin ? { text: 'Сервер бота', icon: 'cpu', color: 'gray', fn: () => UI.nav.setTab('settings') } : null].filter(Boolean));
 }
 // службы бота: настроено — «В норме», цветом только то, что требует внимания
 function serviceRows() {

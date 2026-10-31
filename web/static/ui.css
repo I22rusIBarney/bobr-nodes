@@ -550,10 +550,10 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
 .hero .st { align-items: flex-start; }
 .hero .st::before { margin-top: 6px; }
-@media (min-width: 960px) { .home-page > .appbar .brand, .home-page > .appbar > .round-btn:first-child { display: none; } }
+@media (min-width: 960px) { .home-page > .appbar .brand { display: none; } }
 
 /* кошелёк в шапке главной */
-.appbar .brand { margin-left: 2px; }
+.appbar .brand { margin-left: 8px; }
 .wallet-chip { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px 0 10px; border: 0; border-radius: 18px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text); font-size: 14px; font-weight: 600; white-space: nowrap; position: relative; }
 .wallet-chip::after { content: ""; position: absolute; inset: -4px; }
