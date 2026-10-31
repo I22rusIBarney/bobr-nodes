@@ -34,6 +34,10 @@ def load_env(path='.env'):
 
 
 async def main():
+    # панели, SSH и Bobr Cloud ходят в потоках; стандартных 5–6 потоков на маленьком VPS не хватает: одна
+    # зависшая панель и замеры нагрузки занимают их все, и страницы панели управления перестают грузиться
+    from concurrent.futures import ThreadPoolExecutor
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=48, thread_name_prefix='bn'))
     load_env()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     token = os.environ.get('BOT_TOKEN', '')

@@ -113,7 +113,7 @@ const specText = sp => (sp || '').replace(/ · /g, ', ');
 // ───────── шапка экрана и меню действий ─────────
 const inTG = () => { try { return !!(UI.tg && UI.tg.isVersionAtLeast('6.1')); } catch (e) { return false; } };
 // «назад» — своя стрелка только вне Telegram (в Telegram — системная кнопка); «⋯» — действия экрана
-function head(t, o = {}) {
+function pageHead(t, o = {}) {  // не head: в Safari это имя занято элементом <head>
   const out = [];
   const back = UI.nav.stack.length > 0 && !inTG();
   const items = (o.menu || []).filter(Boolean);
@@ -125,7 +125,7 @@ function head(t, o = {}) {
   if (o.sub) out.push(h('div', { class: 'subtitle' }, o.sub));
   return out;
 }
-const title = t => head(t);
+const title = t => pageHead(t);
 function actionSheet(t, items) {
   UI.sheet(t, close => h('div', { class: 'menu' }, group(null, items.map(i => row({ title: i.text, icon: i.icon, color: i.danger ? null : i.color, sub: i.sub,
     cls: i.danger ? 'destructive' : null, chevron: false, onClick: () => { close(); i.fn(); } })))));
@@ -236,7 +236,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden && WA
 const TOPUP = { amount: 1000, how: null, custom: '' };
 function walletView() {
   if (WAL === null) loadWallet();
-  const v = h('div', { class: 'wallet-page' }, ...head('Баланс', { sub: 'Bobr Cloud · ' + (WAL && WAL.account ? WAL.account : 'ваш аккаунт'),
+  const v = h('div', { class: 'wallet-page' }, ...pageHead('Баланс', { sub: 'Bobr Cloud · ' + (WAL && WAL.account ? WAL.account : 'ваш аккаунт'),
     menu: [{ text: 'Обновить баланс', icon: 'restart', color: 'blue', fn: () => loadWallet(true) }] }));
   if (!WAL) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton', style: 'height:110px' })]))); return v; }
   if (WAL.error) { v.append(UI.failed(WAL.error, () => { WAL = null; UI.nav.refresh(); }, 'Баланс не загрузился')); return v; }
@@ -509,8 +509,8 @@ function monStatusCard(nodes, extra) {
       h('div', { style: 'min-width:0' }, h('b', { class: kind + '-t' }, t), h('span', {}, sub))), fixRows, extra || null, h('div', { class: 'card-act' }, go)));
 }
 function monitorView() {
-  if (MON === null) { loadMon().then(() => UI.nav.refresh()); return h('div', { class: 'mon-page' }, ...head('Мониторинг'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); }
-  const v = h('div', { class: 'mon-page' }, ...head('Мониторинг', { sub: 'Доступность нод из России: чекеры проверяют подписки групп каждые ' + Math.round((MON.every || 300) / 60) + ' мин.',
+  if (MON === null) { loadMon().then(() => UI.nav.refresh()); return h('div', { class: 'mon-page' }, ...pageHead('Мониторинг'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); }
+  const v = h('div', { class: 'mon-page' }, ...pageHead('Мониторинг', { sub: 'Доступность нод из России: чекеры проверяют подписки групп каждые ' + Math.round((MON.every || 300) / 60) + ' мин.',
     menu: [{ text: 'Добавить чекер', icon: 'plus', color: 'blue', fn: () => { NEWCK = null; UI.nav.push(checkerAddView); } }] }));
   if (MON.error) { v.append(UI.failed(MON.error, () => { MON = null; UI.nav.refresh(); })); return v; }
   monPoll();
@@ -538,14 +538,14 @@ function monitorView() {
 const MV = {};
 function monGroupView(pid, part) {
   const g = MON && !MON.error && MON.groups.find(x => x.id === pid);
-  if (!g) return h('div', { class: 'mon-page' }, ...head('Мониторинг'), h('div', { class: 'notice' }, 'Группа удалена'));
+  if (!g) return h('div', { class: 'mon-page' }, ...pageHead('Мониторинг'), h('div', { class: 'notice' }, 'Группа удалена'));
   monPoll();
   if (part === 'settings' || !g.enabled) return monSettingsView(g, pid, part === 'settings');
   const S = MV[pid] || (MV[pid] = { q: '', f: 'all', by: 'status' });
   const isHost = n => n.kind === 'host';
   const nodes = g.nodes.filter(n => !isHost(n)), hosts = g.nodes.filter(isHost);
   const online = nodes.reduce((a, n) => a + (n.online_users || 0), 0);
-  const v = h('div', { class: 'mon-page' }, ...head(g.name, { sub: `${nodes.length} ${UI.plural(nodes.length, 'нода', 'ноды', 'нод')} · онлайн ${online} · ${MON.modes[g.mon_mode]}`,
+  const v = h('div', { class: 'mon-page' }, ...pageHead(g.name, { sub: `${nodes.length} ${UI.plural(nodes.length, 'нода', 'ноды', 'нод')} · онлайн ${online} · ${MON.modes[g.mon_mode]}`,
     menu: [{ text: 'Проверка и починка', icon: 'gear', color: 'gray', fn: () => { delete MONF[pid]; UI.nav.push(() => monGroupView(pid, 'settings')); } }] }));
   const verdict = n => !n.data ? 'нет в подписке для проверки'
     : isHost(n) ? (n.fail ? `не проходит у ${n.fail} из ${n.data}` : 'проходит') + (n.total > 1 ? ` · выходов ${n.up} из ${n.total}` : '')
@@ -603,7 +603,7 @@ function monGroupView(pid, part) {
 }
 // настройки проверки и починки группы: результат сверху, конфигурация ниже
 function monSettingsView(g, pid, pushed) {
-  const v = h('div', { class: 'mon-page' }, ...head('Проверка и починка', { sub: g.enabled ? g.name : g.name + ' · мониторинг выключен: вставьте ссылку подписки и сохраните' }));
+  const v = h('div', { class: 'mon-page' }, ...pageHead('Проверка и починка', { sub: g.enabled ? g.name : g.name + ' · мониторинг выключен: вставьте ссылку подписки и сохраните' }));
   // правки живут, пока страница открыта: перерисовка страницы (опрос) их не сбрасывает
   const S = MONF[pid] || (MONF[pid] = { mon_sub: '', mon_mode: g.mon_mode, mon_on: new Set(g.mon_steps),
     mon_order: [...g.mon_steps, ...Object.keys(MON.steps).filter(k => !g.mon_steps.includes(k))],
@@ -894,8 +894,8 @@ const day = ts => ts ? new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'n
 async function loadUsers() { try { USERS = await api('users'); } catch (e) { USERS = { error: e.message }; } }
 const UV = { q: '', f: 'all' };
 function usersView() {
-  if (USERS === null) { loadUsers().then(() => UI.nav.refresh()); return h('div', {}, ...head('Пользователи'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); }
-  const v = h('div', {}, ...head('Пользователи', { sub: 'Приглашённые видят только свои группы и покупают со своего баланса Bobr Cloud.' }));
+  if (USERS === null) { loadUsers().then(() => UI.nav.refresh()); return h('div', {}, ...pageHead('Пользователи'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); }
+  const v = h('div', {}, ...pageHead('Пользователи', { sub: 'Приглашённые видят только свои группы и покупают со своего баланса Bobr Cloud.' }));
   if (USERS.error) { v.append(UI.failed(USERS.error, () => { USERS = null; UI.nav.refresh(); })); return v; }
   const reload = async () => { await loadUsers(); await load(); };
   const items = [
@@ -984,10 +984,10 @@ function userView(tg) {
 // ───────── вкладка «Серверы»: группы ─────────
 function serversView() {
   const v = h('div', { class: 'servers-page' });
-  if (!ST || ST.error) { v.append(...head('Серверы'), ST && ST.error ? UI.failed(ST.error, () => { ST = null; UI.nav.refresh(); load(); }, 'Бот не ответил') : h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
+  if (!ST || ST.error) { v.append(...pageHead('Серверы'), ST && ST.error ? UI.failed(ST.error, () => { ST = null; UI.nav.refresh(); load(); }, 'Бот не ответил') : h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   warmNodes();
   const NS = nodeStats();
-  v.append(...head('Серверы', { sub: NS.nodes != null ? `${NS.nodes} ${UI.plural(NS.nodes, 'нода', 'ноды', 'нод')} в ${ST.profiles.length} ${UI.plural(ST.profiles.length, 'группе', 'группах', 'группах')} · онлайн ${NS.online}` : 'Группы — это панели Remnawave со своими нодами и доменами.',
+  v.append(...pageHead('Серверы', { sub: NS.nodes != null ? `${NS.nodes} ${UI.plural(NS.nodes, 'нода', 'ноды', 'нод')} в ${ST.profiles.length} ${UI.plural(ST.profiles.length, 'группе', 'группах', 'группах')} · онлайн ${NS.online}` : 'Группы — это панели Remnawave со своими нодами и доменами.',
     menu: [{ text: 'Новая группа', icon: 'plus', color: 'blue', fn: () => openProfile(null) },
       isAdmin() || ST.profiles.length > 1 ? { text: 'Перенос хостов', icon: 'swap', color: 'green', fn: () => { TX = null; UI.nav.push(transferView); } } : null] }));
   v.append(h('div', { class: 'cta' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => { D = null; UI.nav.push(() => deployView()); } }, icon('plusCircle'), 'Развернуть ноды')));
@@ -1003,7 +1003,7 @@ const nodeHot = n => !!(n.load && n.load.hot && n.load.hot.length);
 const SORTS = { attn: 'Сначала проблемные', online: 'По онлайну', name: 'По имени' };
 function groupView(pid) {
   const g = ST.profiles.find(p => p.id === pid);
-  if (!g) return h('div', {}, ...head('Группа'), h('div', { class: 'notice' }, 'Группа удалена'));
+  if (!g) return h('div', {}, ...pageHead('Группа'), h('div', { class: 'notice' }, 'Группа удалена'));
   const S = GV[pid] || (GV[pid] = { tab: 'nodes', q: '', f: 'all', sort: 'attn', all: false, jall: false });
   const reload = async () => { try { GJ[pid] = (await api('jobs?pid=' + pid)).jobs; } catch (e) { GJ[pid] = { error: e.message }; } if (document.querySelector('#root .group-page')) UI.nav.refresh(); };
   const jobs = GJ[pid];
@@ -1016,7 +1016,7 @@ function groupView(pid) {
   const acct = !isAdmin() ? 'ваш баланс Bobr Cloud' : g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт Bobr Cloud';
   const go = { deploy: () => { D = null; UI.nav.push(() => deployView(pid)); }, upd: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); },
     auto: () => { delete AUTO[pid]; UI.nav.push(() => autoView(pid)); }, rent: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); }, set: () => { delete PS[pid]; openProfile(pid); } };
-  const v = h('div', { class: 'group-page' }, ...head(g.name, { sub: g.panel_url.replace(/^https?:\/\//, '') + ' · ' + acct, menu: [
+  const v = h('div', { class: 'group-page' }, ...pageHead(g.name, { sub: g.panel_url.replace(/^https?:\/\//, '') + ' · ' + acct, menu: [
     { text: 'Обновление нод', icon: 'renew', color: 'teal', fn: go.upd }, { text: 'Автоматизация', icon: 'zap', color: 'amber', fn: go.auto },
     { text: 'Аренда серверов', icon: 'calendar', color: 'green', fn: go.rent }, { text: 'Настройки группы', icon: 'gear', color: 'gray', fn: go.set },
     { text: 'Обновить данные', icon: 'restart', color: 'blue', fn: () => { delete NODES[pid]; delete PS[pid]; delete GJ[pid]; UI.nav.refresh(); } }] }));
@@ -1327,7 +1327,7 @@ const flagName = cc => { try { return /^[A-Za-z]{2}$/.test(cc || '') && REGION ?
 const flagOf = cc => /^[A-Za-z]{2}$/.test(cc || '') && cc.toUpperCase() !== 'XX' ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1A5 + c.charCodeAt(0))) : '🏳️';
 function nodesView(pid) {
   const L = NODES[pid];
-  const v = h('div', {}, ...head('Обновление нод', { sub: (ST.profiles.find(p => p.id === pid) || {}).name }));
+  const v = h('div', {}, ...pageHead('Обновление нод', { sub: (ST.profiles.find(p => p.id === pid) || {}).name }));
   if (L === undefined) loadNodes(pid);
   if (!L) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
   if (L.error) { v.append(UI.failed(L.error, () => { delete NODES[pid]; UI.nav.refresh(); }, 'Панель не ответила')); return v; }
@@ -1419,7 +1419,7 @@ function hourStep(value, on) {  // час 0…23, по кругу
 }
 function autoView(pid) {
   const g = ST.profiles.find(p => p.id === pid);
-  const v = h('div', {}, ...head('Автоматизация', { sub: g ? g.name : null }));
+  const v = h('div', {}, ...pageHead('Автоматизация', { sub: g ? g.name : null }));
   let A = AUTO[pid];
   if (A === undefined) { AUTO[pid] = null; api(`profiles/${pid}/auto`).then(r => { AUTO[pid] = r; UI.nav.refresh(); }).catch(e => { AUTO[pid] = { error: e.message }; UI.nav.refresh(); }); }
   if (!A) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
@@ -1455,7 +1455,7 @@ function rentView(pid) {
   const R = RENT[pid];
   const reload = () => { RENT[pid] = null; api(`profiles/${pid}/rent`).then(r => { RENT[pid] = r; UI.nav.refresh(); }).catch(e => { RENT[pid] = { error: e.message }; UI.nav.refresh(); }); };
   if (R === undefined) reload();
-  const v = h('div', {}, ...head('Аренда серверов', { sub: R && !R.error ? `${g ? g.name + ' · ' : ''}баланс ${rubK(R.balance_kop)} (${R.buyer})` : g ? g.name : null }));
+  const v = h('div', {}, ...pageHead('Аренда серверов', { sub: R && !R.error ? `${g ? g.name + ' · ' : ''}баланс ${rubK(R.balance_kop)} (${R.buyer})` : g ? g.name : null }));
   if (!R) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
   if (R.error) { v.append(UI.failed(R.error, reload, 'Аренда не загрузилась')); return v; }
   const date = s => s ? new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '—';
@@ -1530,8 +1530,8 @@ function nodeView(pid, uuid) {
       NODE[uuid] = r;
     }).catch(e => { NODE[uuid] = { error: e.message }; }).then(() => { if (document.querySelector('#root .node-page')) UI.nav.refresh(); });
   }
-  if (!n) return h('div', { class: 'node-page' }, ...head('Нода'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
-  if (n.error) return h('div', { class: 'node-page' }, ...head('Нода'), UI.failed(n.error, () => { delete NODE[uuid]; UI.nav.refresh(); }, 'Нода не загрузилась'));
+  if (!n) return h('div', { class: 'node-page' }, ...pageHead('Нода'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
+  if (n.error) return h('div', { class: 'node-page' }, ...pageHead('Нода'), UI.failed(n.error, () => { delete NODE[uuid]; UI.nav.refresh(); }, 'Нода не загрузилась'));
   const done = jid => { delete GJ[pid]; delete NODES[pid]; delete NODE[uuid]; UI.nav.push(() => jobView(jid)); };
   const upgrade = async () => {
     const tag = ((UPG[pid] || {}).tag) || 'latest';
@@ -1546,7 +1546,7 @@ function nodeView(pid, uuid) {
     const r = await UI.run(() => api(`profiles/${pid}/nodes/${uuid}`, 'DELETE'));
     if (r) { UI.toast(r.message); delete NODES[pid]; delete NODE[uuid]; UI.nav.back(); }
   };
-  const v = h('div', { class: 'node-page' }, ...head(n.name, { flag: flagOf(n.country), menuTitle: n.name, menu: [
+  const v = h('div', { class: 'node-page' }, ...pageHead(n.name, { flag: flagOf(n.country), menuTitle: n.name, menu: [
     { text: 'Обновить ноду', icon: 'renew', color: 'teal', fn: upgrade },
     { text: 'Обновить данные', icon: 'restart', color: 'blue', fn: () => { delete NODE[uuid]; UI.nav.refresh(); } },
     { text: 'Удалить из панели', icon: 'trash', danger: true, fn: remove }] }));
@@ -2333,7 +2333,7 @@ function deployView(pid) {
 
 // ───────── вкладки «Инструменты» и «Настройки» ─────────
 function toolsView() {
-  const v = h('div', {}, ...head('Инструменты'));
+  const v = h('div', {}, ...pageHead('Инструменты'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin(), j = ST.jobs;
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Каждый день'), UI.stack([
@@ -2348,7 +2348,7 @@ function toolsView() {
   return v;
 }
 function settingsTab() {
-  const v = h('div', { class: 'settings-page' }, ...head('Настройки'));
+  const v = h('div', { class: 'settings-page' }, ...pageHead('Настройки'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin();
   if (WAL === null) loadWallet();

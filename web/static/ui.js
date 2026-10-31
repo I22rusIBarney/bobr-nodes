@@ -47,12 +47,18 @@
     api(base) {
       return async function (path, method = 'GET', body) {
         let r;
+        // запрос не должен висеть вечно: иначе экран навсегда остаётся «загружается»
+        const ctl = window.AbortController ? new AbortController() : null;
+        const timer = ctl ? setTimeout(() => ctl.abort(), method === 'GET' ? 45000 : 120000) : 0;
         try {
           r = await fetch(base + path, {
             method, headers: { 'Content-Type': 'application/json', 'X-Init-Data': UI.initData() },
-            body: body === undefined ? undefined : JSON.stringify(body),
+            body: body === undefined ? undefined : JSON.stringify(body), signal: ctl ? ctl.signal : undefined,
           });
-        } catch (e) { const err = new Error('Нет соединения с сервером. Проверьте интернет и попробуйте снова.'); err.status = 0; throw err; }
+        } catch (e) {
+          const err = new Error(e && e.name === 'AbortError' ? 'Сервер бота не ответил вовремя. Попробуйте ещё раз.' : 'Нет соединения с сервером. Проверьте интернет и попробуйте снова.');
+          err.status = 0; throw err;
+        } finally { clearTimeout(timer); }
         let j = null; try { j = await r.json(); } catch (e) {}
         if (!r.ok) { const err = new Error(UI.errText(j, r.status)); err.status = r.status; throw err; }
         return j;

@@ -604,9 +604,19 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def node_ssh(pid: int, uuid: str, ip: str) -> dict:
         return svc.node_ssh(store, runner, pid, uuid, ip)
 
+    nodes_inflight: dict[int, asyncio.Task] = {}
+
     @r.get('/api/profiles/{pid}/nodes')
     async def panel_nodes(request):
+        """Одновременные запросы списка нод одной группы (главная, страница группы, повторное открытие) — одним
+        походом в панель: иначе медленная панель занимает все потоки бота."""
         p = profile_or_404(request.match_info['pid'], request)
+        t = nodes_inflight.get(p['id'])
+        if t is None or t.done():
+            t = nodes_inflight[p['id']] = asyncio.ensure_future(panel_nodes_load(p))
+        return J(await asyncio.shield(t))
+
+    async def panel_nodes_load(p: dict) -> dict:
 
         def load():
             pl = panel_of(p)
@@ -629,7 +639,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                         'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
-        return J({'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': await node_versions(p)})
+        return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': await node_versions(p)}
 
     async def node_versions(p: dict) -> dict:
         """Версия панели и последняя подходящая к ней версия ноды (Docker Hub) — цель обновления по умолчанию."""
