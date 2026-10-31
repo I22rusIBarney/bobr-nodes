@@ -27,7 +27,10 @@ HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
-          'flags.woff': 'font/woff'}  # флаги стран для Windows и Telegram Desktop (Twemoji, CC-BY 4.0, web/static/flags-LICENSE.txt)
+          'flags.woff': 'font/woff',  # флаги стран для Windows и Telegram Desktop (Twemoji, CC-BY 4.0, web/static/flags-LICENSE.txt)
+          **{f'hero-{k}.webp': 'image/webp' for k in (f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night'))}}
+# картинка на главной: по сезону и времени суток (auto), одна из восьми или без картинки
+THEME_HEROES = ('auto', 'none', *(f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night')))
 # оформление, как в bcloud: фон и сезонные эффекты (auto — по календарю)
 THEME_BGS = ('none', 'aurora', 'night', 'ocean', 'sunset', 'forest', 'image')
 THEME_EFFECTS = ('auto', 'none', 'snow', 'newyear', 'halloween', 'leaves', 'hearts', 'flowers', 'confetti')
@@ -210,7 +213,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         name = request.match_info['name']
         if name not in STATIC:
             raise web.HTTPNotFound()
-        cache = 'public, max-age=31536000, immutable' if name.endswith(('.woff2', '.woff')) else 'no-cache'  # шрифты не меняются
+        cache = ('public, max-age=31536000, immutable' if name.endswith(('.woff2', '.woff'))  # шрифты не меняются
+                 else 'public, max-age=604800' if name.endswith('.webp') else 'no-cache')
         return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
 
     @r.get('/health')
@@ -258,7 +262,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (TypeError, ValueError):
             glass = 0
         return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
-                'image': t.get('image') or '', 'glass': glass}
+                'image': t.get('image') or '', 'glass': glass, 'hero': t.get('hero') if t.get('hero') in THEME_HEROES else 'auto'}
 
     def theme_put(uid: int, t: dict) -> dict:
         store.set(f'theme:{uid}', json.dumps(t))
@@ -282,6 +286,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if data['effect'] not in THEME_EFFECTS:
                 raise ApiError('Такого эффекта нет')
             t['effect'] = data['effect']
+        if 'hero' in data:
+            if data['hero'] not in THEME_HEROES:
+                raise ApiError('Такой картинки нет')
+            t['hero'] = data['hero']
         if 'glass' in data:
             g = data['glass']
             if not isinstance(g, int) or isinstance(g, bool) or not 0 <= g <= GLASS_MAX:

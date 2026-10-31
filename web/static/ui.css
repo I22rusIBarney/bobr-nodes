@@ -312,10 +312,23 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .icon-btn svg { width: 18px; height: 18px; }
 
 /* ── Главная: приветствие, сводка, быстрые действия ── */
-.hero { position: relative; margin: 4px var(--gutter) var(--s3); border-radius: var(--r-xl); overflow: hidden; min-height: 132px; box-shadow: inset 0 0 0 1px var(--line);
-  background: #14223F; display: flex; flex-direction: column; justify-content: flex-end; padding: 16px; isolation: isolate; }
+.hero { position: relative; margin: 4px var(--gutter) var(--s3); border-radius: var(--r-xl); overflow: hidden; aspect-ratio: 1280 / 447; min-height: 124px; max-height: 230px;
+  background: #172447; display: flex; flex-direction: column; justify-content: flex-end; padding: 16px; isolation: isolate; }
+.hero::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--line); pointer-events: none; }
 .hero .art { position: absolute; inset: 0; z-index: -1; }
-.hero .art svg { width: 100%; height: 100%; display: block; }
+/* слева — затемнение под текст: на дневных картинках небо яркое */
+.hero .art::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, rgba(6, 10, 22, .78) 0%, rgba(6, 10, 22, .45) 42%, rgba(6, 10, 22, 0) 68%),
+  linear-gradient(0deg, rgba(6, 10, 22, .35), rgba(6, 10, 22, 0) 55%); }
+.hero .art img { width: 100%; height: 100%; object-fit: cover; object-position: 78% 50%; display: block; opacity: 0; transition: opacity var(--t-slow) var(--ease); }
+.hero .art img.in { opacity: 1; }
+.hero.plain { aspect-ratio: auto; min-height: 104px; background: radial-gradient(120% 140% at 100% 0%, rgba(68, 102, 242, .35), transparent 60%), var(--cell); }
+.heroes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 10px; margin: 0 var(--gutter) var(--s5); }
+.hero-tile { border: 0; padding: 0; background: none; text-align: left; font-size: 13px; line-height: 17px; color: var(--hint); min-width: 0; }
+.hero-tile .sw { display: block; aspect-ratio: 1280 / 447; border-radius: 12px; overflow: hidden; margin-bottom: 6px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.hero-tile .sw img { width: 100%; height: 100%; object-fit: cover; object-position: 78% 50%; display: block; opacity: 0; transition: opacity var(--t) var(--ease); }
+.hero-tile .sw img.in { opacity: 1; }
+.hero-tile[aria-pressed="true"] { color: var(--text); }
+.hero-tile[aria-pressed="true"] .sw { outline: 2px solid var(--accent); outline-offset: 2px; }
 .hero h2 { margin: 0; font-size: 22px; line-height: 28px; font-weight: 650; letter-spacing: -0.02em; max-width: 62%; overflow-wrap: anywhere; text-shadow: 0 1px 12px rgba(5, 10, 25, .6); }
 .hero .st { margin-top: 6px; color: #DDE3F0; font-size: 13px; white-space: normal; max-width: 64%; text-shadow: 0 1px 8px rgba(5, 10, 25, .7); }
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0 var(--gutter) var(--s3); }
@@ -466,7 +479,6 @@ body.has-composer .tabbar { display: none; }
   .tabbar button[aria-current="page"] .tb-ic { background: none; }
   .tabbar .tb-ic { width: 32px; height: 32px; }
   .tabbar .pip { top: 10px; left: 28px; }
-  .hero { min-height: 156px; }
 }
 
 /* ── Переписка (разбор скрипта с Gemini) ── */
