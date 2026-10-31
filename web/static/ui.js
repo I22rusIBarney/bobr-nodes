@@ -20,7 +20,11 @@
       try { tg && tg.ready(); tg && tg.expand(); } catch (e) {}
       // запрет масштабирования щипком и двойным тапом (iOS игнорирует user-scalable=no)
       ['gesturestart', 'gesturechange', 'gestureend'].forEach(t => document.addEventListener(t, e => e.preventDefault(), { passive: false }));
-      document.addEventListener('touchmove', e => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
+      // щипок двумя пальцами гасим только на iOS: Android и так не масштабирует (user-scalable=no), а «непассивный»
+      // touchmove на всём документе заставляет Android ждать скрипт перед каждой прокруткой — при занятом потоке
+      // (эффекты оформления на слабом телефоне) страница переставала листаться
+      const ios = (tg && tg.platform === 'ios') || /iPhone|iPad|iPod/.test(navigator.userAgent);
+      if (ios) document.addEventListener('touchmove', e => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
       // двойной тап отключён через CSS touch-action: pan-y — без перехвата касаний, чтобы не терять быстрые нажатия
       applyTheme();
       try { tg && tg.onEvent('themeChanged', applyTheme); } catch (e) {}

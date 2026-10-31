@@ -262,8 +262,13 @@
     }
   }
 
+  // пока листают страницу — частицы замирают: прокрутка важнее анимации, особенно на слабых телефонах
+  let scrollUntil = 0;
+  addEventListener('scroll', () => { scrollUntil = performance.now() + 220; }, { passive: true });
+  addEventListener('touchstart', () => { scrollUntil = performance.now() + 220; }, { passive: true });
   function frame(t) {
     raf = requestAnimationFrame(frame);
+    if (t < scrollUntil) { last = t; return; }
     if (t - last < 30) return; // ~30 кадров/с — бережём батарею
     const dt = Math.min(3, (t - last) / 16.7); last = t;
     step(layers.back, dt, t); drawHang(layers.back.g, t);

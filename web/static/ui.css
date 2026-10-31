@@ -65,17 +65,18 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html { -webkit-text-size-adjust: 100%; overflow-x: hidden; touch-action: pan-y; background: var(--bg); }
+/* прокручивается только окно: overflow-x: hidden у body делает его отдельной «прокруткой» без высоты, и вместе с
+   overscroll-behavior жест пальцем на Android упирается в неё и страница не листается — поэтому у body clip */
+html { -webkit-text-size-adjust: 100%; overflow-x: hidden; touch-action: pan-y; background: var(--bg); overscroll-behavior-y: none; }
 html, body { max-width: 100%; }
 .chips, .segmented, .fchips { touch-action: pan-x pan-y; }
 input, textarea, select { font-size: max(16px, 1em); }
 body {
-  overflow-x: hidden; touch-action: pan-y;
+  overflow-x: clip; touch-action: pan-y;
   margin: 0; background: var(--bg); color: var(--text);
   font: 400 15px/20px var(--font); letter-spacing: -0.005em;
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; font-feature-settings: "ss01", "cv11";
   padding-top: var(--sat); padding-bottom: calc(var(--tabbar) + 24px + var(--sab));
-  overscroll-behavior-y: none;
 }
 button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
 a { color: var(--accent-text); text-decoration: none; }
@@ -312,7 +313,7 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .icon-btn svg { width: 18px; height: 18px; }
 
 /* ── Главная: приветствие, сводка, быстрые действия ── */
-.hero { position: relative; margin: 4px var(--gutter) var(--s3); border-radius: var(--r-xl); overflow: hidden; aspect-ratio: 1280 / 447; min-height: 124px; max-height: 230px;
+.hero { position: relative; margin: 4px var(--gutter) var(--s3); border-radius: var(--r-xl); overflow: hidden; min-height: clamp(124px, calc((100vw - 32px) * 447 / 1280), 212px);
   background: #172447; display: flex; flex-direction: column; justify-content: flex-end; padding: 16px; isolation: isolate; }
 .hero::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--line); pointer-events: none; }
 .hero .art { position: absolute; inset: 0; z-index: -1; }

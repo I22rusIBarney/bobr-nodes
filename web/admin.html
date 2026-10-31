@@ -104,6 +104,7 @@ function applyTheme(t) {
   if (key === themeKey || !window.FX) return;
   themeKey = key;
   FX.background(t.bg, t.bg === 'image' ? t.image : null);
+  if (UI.tg && UI.tg.platform === 'android') FX.intensity('low');  // меньше частиц: на слабых Android эффект мешал прокрутке
   FX.effect(t.effect);
 }
 
