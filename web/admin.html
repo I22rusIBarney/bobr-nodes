@@ -239,6 +239,7 @@ const CKF = {};  // несохранённый доступ по SSH на стр
 const MST = { ok: ['', 'ok', 'доступна'], down: ['недоступна', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
   ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
 const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
+const cst = c => c.status === 'idle' && MON.groups.some(g => g.enabled) ? ['подписки — при опросе', 'warn'] : (CST[c.status] || [c.status, '']);
 async function loadMon() { try { MON = await api('monitor'); } catch (e) { MON = { error: e.message }; } }
 function monPoll() {  // пока ставится чекер или идёт починка — обновляем страницу
   clearTimeout(monTimer);
@@ -253,7 +254,7 @@ function monitorView() {
   if (MON.error) { v.append(h('div', { class: 'notice bad' }, MON.error)); return v; }
   monPoll();
   const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
-    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : (CST[c.status] || [c.status, '']), onClick: () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } }));
+    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c), onClick: () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } }));
   chRows.push(row({ title: 'Добавить чекер', cls: 'accent', onClick: () => { NEWCK = null; UI.nav.push(checkerAddView); } }));
   v.append(group(['Чекеры', h('span', { class: 'n' }, MON.checkers.length || '')], chRows,
     'Сервер в России с Ubuntu или Debian. Бот сам ставит на него xray-checker и держит там подписки всех групп; API чекера наружу не открыт — бот читает его по SSH.'));
@@ -264,9 +265,10 @@ function monitorView() {
       onClick: () => { delete MONF[g.id]; UI.nav.push(() => monGroupView(g.id)); } });
   });
   v.append(group('Группы', gRows.length ? gRows : [row({ title: 'Групп пока нет', cls: 'is-dim' })]));
-  const go = h('button', { class: 'btn tinted', type: 'button', disabled: !MON.checkers.some(c => c.status === 'running') }, 'Проверить сейчас');
-  go.onclick = UI.busy(go, async () => { if (await UI.run(() => api('monitor/check', 'POST'), 'Проверяю — результат через минуту')) setTimeout(() => loadMon().then(() => UI.nav.refresh()), 30000); });
-  v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Последний опрос: ' + ago(MON.polled_at) + '. Дальше — каждые ' + Math.round(MON.every / 60) + ' мин.')));
+  const go = h('button', { class: 'btn tinted', type: 'button', disabled: !MON.checkers.some(c => ['running', 'idle'].includes(c.status)) }, 'Проверить сейчас');
+  go.onclick = UI.busy(go, async () => { if (await UI.run(() => api('monitor/check', 'POST'), 'Проверяю')) [8000, 30000, 70000].forEach(t => setTimeout(() => { if (document.querySelector('#root .mon-page')) loadMon().then(() => UI.nav.refresh()); }, t)); });
+  v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Последний опрос: ' + ago(MON.polled_at) + '. Дальше — каждые ' + Math.round(MON.every / 60) + ' мин; после установки чекера или смены подписки — через минуту. '
+    + 'Первые результаты появляются, когда xray-checker пройдёт первую проверку (обычно меньше минуты).')));
   return v;
 }
 let NEWCK = null;  // введённое на странице «Новый чекер» — переживает перерисовку страницы
@@ -425,7 +427,7 @@ function monGroupView(pid) {
     const r = await UI.run(() => api('profiles/' + pid + '/monitor', 'POST', body));
     if (!r) return;
     delete MONF[pid];
-    UI.toast(r.resync ? 'Сохранено — обновляю подписки на чекерах' : 'Сохранено');
+    UI.toast(r.resync ? 'Сохранено — записываю подписку на чекеры, первые результаты примерно через минуту' : 'Сохранено');
     sub.value = ''; await loadMon(); UI.nav.refresh();
   });
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Подписка для проверки'),

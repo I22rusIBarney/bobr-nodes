@@ -47,8 +47,9 @@ def test_settings():
 
 
 def test_healthy():
-    on = {'online': True}
-    off = {'online': False}
-    assert M.Monitor.healthy([off, off])  # мало проверок — не судим
+    on = {'online': True, 'lastCheck': 1}
+    off = {'online': False, 'lastCheck': 1}
+    assert not M.Monitor.healthy([{'online': False, 'lastCheck': 0}])  # чекер только запустился — ещё не судим
+    assert M.Monitor.healthy([off, off])  # мало проверок — голосует
     assert not M.Monitor.healthy([off, off, off])  # ни одна не прошла — лежит сеть самого чекера
     assert M.Monitor.healthy([off, off, on]) and not M.Monitor.healthy(None)

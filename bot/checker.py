@@ -42,6 +42,12 @@ def check_sub_url(v: str) -> str:
     return v
 
 
+def subs_mark(subs: list[tuple[int, str]]) -> str:
+    """Отпечаток набора подписок: по нему видно, что на чекере записан не текущий набор."""
+    import hashlib
+    return hashlib.sha256(json.dumps(sorted(subs)).encode()).hexdigest()[:16]
+
+
 def env_text(subs: list[tuple[int, str]], password: str, interval: int = INTERVAL) -> str:
     """.env xray-checker: подписки групп через запятую, у каждой — имя группы после #."""
     urls = ','.join(f'{url}#{sub_name(pid)}' for pid, url in subs)

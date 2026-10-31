@@ -170,29 +170,55 @@ class Monitor:
 
         self.store.patch_checker(cid, status='installing', error='', log=[])
         path, pub, kh = self.keyfiles()
+        subs = self.subs()
         try:
-            fields = await asyncio.to_thread(ck.install, ch, self.subs(), path, pub, kh, say, _Sink())
-            self.store.patch_checker(cid, **fields, status='running' if self.subs() else 'idle', error='',
+            fields = await asyncio.to_thread(ck.install, ch, subs, path, pub, kh, say, _Sink())
+            self.store.patch_checker(cid, **fields, status='running' if subs else 'idle', error='', subs_mark=ck.subs_mark(subs),
                                      installed_at=int(time.time()))
         except Exception as e:  # noqa: BLE001 — любая ошибка установки видна в админке, а не теряется в фоне
             say(f'❌ {e}')
             self.store.patch_checker(cid, status='failed', error=str(e)[:300])
+            return
+        await self._resync()  # подписки поменяли, пока ставился чекер, — дописать сразу
+        self.soon()
 
     def resync(self) -> asyncio.Task:
         """Подписки групп изменились — записать их на все установленные чекеры."""
         return self._bg_task(self._resync())
 
-    async def _resync(self) -> None:
+    async def _resync(self, force: bool = False) -> bool:
+        """Записать текущие подписки на установленные чекеры, где записан другой набор. True — что-то записали."""
         subs = self.subs()
+        mark = ck.subs_mark(subs)
         path, _, kh = self.keyfiles()
+        done = False
         for ch in self.store.checkers():
             if ch.get('status') not in ('running', 'idle') or not ch.get('api_password'):
                 continue
+            if not force and ch.get('subs_mark') == mark:
+                continue
             try:
                 st = await asyncio.to_thread(ck.apply_subs, ch, subs, path, kh, lambda t: None)
-                self.store.patch_checker(ch['id'], status=st, error='')
+                self.store.patch_checker(ch['id'], status=st, error='', subs_mark=mark)
+                done = True
             except (engine.StepError, OSError) as e:
                 self.store.patch_checker(ch['id'], error=f'не удалось обновить подписки: {e}')
+        if done:
+            self.soon()
+        return done
+
+    def soon(self, delay: float = 60) -> None:
+        """Опрос вскоре — после установки чекера или смены подписок: xray-checker успеет пройти первую проверку."""
+        if getattr(self, '_soon', None) and not self._soon.done():
+            return
+
+        async def later():
+            await asyncio.sleep(delay)
+            try:
+                await self.tick()
+            except Exception:  # noqa: BLE001
+                log.exception('monitor tick')
+        self._soon = asyncio.create_task(later())  # не в _bg: установку чекера не ждём вместе с опросом
 
     async def poll_all(self) -> dict[int, list[dict] | None]:
         path, _, kh = self.keyfiles()
@@ -213,20 +239,26 @@ class Monitor:
 
     @staticmethod
     def healthy(res: list[dict] | None) -> bool:
-        """Чекер исправен: ответил, и если проверок много — хоть одна прошла (иначе лежит сеть самого чекера)."""
-        return res is not None and (len(res) < 3 or any(p.get('online') for p in res))
+        """Чекер исправен: ответил, и если проверок много — хоть одна прошла (иначе лежит сеть самого чекера).
+        Ещё не проверенные (lastCheck пуст — чекер только запустился) не считаются."""
+        if res is None:
+            return False
+        done = [p for p in res if p.get('lastCheck')]
+        return bool(done) and (len(done) < 3 or any(p.get('online') for p in done))
 
     # ───────── цикл ─────────
     async def run(self) -> None:
+        await asyncio.sleep(30)  # после запуска бота — первый опрос почти сразу, дальше по расписанию
         while True:
-            await asyncio.sleep(self.every)
             try:
                 await self.tick()
             except Exception:  # noqa: BLE001 — мониторинг не должен ронять бота
                 log.exception('monitor tick')
+            await asyncio.sleep(self.every)
 
     async def tick(self) -> None:
         async with self._lock:
+            await self._resync()  # чекер, на котором не тот набор подписок, — поправить до опроса
             results = await self.poll_all()
             for prof in self.store.profiles():
                 if prof.get('mon_sub'):
@@ -250,7 +282,7 @@ class Monitor:
             for res in results.values():
                 if not self.healthy(res):
                     continue
-                mine = [p for p in res if p.get('subName') == name and p.get('server') in aliases
+                mine = [p for p in res if p.get('subName') == name and p.get('server') in aliases and p.get('lastCheck')
                         and not str(p.get('server') or '').startswith(engine.CDN_PREFIX)]
                 if not mine:
                     continue

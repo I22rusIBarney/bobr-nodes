@@ -202,6 +202,7 @@ async def main():
     watch = Watch(store, bot, {1}, TMP, every=0)
     from bot.monitor import Monitor
     monitor = Monitor(store, runner, bot, {1})
+    monitor.soon = lambda *a, **kw: None  # в тесте опросы — только вручную
     dp['monitor'] = monitor
     wapp = build_web(store, runner, '42:TEST', {1}, 'https://nodes.test', 'nodes_bot', security=watch, data_dir=TMP, monitor=monitor)
     web = TestClient(TestServer(wapp))
@@ -1153,6 +1154,15 @@ async def main():
     ok(st == 200 and js['resync'], f'мониторинг группы включён: {js}')
     await asyncio.gather(*list(monitor._bg))
     env = fakes_remote.files.get(('192.0.2.50', CK.DIR + '/.env'), '')
+    ok(len({c.get('subs_mark') for c in store.checkers()}) == 1, 'на всех чекерах один и тот же набор подписок')
+    # чекер, на который подписки не дошли (сохранили, пока он ставился), — бот дописывает сам при опросе
+    store.patch_checker(cids[2], status='idle', subs_mark='old')
+    fakes_remote.files.pop(('192.0.2.52', CK.DIR + '/.env'), None)
+    await monitor.tick()
+    ok(store.checker(cids[2])['status'] == 'running' and f'#bnodes-g{pid}' in fakes_remote.files.get(('192.0.2.52', CK.DIR + '/.env'), ''),
+       'чекер без подписок исправлен при опросе')
+    for k in list(store.mon_all(f'{pid}:')):
+        store.set_mon(k, None)
     ok(f'https://sub.example.com/AbC123#bnodes-g{pid}' in env and 'METRICS_PROTECTED="true"' in env
        and all(c['status'] == 'running' for c in store.checkers()), 'подписка группы записана на чекеры с пометкой группы, чекеры работают')
     st, mv = await wapi('monitor')
