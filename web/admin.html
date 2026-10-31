@@ -51,7 +51,7 @@
   .fold-body .log { border-radius: 0; box-shadow: none; background: none; border-top: 1px solid var(--sep); max-height: 55vh; }
   .grip svg { width: 18px; height: 18px; }
   .counter { padding: 0; gap: 10px; }
-  .counter .btn { min-width: 36px; height: 32px; padding: 0; font-size: 18px; border-radius: var(--r-xs); }
+  .counter .btn { min-width: 36px; height: 36px; padding: 0; font-size: 18px; border-radius: var(--r-xs); }
   .in-note { padding: 0 16px 12px; font-size: 13px; line-height: 18px; color: var(--hint); }
   .in-note .group-f { margin: 0; padding: 0; }
   .mini-h { font-size: 13px; color: var(--hint); margin: 0 4px 8px; }
@@ -81,13 +81,13 @@ const STAGE = { buy: 'Покупка', ip: 'Создание сервера', dn
 const badge = (text, cls) => h('span', { class: 'badge ' + (cls || '') }, text);
 const statusLine = () => h('div', { class: 'status-line', role: 'status' });
 function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.message; UI.haptic(r.ok ? 'success' : 'error'); }
-const title = (t, back) => [UI.nav.backLink(back || 'Bobr Nodes'), h('h1', { class: 'large-title' }, t)];
+const title = (t, back) => [UI.nav.backLink(back || 'Назад'), h('h1', { class: 'large-title' }, t)];
 const isAdmin = () => !!ST && ST.role === 'admin';
 // подпись группы в списках: чья она (у администратора — пользователя; у пользователя — от администратора)
 const groupWho = p => p.kind === 'user' ? 'пользователя ' + (p.created_by_label || '') : p.kind === 'shared' ? 'от администратора' : '';
 
 async function load() {
-  try { ST = await api('state'); } catch (e) { ST = { error: e.message }; }
+  try { ST = await api('state'); } catch (e) { ST = { error: e.message, status: e.status }; }
   if (ST.theme) applyTheme(ST.theme);
   UI.nav.refresh();
 }
@@ -113,31 +113,36 @@ const specText = sp => (sp || '').replace(/ · /g, ', ');
 
 // ───────── главная ─────────
 function home() {
-  if (!ST) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]));
-  if (ST.error) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), h('div', { class: 'notice bad' }, h('b', {}, 'Нет доступа. '), ST.error));
+  if (!ST) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), h('div', { 'aria-busy': 'true', 'aria-label': 'Загрузка' }, group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
+  if (ST.error) return h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'), ST.status === 403
+    ? h('div', { class: 'notice bad' }, h('b', {}, 'Нет доступа. '), ST.error)
+    : UI.failed(ST.error, () => { ST = null; UI.nav.refresh(); load(); }, 'Бот не ответил'));
   const s = ST.settings, j = ST.jobs, admin = isAdmin();
   const v = h('div', {}, h('h1', { class: 'large-title' }, 'Bobr Nodes'));
   if (ST.issues.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'Чтобы начать: '), ST.issues.join(', ') + '.'));
   v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.length > 0, onclick: () => { D = null; UI.nav.push(() => deployView()); } }, 'Развернуть ноды')));
   v.append(group(['Группы', h('span', { class: 'n' }, ST.profiles.length || '')], [
     ...ST.profiles.map(p => row({ title: p.name,
-      sub: [p.servers + ' ' + UI.plural(p.servers, 'сервер', 'сервера', 'серверов'), groupWho(p), admin ? p.owner_label : '', p.script].filter(Boolean).join(', '),
+      sub: [p.servers + ' ' + UI.plural(p.servers, 'сервер', 'сервера', 'серверов'), groupWho(p),
+        admin && p.owner_label && p.owner_label !== p.created_by_label ? 'клиент ' + p.owner_label : '', p.script].filter(Boolean).join(', '),
       status: p.active ? ['в работе: ' + p.active, 'run'] : p.failed ? ['ошибок: ' + p.failed, 'bad'] : null,
       onClick: () => UI.nav.push(() => groupView(p.id)) })),
     row({ title: 'Новая группа', cls: 'accent', onClick: () => openProfile(null) })]));
+  // работа каждый день — выше; инструменты и настройки — ниже, отдельными блоками
   const jobsStatus = j.active ? ['в работе: ' + j.active, 'run'] : j.failed ? ['ошибок: ' + j.failed, 'bad'] : null;
   v.append(group(null, [
     row({ title: 'Задачи', status: jobsStatus, detail: jobsStatus ? null : String(j.done || ''), onClick: () => UI.nav.push(jobsView) }),
-    row({ title: 'Мониторинг', sub: 'доступность нод из России', onClick: () => { MON = null; UI.nav.push(monitorView); } }),
-    row({ title: 'Утренняя сводка', onClick: () => { SUM = null; UI.nav.push(summaryView); } }),
-    admin ? row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }) : null,
+    row({ title: 'Мониторинг', sub: 'доступность нод из России', onClick: () => { MON = null; UI.nav.push(monitorView); } })]));
+  const tools = [
     admin || ST.profiles.length > 1 ? row({ title: 'Перенос хостов', onClick: () => { TX = null; UI.nav.push(transferView); } }) : null,
+    admin ? row({ title: 'Мои скрипты', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }) : null].filter(Boolean);
+  if (tools.length) v.append(group('Инструменты', tools));
+  v.append(group('Настройки', [
+    row({ title: 'Утренняя сводка', onClick: () => { SUM = null; UI.nav.push(summaryView); } }),
     admin ? row({ title: 'Пользователи', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }) : null,
-    row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })].filter(Boolean)));
-  if (!admin) {
-    v.append(h('div', { class: 'pad' }, h('div', { class: 'group-f' }, 'Серверы покупаются с вашего баланса в Bobr Cloud. Свою панель добавьте как новую группу — с вашим токеном Cloudflare. Чекеры в «Мониторинге» общие: ваш чекер проверяет ноды всех пользователей бота.')));
-    return v;
-  }
+    row({ title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })].filter(Boolean),
+    admin ? null : 'Серверы покупаются с вашего баланса в Bobr Cloud, домены — вашим токеном Cloudflare. Чекеры в «Мониторинге» общие для всех пользователей бота.'));
+  if (!admin) return v;
   const sec = ST.security || {}, hd = sec.hardened;
   const ok = k => s[k] && s[k].set;
   const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
@@ -173,7 +178,7 @@ function hostView() {
   if (HOST === null) { HOST = undefined; api('host').then(r => { HOST = r; UI.nav.refresh(); }).catch(e => { HOST = { error: e.message }; UI.nav.refresh(); }); }
   const v = h('div', { class: 'host-page' }, ...title('Нагрузка'));
   if (!HOST) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  if (HOST.error) { v.append(h('div', { class: 'notice bad' }, HOST.error)); return v; }
+  if (HOST.error) { v.append(UI.failed(HOST.error, () => { HOST = null; UI.nav.refresh(); })); return v; }
   clearTimeout(hostTimer);
   hostTimer = setTimeout(() => { if (document.querySelector('#root .host-page')) api('host').then(r => { HOST = r; UI.nav.refresh(); }).catch(() => {}); }, 60000);
   const n = HOST.now || {};
@@ -257,7 +262,7 @@ function settingField(key, opts = {}) {
       placeholder: st.secret && st.set ? 'оставить ' + st.hint : (opts.ph || '') });
   i.value = st.secret ? '' : (st.value || '');
   if (/url|proxy|pubkey|tg_id|parallel/.test(key)) i.classList.add('code');
-  return [i, h('label', { class: 'field stack' }, h('label', {}, st.label), i)];
+  return [i, h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, st.label), i)];
 }
 function settingsForm(header, keys, footer, check, opts = {}) {
   const fields = keys.map(k => [k, ...settingField(k, (opts.fields || {})[k] || {})]);
@@ -310,7 +315,7 @@ function monitorView() {
   if (MON === null) { loadMon().then(() => UI.nav.refresh()); return h('div', {}, ...title('Мониторинг'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); }
   const v = h('div', { class: 'mon-page' }, ...title('Мониторинг'),
     h('div', { class: 'subtitle' }, 'Чекеры на серверах в России проверяют подписки групп. Нода недоступна, если её не пропускает большинство чекеров 3 проверки подряд (~15 мин).'));
-  if (MON.error) { v.append(h('div', { class: 'notice bad' }, MON.error)); return v; }
+  if (MON.error) { v.append(UI.failed(MON.error, () => { MON = null; UI.nav.refresh(); })); return v; }
   monPoll();
   const chRows = MON.checkers.map(c => row({ title: c.name, sub: [c.ip, c.mine ? null : 'добавил ' + (c.by || 'другой пользователь'), c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проверок ${c.proxies ?? '…'}, проходят ${c.online ?? '…'}`) : c.error].filter(Boolean).join(' · '),
     status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c), chevron: c.mine ? undefined : false,
@@ -347,8 +352,8 @@ function checkerAddView() {
   });
   return h('div', {}, ...title('Новый чекер', 'Мониторинг'),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
-      h('label', { class: 'field stack' }, h('label', {}, 'Название'), textIn(f.name, 'Москва, МТС', x => { f.name = x; })),
-      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название'), textIn(f.name, 'Москва, МТС', x => { f.name = x; })),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))),
       h('div', { class: 'group-f' }, 'Ubuntu или Debian. Лучше брать серверы у разных операторов: так видно, где блокировка, а где сбой у одного провайдера.')),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, MON && MON.bot_key)),
       h('div', { class: 'group-f' }, 'Бот поставит Docker и xray-checker. Если вход под root по паролю — дальше бот заходит своим ключом и пароль не хранит.'), status),
@@ -394,19 +399,22 @@ function checkerView(id) {
   } })]));
   return v;
 }
-function monGroupView(pid) {
+// группа в мониторинге: состояние нод — отдельно, настройки проверки и починки — своим экраном
+function monGroupView(pid, part) {
   const g = MON && !MON.error && MON.groups.find(x => x.id === pid);
   if (!g) return h('div', {}, ...title('Мониторинг'), h('div', { class: 'notice' }, 'Группа удалена'));
   monPoll();
-  const v = h('div', { class: 'mon-page' }, ...title(g.name, 'Мониторинг'));
+  const settings = part === 'settings' || !g.enabled;
+  const v = h('div', { class: 'mon-page' }, ...title(part === 'settings' ? 'Проверка и починка' : g.name, part === 'settings' ? mid(g.name, 18) : 'Мониторинг'));
+  if (!g.enabled) v.append(h('div', { class: 'subtitle' }, 'Мониторинг группы выключен: вставьте ссылку подписки ниже и сохраните.'));
   // ноды
-  if (g.enabled) {
+  if (!settings) {
     const isHost = n => n.kind === 'host';
     const verdict = n => !n.data ? 'нет в подписке для проверки'
       : isHost(n) ? (n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит`) + (n.total > 1 ? ` · выходов ${n.up} из ${n.total}` : '')
       : n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит у ${n.data} из ${n.data}`;
     const mkRow = n => row({ title: h('span', {}, isHost(n) ? '' : flagOf(n.country) + ' ', n.name || n.addr), cls: 'wrap',
-      sub: [n.addr && n.addr !== n.name ? n.addr : '', (n.hosts || []).length ? 'хосты: ' + n.hosts.join(', ') : '',
+      sub: [n.addr && n.addr !== n.name ? n.addr : '', (n.hosts || []).filter(x => x !== n.addr).length ? 'хосты: ' + n.hosts.filter(x => x !== n.addr).join(', ') : '',
         (n.cdn_hosts || []).length ? 'через CDN: ' + n.cdn_hosts.join(', ') : '', verdict(n),
         !isHost(n) && n.online_users != null ? 'онлайн ' + n.online_users : '',
         n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
@@ -429,6 +437,9 @@ function monGroupView(pid) {
       + (nodes.some(n => ['down', 'gave_up', 'ignored'].includes(n.status)) ? ' Нажмите на недоступную ноду, чтобы запустить починку.' : '')));
     if (hosts.length) v.append(group(['Хосты без нод', h('span', { class: 'n' }, hosts.length)], hosts.map(mkRow),
       'Свой профиль и xray.json, сервер не в панели. Проверки — по названию хоста в подписке; «проходит», если прошёл хоть один его выход. Бот только сообщает, не чинит.'));
+    v.append(group(null, [row({ title: 'Проверка и починка', sub: `${MON.modes[g.mon_mode]}, шагов ${g.mon_steps.length}`,
+      onClick: () => { delete MONF[pid]; UI.nav.push(() => monGroupView(pid, 'settings')); } })]));
+    return v;
   }
   // настройки
   // правки живут, пока страница открыта: перерисовка страницы (опрос) их не сбрасывает
@@ -440,7 +451,8 @@ function monGroupView(pid) {
   sub.addEventListener('input', () => { S.mon_sub = sub.value.trim(); });
   // шаги: включить/выключить и порядок стрелками; список перерисовывается сам, без перерисовки страницы
   const stepBox = h('div', { class: 'list' });
-  const moveBtn = (label, dis, fn) => h('button', { class: 'btn secondary small', type: 'button', 'aria-label': label, disabled: dis, onclick: () => { UI.haptic('select'); fn(); } }, label === 'Выше' ? '↑' : label === 'Ниже' ? '↓' : '✕');
+  const moveBtn = (label, dis, fn) => h('button', { class: 'btn secondary small', type: 'button', 'aria-label': label, title: label, disabled: dis, onclick: () => { UI.haptic('select'); fn(); } },
+    UI.icon(label === 'Выше' ? 'up' : label === 'Ниже' ? 'down' : 'close'));
   const swap = (arr, i, j) => { [arr[i], arr[j]] = [arr[j], arr[i]]; };
   const drawSteps = () => {
     let n = 0;
@@ -448,8 +460,8 @@ function monGroupView(pid) {
       const on = S.mon_on.has(k), t = MON.steps[k];
       const extra = !on ? null : k === 'script' ? h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Чем переустановить'),
         UI.chips([{ value: null, label: 'Nuvrion Vision' }, ...MON.scripts.map(x => ({ value: x.id, label: x.title }))], S.mon_script, x => { S.mon_script = x; }))
-        : k === 'mask' ? h('label', { class: 'field' }, h('label', {}, 'Порт для клиентов'), textIn(S.mon_port, '8443', x => { S.mon_port = x.replace(/\D/g, ''); }, true, 'right')) : null;
-      const r = row({ title: (on ? (++n) + '. ' : '') + t, cls: on ? '' : 'is-dim', chevron: false,
+        : k === 'mask' ? h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт для клиентов'), textIn(S.mon_port, '8443', x => { S.mon_port = x.replace(/\D/g, ''); }, true, 'right')) : null;
+      const r = row({ title: (on ? (++n) + '. ' : '') + t, cls: 'wrap' + (on ? '' : ' is-dim'), chevron: false,
         right: h('div', { class: 'counter', style: 'gap:6px' }, moveBtn('Выше', i === 0, () => { swap(S.mon_order, i, i - 1); drawSteps(); }),
           moveBtn('Ниже', i === S.mon_order.length - 1, () => { swap(S.mon_order, i, i + 1); drawSteps(); }),
           UI.toggle(on, v2 => { v2 ? S.mon_on.add(k) : S.mon_on.delete(k); drawSteps(); }, t)) });
@@ -503,22 +515,23 @@ function monGroupView(pid) {
     sub.value = ''; await loadMon(); UI.nav.refresh();
   });
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Подписка для проверки'),
-    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Ссылка подписки'), sub)),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Ссылка подписки'), sub)),
     h('div', { class: 'group-f' }, 'Заведите в панели группы отдельного пользователя со всеми сквадами нод и вставьте его ссылку подписки. Бот запишет её на все чекеры с пометкой этой группы.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Не проверять'),
-    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Группы подписки (балансировщики)'), textIn(S.mon_skip, 'АВТО-ВЫБОР, NORMAL', x => { S.mon_skip = x; }))),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Группы подписки (балансировщики)'), textIn(S.mon_skip, 'АВТО-ВЫБОР, NORMAL', x => { S.mon_skip = x; }))),
     h('div', { class: 'group-f' }, 'Через запятую, достаточно части названия. Общий балансировщик (АВТО-ВЫБОР, NORMAL) повторяет ноды, которые и так проверяются по своим хостам. '
       + 'Ноду бот узнаёт по её хостам: адрес хоста — это нода или указывает на её IP. Хосты через CDN и балансировщики с подменным адресом (vk.com, ok.ru) не считаются.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Когда нода недоступна'),
-    h('div', { class: 'seg-row' }, UI.chips(Object.entries(MON.modes).map(([k, t]) => ({ value: k, label: t })), S.mon_mode, x => { S.mon_mode = x; })),
+    h('div', { class: 'list' }, choiceRows(Object.entries(MON.modes).map(([k, t]) => ({ value: k, label: t[0].toUpperCase() + t.slice(1) })), S.mon_mode, x => { S.mon_mode = x; })),
     h('div', { class: 'group-f' }, '«Предлагать» — сообщение с кнопками «Починить», «Сразу новая нода», «Не трогать». «Чинить сам» — шаги ниже по порядку без вопросов.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Шаги починки'), stepBox,
     h('div', { class: 'group-f' }, 'Включённые шаги идут сверху вниз, стрелками — порядок. После каждого шага бот ждёт две проверки (~10 мин): нода ожила — готово, нет — следующий шаг. Смена IP — только для нод, купленных ботом; переустановка — на том же сервере с тем же доменом.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Конфигурация новой ноды'), buyBox,
     h('div', { class: 'group-f' }, 'Локация — та же, что у старой ноды. Бот берёт первый вариант, который там есть; нет — следующий.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новая нода'), h('div', { class: 'list' },
-    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Старый сервер после замены'), UI.chips(Object.entries(MON.old).map(([k, t]) => ({ value: k, label: t })), S.mon_old, x => { S.mon_old = x; })),
-    h('label', { class: 'field' }, h('label', {}, 'Покупок за сутки, не больше'), textIn(S.mon_max_buys, '2', x => { S.mon_max_buys = x.replace(/\D/g, ''); }, true, 'right'))),
+    h('div', { class: 'seg-row', style: 'padding-bottom:0' }, h('div', { class: 'mini-h' }, 'Старый сервер после замены')),
+    choiceRows(Object.entries(MON.old).map(([k, t]) => ({ value: k, label: t[0].toUpperCase() + t.slice(1) })), S.mon_old, x => { S.mon_old = x; }),
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Покупок за сутки, не больше'), textIn(S.mon_max_buys, '2', x => { S.mon_max_buys = x.replace(/\D/g, ''); }, true, 'right'))),
     h('div', { class: 'group-f' }, `Имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в Bobr Cloud сервер не вернуть — остаток срока возвращается по правилам Bobr Cloud.`)));
   v.append(h('div', { class: 'pad', style: 'margin-bottom:var(--s2)' }, status), h('div', { class: 'actions' }, save));
   return v;
@@ -548,7 +561,7 @@ function scriptsView() {
   };
   add.onclick = UI.busy(add, async () => { try { await create(); status.textContent = ''; } catch (e) { showStatus(status, { ok: false, message: e.message }); } });
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новый скрипт'),
-    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Ссылка на репозиторий или файл'), url)),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Ссылка на репозиторий или файл'), url)),
     h('div', { class: 'group-f' }, 'Бот закрепит текущий коммит и SHA-256 файла: на ноды пойдёт ровно та версия, которую разобрали и утвердили.'), status),
     h('div', { class: 'pad' }, add));
   const list = SCR.scripts || [];
@@ -647,7 +660,7 @@ function usersView() {
   if (USERS === null) { loadUsers().then(() => UI.nav.refresh()); return h('div', {}, ...title('Пользователи'), group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); }
   const v = h('div', {}, ...title('Пользователи'),
     h('div', { class: 'subtitle' }, 'Приглашённые видят только свои группы: созданные сами и те, где клиент Bobr Cloud — они (по Telegram ID или @username). Покупают со своего баланса Bobr Cloud, домены — своим токеном Cloudflare. Настроек бота, скриптов и оформления у них нет.'));
-  if (USERS.error) { v.append(h('div', { class: 'notice bad' }, USERS.error)); return v; }
+  if (USERS.error) { v.append(UI.failed(USERS.error, () => { USERS = null; UI.nav.refresh(); })); return v; }
   const reload = async () => { await loadUsers(); await load(); };
   v.append(group(['Пользователи', h('span', { class: 'n' }, USERS.users.length || '')], USERS.users.length ? USERS.users.map(u => row({ title: u.label, cls: 'wrap',
     sub: [u.groups.length ? 'группы: ' + u.groups.map(g => g.name + (g.mine ? '' : ' (ваша)')).join(', ') : 'групп нет', u.checkers ? 'чекеров ' + u.checkers : '', u.note].filter(Boolean).join(' · '),
@@ -662,9 +675,10 @@ function usersView() {
     f.note = ''; UI.copy(r.link, 'Ссылка'); await reload(); UI.nav.refresh();
   });
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новое приглашение'), h('div', { class: 'list' },
-    h('label', { class: 'field stack' }, h('label', {}, 'Для кого', h('span', { class: 'opt' }, ' необязательно')), textIn(f.note, 'Иван, панель EU', x => { f.note = x; })),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Для кого', h('span', { class: 'opt' }, ' необязательно')), textIn(f.note, 'Иван, панель EU', x => { f.note = x; })),
     row({ title: 'Сколько человек', chevron: false, right: stepper(f.uses, n => { f.uses = n; }, 20) }),
-    row({ title: 'Срок', chevron: false, right: UI.segmented([{ value: 1, label: 'день' }, { value: 7, label: 'неделя' }, { value: 30, label: 'месяц' }, { value: 0, label: '∞' }], f.days, x => { f.days = x; }) })),
+    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Ссылка действует'),
+      UI.segmented([{ value: 1, label: 'день' }, { value: 7, label: 'неделю' }, { value: 30, label: 'месяц' }, { value: 0, label: 'без срока' }], f.days, x => { f.days = x; }))),
     h('div', { class: 'group-f' }, 'Человек открывает ссылку — бот впускает его. Если для его Telegram ID или @username уже есть группа, она сразу у него в списке.')),
     h('div', { class: 'pad' }, make));
   const invs = USERS.invites;
@@ -717,21 +731,31 @@ function groupView(pid) {
       : (g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт Bobr Cloud') + (g.kind === 'user' ? ', группа пользователя ' + g.created_by_label : ''))));
   v.append(h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'),
     onclick: () => { D = null; UI.nav.push(() => deployView(pid)); } }, 'Развернуть в группе')));
-  if (jobs === undefined) v.append(group('Серверы', [h('div', { class: 'skeleton' })]));
-  else if (jobs.error) v.append(h('div', { class: 'notice bad' }, jobs.error));
-  else if (!jobs.length) v.append(group('Серверы', [row({ cls: 'wrap', title: 'Серверов пока нет', sub: 'Они появятся здесь после развёртывания — и у клиента в Bobr Cloud.' })]));
-  else v.append(group(['Серверы', h('span', { class: 'n' }, jobs.length)], jobs.map(jobRow)));
+  // панель и всё, что с ней делают, — сразу под главной кнопкой; серверы ниже, первые пять
   const st = PS[pid];
   if (st === undefined) { PS[pid] = null; api('profiles/' + pid + '/check', 'POST').then(r => { PS[pid] = r; UI.nav.refresh(); }).catch(e => { PS[pid] = { ok: false, message: e.message }; UI.nav.refresh(); }); }
   v.append(group('Панель', [
-    row({ title: 'Remnawave', cls: 'wrap', sub: st ? st.message.replace(/^Панель отвечает: /, '') : 'проверяю связь',
-      status: st ? (st.ok ? ['на связи', 'ok'] : ['нет связи', 'bad']) : ['…', ''], onClick: () => { delete PS[pid]; UI.nav.refresh(); } }),
-    row({ title: 'Ноды в панели', onClick: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); } }),
+    row({ title: 'Ноды в панели', sub: st ? st.message.replace(/^Панель отвечает: /, '') : 'проверяю связь с панелью', cls: 'wrap',
+      status: st ? (st.ok ? null : ['нет связи', 'bad']) : null, onClick: () => { delete NODES[pid]; delete PS[pid]; UI.nav.push(() => nodesView(pid)); } }),
     row({ title: 'Автоматизация', sub: 'обновления, нагрузка, автопродление', onClick: () => { delete AUTO[pid]; UI.nav.push(() => autoView(pid)); } }),
     row({ title: 'Аренда серверов', onClick: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); } }),
-    row({ title: 'Настройки группы', onClick: () => { delete PS[pid]; openProfile(pid); } })]));
+    row({ title: 'Настройки группы', onClick: () => { delete PS[pid]; openProfile(pid); } })],
+    st && !st.ok ? st.message : null));
+  const CAP = 5;
+  if (jobs === undefined) v.append(group('Серверы', [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]));
+  else if (jobs.error) v.append(UI.failed(jobs.error, () => { delete GJ[pid]; UI.nav.refresh(); }, 'Серверы не загрузились'));
+  else if (!jobs.length) v.append(group('Серверы', [row({ cls: 'wrap', title: 'Серверов пока нет', sub: 'Они появятся здесь после развёртывания — и у клиента в Bobr Cloud.' })]));
+  else {
+    // сначала то, что требует внимания: идёт и с ошибкой; затем остальные
+    const order = [...jobs].sort((a, b) => (ACTIVE_ST.includes(b.status) - ACTIVE_ST.includes(a.status)) || ((b.status === 'failed') - (a.status === 'failed')));
+    const all = GALL[pid], shown = all ? order : order.slice(0, CAP);
+    const rows = shown.map(jobRow);
+    if (order.length > CAP) rows.push(act(all ? 'Свернуть' : `Все серверы · ${order.length}`, () => { GALL[pid] = !all; UI.nav.refresh(); }));
+    v.append(group(['Серверы', h('span', { class: 'n' }, jobs.length)], rows));
+  }
   return v;
 }
+const GALL = {};  // «все серверы» раскрыты на странице группы
 // строка задачи в списках: обычное состояние тихое, цветом — только «идёт» и «ошибка»
 function jobRow(j) {
   const sub = j.status === 'failed' ? j.error : ACTIVE_ST.includes(j.status) ? (STAGE[j.stage] || STATUS[j.status][0]) : [j.loc_name, specText(j.spec)].filter(Boolean).join(', ');
@@ -759,11 +783,11 @@ function transferView() {
     ta.placeholder = 'Набор хостов из Bobr Nodes («Скачать набор JSON») или просто Xray JSON-шаблон с роутингом';
     let parsed = null; try { parsed = JSON.parse(TX.json); } catch (e) {}
     bundleKind = parsed && parsed.kind === 'bobr-nodes/hosts' ? 'bundle' : parsed && typeof parsed === 'object' ? 'template' : null;
-    const rows = [h('label', { class: 'field stack' }, h('label', {}, 'JSON'), ta)];
+    const rows = [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON'), ta)];
     rows.push(act('Разобрать', () => UI.nav.refresh()));
     if (bundleKind === 'bundle') rows.push(row({ cls: 'wrap', title: `Набор: хостов ${(parsed.hosts || []).length}, профилей ${(parsed.profiles || []).length}, шаблонов ${(parsed.templates || []).length}`,
       sub: (parsed.hosts || []).slice(0, 8).map(x => x.remark).join(', ') }));
-    if (bundleKind === 'template') rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Имя шаблона Xray JSON'), textIn(TX.tname, 'например Arenda5', x => { TX.tname = x; })));
+    if (bundleKind === 'template') rows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Имя шаблона Xray JSON'), textIn(TX.tname, 'например Arenda5', x => { TX.tname = x; })));
     v.append(group(null, rows, bundleKind === 'template' ? 'Это не набор, а Xray JSON — бот создаст или обновит шаблон с этим именем. Хосты к нему привяжите в панели или перенесите набором.' : 'Набор переносит хосты вместе с их профилями и Xray JSON-шаблонами.'));
   } else {
     txMeta(TX.src, 'srcMeta');
@@ -901,11 +925,11 @@ function sshFields(F, view, botKey) {
         rd.onerror = () => UI.toast('Не удалось прочитать файл', true);
         rd.readAsText(fl);
       });
-      out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta),
+      out.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Закрытый ключ'), ta),
         act('Загрузить файл ключа', () => file.click()), file, fileNote);
     }
     if (F.key === 'bot') out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, botKey || 'ssh-keygen недоступен'), copy: botKey || null, copyLabel: 'Ключ' }));
-    if (!isRoot()) out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));
+    if (!isRoot()) out.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));
     out.push(h('div', { class: 'in-note' }, 'Можно пароль, ключ или оба сразу — если сервер требует и то, и другое (Сбер Клауд). '
       + (isRoot() ? 'Под root — без sudo.' : `Вход под ${F.user}, команды — через sudo.`)
       + (F.key === 'own' ? ' Ключ без парольной фразы; хранится на сервере бота файлом с доступом только для root.' : '')
@@ -920,9 +944,9 @@ function sshFields(F, view, botKey) {
   port.addEventListener('input', () => { F.port = port.value.replace(/\D/g, ''); });
   draw();
   return [
-    h('label', { class: 'field' }, h('label', {}, 'Пользователь'), user),
-    h('label', { class: 'field' }, h('label', {}, 'Порт'), port),
-    h('label', { class: 'field' }, h('label', {}, 'Пароль'), pwIn(view.has_password ? 'сохранён («-» — убрать)' : 'если нужен', 'password')),
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Пользователь'), user),
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт'), port),
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Пароль'), pwIn(view.has_password ? 'сохранён («-» — убрать)' : 'если нужен', 'password')),
     h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Ключ'), UI.segmented([{ value: '', label: 'Без ключа' }, { value: 'own', label: 'Свой' }, { value: 'bot', label: 'Ключ бота' }], F.key, x => { F.key = x; draw(); })),
     more];
 }
@@ -939,7 +963,7 @@ function nodesView(pid) {
     api('profiles/' + pid + '/nodes').then(r => { NODES[pid] = r; UI.nav.refresh(); }).catch(e => { NODES[pid] = { error: e.message }; UI.nav.refresh(); });
   }
   if (!L) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  if (L.error) { v.append(h('div', { class: 'notice bad' }, L.error)); return v; }
+  if (L.error) { v.append(UI.failed(L.error, () => { delete NODES[pid]; UI.nav.refresh(); }, 'Панель не ответила')); return v; }
   if (!L.nodes.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'В панели нет нод'))); return v; }
   const total = L.nodes.reduce((a, n) => a + (n.online || 0), 0);
   const VS = L.versions || {}, U = UPG[pid] || (UPG[pid] = { sel: null, tag: VS.target || 'latest' });
@@ -949,12 +973,16 @@ function nodesView(pid) {
     + (VS.panel ? ` · панель ${VS.panel}` : '') + (VS.target && VS.target !== 'latest' ? ` · нода ${VS.target}` : '')));
   const picking = !!U.sel;
   v.append(group(null, L.nodes.map(n => row({ flag: flagOf(n.country), title: n.name,
-    sub: [mid(n.address, 30), n.version ? 'v' + n.version + (old(n) ? ' → ' + U.tag : '') : '', loadShort(n.load), n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(', '),
+    // в строке — адрес и только то, что требует внимания: устаревшая версия, перегрузка, дополнения
+    sub: [mid(n.address, 30), old(n) ? 'версия ' + n.version : '', n.load && n.load.hot && n.load.hot.length ? loadShort(n.load) : '',
+      n.features.map(f => FEAT[f] || f).join(' и ')].filter(Boolean).join(' · '),
     status: picking ? null : n.busy ? ['задача идёт', 'run'] : (n.load && n.load.hot && n.load.hot.length) ? ['нагрузка', 'warn'] : n.disabled ? ['выключена', ''] : !n.connected ? ['нет связи', 'bad'] : ['', 'ok', 'на связи'],
-    detail: !picking && n.connected && !n.disabled && n.online != null ? String(n.online) : null, chevron: picking ? false : undefined,
+    // число онлайн — только у ноды без особого состояния: иначе слово состояния важнее и места на узком экране не хватает
+    detail: !picking && !n.busy && n.connected && !n.disabled && !(n.load && n.load.hot && n.load.hot.length) && n.online != null ? String(n.online) : null,
+    chevron: picking ? false : undefined,
     right: picking ? UI.toggle(U.sel.has(n.uuid), on => { on ? U.sel.add(n.uuid) : U.sel.delete(n.uuid); UI.nav.refresh(); }, n.name) : null,
     onClick: picking ? null : () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })),
-    'Зелёная точка — нода на связи, число — пользователи онлайн. Внутри ноды — Psiphon, WARP, порт, Final Mask, смена IP и SSH.'));
+    'Число справа — пользователи онлайн. Версия и нагрузка видны на странице ноды.'));
   // обновление нод: выбранных или всех, с проверкой связи и откатом
   const run = async all => {
     const uuids = all ? null : [...U.sel];
@@ -970,7 +998,7 @@ function nodesView(pid) {
     UI.nav.refresh();
   };
   v.append(group('Обновление нод', [
-    h('label', { class: 'field' }, h('label', {}, 'Версия'), textIn(U.tag, VS.target || 'latest', x => { U.tag = x.trim() || 'latest'; }, true, 'right')),
+    h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Версия'), textIn(U.tag, VS.target || 'latest', x => { U.tag = x.trim() || 'latest'; }, true, 'right')),
     picking ? act(`Обновить выбранные (${U.sel.size})`, () => run(false)) : act('Выбрать ноды', () => { U.sel = new Set(); UI.nav.refresh(); }),
     picking ? act(`Дополнения, порт, Final Mask (${U.sel.size})`, () => { if (!U.sel.size) return UI.toast('Выберите ноды', true); BULK[pid] = null; UI.nav.push(() => bulkView(pid)); }) : null,
     picking ? act('Отменить выбор', () => { U.sel = null; UI.nav.refresh(); }) : act('Обновить все' + (stale ? ` · устарели ${stale}` : ''), () => run(true))].filter(Boolean),
@@ -991,9 +1019,9 @@ function bulkView(pid) {
     h('div', { class: 'subtitle' }, names.join(', ')));
   v.append(group('Дополнения', extrasRows(B.E, []), 'Ноды с дополнениями перейдут в копии своих профилей, как при настройке одной ноды.'));
   const rows = [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Порт для клиентов'), UI.segmented([{ value: 'keep', label: 'Не менять' }, { value: '443', label: '443' }, { value: 'custom', label: 'Свой' }], B.portMode, x => { B.portMode = x; UI.nav.refresh(); }))];
-  if (B.portMode === 'custom') rows.push(h('label', { class: 'field' }, h('label', {}, 'Порт'), textIn(B.port, '8443', x => { B.port = x.replace(/\D/g, ''); }, true, 'right')));
+  if (B.portMode === 'custom') rows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт'), textIn(B.port, '8443', x => { B.port = x.replace(/\D/g, ''); }, true, 'right')));
   rows.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Final Mask'), UI.segmented([{ value: 'keep', label: 'Не менять' }, { value: 'on', label: 'Включить' }, { value: 'off', label: 'Убрать' }], B.mask, x => { B.mask = x; UI.nav.refresh(); })));
-  if (B.mask === 'on') rows.push(h('label', { class: 'field stack' }, h('label', {}, 'JSON'), areaIn(B.maskJson, 8, x => { B.maskJson = x; }, jsonOk)));
+  if (B.mask === 'on') rows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON'), areaIn(B.maskJson, 8, x => { B.maskJson = x; }, jsonOk)));
   v.append(group('Хосты', rows));
   const go = h('button', { class: 'btn', type: 'button' }, 'Применить ко всем выбранным');
   go.onclick = UI.busy(go, async () => {
@@ -1027,7 +1055,7 @@ function autoView(pid) {
   let A = AUTO[pid];
   if (A === undefined) { AUTO[pid] = null; api(`profiles/${pid}/auto`).then(r => { AUTO[pid] = r; UI.nav.refresh(); }).catch(e => { AUTO[pid] = { error: e.message }; UI.nav.refresh(); }); }
   if (!A) { v.append(group(null, [h('div', { class: 'skeleton' })])); return v; }
-  if (A.error) { v.append(h('div', { class: 'notice bad' }, A.error)); return v; }
+  if (A.error) { v.append(UI.failed(A.error, () => { delete AUTO[pid]; UI.nav.refresh(); })); return v; }
   const save = async patch => {
     const r = await UI.run(() => api(`profiles/${pid}/auto`, 'POST', { ...patch, tz: tzNow() }));
     if (r) { Object.assign(A, r); UI.haptic('select'); UI.nav.refresh(); }
@@ -1053,12 +1081,12 @@ function rentView(pid) {
   const reload = () => { RENT[pid] = null; api(`profiles/${pid}/rent`).then(r => { RENT[pid] = r; UI.nav.refresh(); }).catch(e => { RENT[pid] = { error: e.message }; UI.nav.refresh(); }); };
   if (R === undefined) reload();
   if (!R) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  if (R.error) { v.append(h('div', { class: 'notice bad' }, R.error)); return v; }
-  v.append(h('div', { class: 'subtitle' }, `Баланс ${R.buyer}: ${rubK(R.balance_kop)}`));
+  if (R.error) { v.append(UI.failed(R.error, reload, 'Аренда не загрузилась')); return v; }
+  v.append(h('div', { class: 'subtitle' }, `Баланс: ${rubK(R.balance_kop)} (${R.buyer})`));
   const date = s => s ? new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '—';
   v.append(group(['Серверы', h('span', { class: 'n' }, R.servers.length || '')], R.servers.length ? R.servers.map(x => row({ flag: x.flag || '·', title: mid(x.domain || x.name, 30), cls: 'wrap',
     sub: [`до ${date(x.expires_at)}` + (x.days_left != null ? `, ${Math.max(0, Math.floor(x.days_left))} дн.` : ''), rubK(x.price_kop) + '/мес',
-      x.auto_renew === false ? 'автопродление выкл.' : x.auto_renew ? 'автопродление' : '', x.risk].filter(Boolean).join(' · '),
+      x.risk || (x.auto_renew === false ? 'автопродление выкл.' : x.auto_renew ? 'автопродление' : '')].filter(Boolean).join(' · '),
     status: x.risk ? ['продлите', 'bad'] : x.days_left != null && x.days_left <= 3 ? ['скоро', 'warn'] : null,
     onClick: async () => {
       const a = await UI.ask({ title: x.domain || x.name, message: `Оплачен до ${date(x.expires_at)}. Продление — ${rubK(x.price_kop)} с баланса ${R.buyer}.`,
@@ -1076,7 +1104,7 @@ function summaryView() {
   const v = h('div', {}, ...title('Утренняя сводка'));
   if (SUM === null) { SUM = undefined; api('summary').then(r => { SUM = r; UI.nav.refresh(); }).catch(e => { SUM = { error: e.message }; UI.nav.refresh(); }); }
   if (!SUM) { v.append(group(null, [h('div', { class: 'skeleton' })])); return v; }
-  if (SUM.error) { v.append(h('div', { class: 'notice bad' }, SUM.error)); return v; }
+  if (SUM.error) { v.append(UI.failed(SUM.error, () => { SUM = null; UI.nav.refresh(); })); return v; }
   const save = async patch => { const r = await UI.run(() => api('summary', 'POST', { ...patch, tz: tzNow() })); if (r) { SUM = r; UI.haptic('select'); UI.nav.refresh(); } };
   const rows = [row({ title: 'Присылать каждый день', chevron: false, right: UI.toggle(SUM.on, on => save({ on }), 'Сводка') })];
   if (SUM.on) rows.push(row({ title: 'Время', chevron: false, right: hourStep(SUM.hour, x => save({ hour: x })) }));
@@ -1103,7 +1131,7 @@ function nodeView(pid, uuid) {
     }).catch(e => { NODE[uuid] = { error: e.message }; UI.nav.refresh(); });
   }
   if (!n) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  if (n.error) { v.append(h('div', { class: 'notice bad' }, n.error)); return v; }
+  if (n.error) { v.append(UI.failed(n.error, () => { delete NODE[uuid]; UI.nav.refresh(); }, 'Нода не загрузилась')); return v; }
   const done = jid => { delete GJ[pid]; delete NODES[pid]; delete NODE[uuid]; UI.nav.push(() => jobView(jid)); };
   if (n.profile) v.append(h('div', { class: 'subtitle' }, 'Профиль ' + n.profile));
   v.append(group(null, [
@@ -1133,7 +1161,7 @@ function nodeView(pid, uuid) {
         act('IP уже сменили в Bobr Cloud — подтянуть', () => startReip('sync', {})));
     }
     if (!n.ip_new) n.ip_new = '';
-    out.push(h('label', { class: 'field' }, h('label', {}, n.bcloud ? 'Или новый IP' : 'Новый IP'), textIn(n.ip_new, '203.0.113.10', x => { n.ip_new = x.trim(); }, true, 'right')),
+    out.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, n.bcloud ? 'Или новый IP' : 'Новый IP'), textIn(n.ip_new, '203.0.113.10', x => { n.ip_new = x.trim(); }, true, 'right')),
       act('Перепривязать на этот IP', () => n.ip_new ? startReip('manual', { ip: n.ip_new }) : showStatus(ipSt, { ok: false, message: 'Введите новый IP' })));
     if (n.address_is_ip && n.domain) out.push(act('Писать в панели домен вместо IP', async () => {
       try { const r = await api(`profiles/${pid}/nodes/${uuid}/address-domain`, 'POST', {}); showStatus(ipSt, r); n.address = n.domain; n.address_is_ip = false; }
@@ -1165,12 +1193,12 @@ function nodeView(pid, uuid) {
   const PM = { keep: 'не менять', '443': '443', custom: 'свой' }, MM = { keep: 'не менять', on: 'включить', off: 'убрать' };
   hrows.push(...UI.fold({ title: 'Порт для клиентов', summary: n.portMode === 'custom' ? 'свой, ' + (n.port || '—') : PM[n.portMode], key: 'n-port', body: () => {
     const out = [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'keep', label: 'Не менять' }, { value: '443', label: '443' }, { value: 'custom', label: 'Свой' }], n.portMode, x => { n.portMode = x; UI.nav.refresh(); }))];
-    if (n.portMode === 'custom') out.push(h('label', { class: 'field' }, h('label', {}, 'Порт'), textIn(n.port, '8443', x => { n.port = x.replace(/\D/g, ''); }, true, 'right')));
+    if (n.portMode === 'custom') out.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт'), textIn(n.port, '8443', x => { n.port = x.replace(/\D/g, ''); }, true, 'right')));
     return out;
   } }));
   hrows.push(...UI.fold({ title: 'Final Mask', summary: MM[n.mask] + ', фрагментация ClientHello', key: 'n-mask', body: () => {
     const out = [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'keep', label: 'Не менять' }, { value: 'on', label: 'Включить' }, { value: 'off', label: 'Убрать' }], n.mask, x => { n.mask = x; UI.nav.refresh(); }))];
-    if (n.mask === 'on') out.push(h('label', { class: 'field stack' }, h('label', {}, 'JSON'), areaIn(n.maskJson, 10, x => { n.maskJson = x; }, jsonOk)));
+    if (n.mask === 'on') out.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON'), areaIn(n.maskJson, 10, x => { n.maskJson = x; }, jsonOk)));
     return out;
   } }));
   v.append(group(['Хосты', h('span', { class: 'n' }, ' ' + n.hosts.length)], hrows, n.inbound_port ? `Xray слушает ${n.inbound_port}. Свой порт переадресуется на него на самой ноде, ${n.inbound_port} продолжит работать.` : null));
@@ -1235,11 +1263,11 @@ function relayAddView(pid, uuid) {
   return h('div', {}, ...title('Новый вход', mid(n.name, 18)),
     h('div', { class: 'subtitle' }, 'На российском сервере бот поставит HAProxy (отдельная служба bobr-relay) — больше ничего. Шифрование сквозное: сервер в России видит только зашифрованный поток.'),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
-      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP сервера или ru.example.com', x => { f.address = x.trim(); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста в подписке'), textIn(f.remark, '🇷🇺 Германия', x => { f.remark = x; })),
-      h('label', { class: 'field stack' }, h('label', {}, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true))),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP сервера или ru.example.com', x => { f.address = x.trim(); }, true)),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста в подписке'), textIn(f.remark, '🇷🇺 Германия', x => { f.remark = x; })),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true))),
       h('div', { class: 'group-f' }, `Порт входа должен быть свободен на российском сервере. Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол (группы безопасности) откройте сами — ufw бот откроет.`)),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, n.bot_key)),
       h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — чтобы поставить HAProxy и открыть порт.'), status),
@@ -1301,7 +1329,7 @@ function profileView(p) {
     i.value = f.secret ? '' : (p[k] === undefined || p[k] === null ? '' : String(p[k]));
     inputs[k] = i;
     if (k === 'node_port' || ['outgoing_ips', 'base_domain', 'name_pattern', 'squads', 'panel_url', 'email'].includes(k)) i.classList.add('code');
-    return h('label', { class: 'field stack' }, h('label', {}, f.label, FIELDS.required.includes(k) ? null : h('span', { class: 'opt' }, ' необязательно')), i);
+    return h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, f.label, FIELDS.required.includes(k) ? null : h('span', { class: 'opt' }, ' необязательно')), i);
   };
   let tc = !!p.traffic_control;
   const status = statusLine();
@@ -1397,10 +1425,10 @@ function extrasRows(E, have, opts) {
     right: have.includes(key) ? null : UI.toggle(E[EK[key]], on => { E[EK[key]] = on; UI.nav.refresh(); }, titleT) });
   const EK = { psiphon: 'psi', warp: 'warp', xhttp: 'xh' };
   rows.push(tog('psiphon', 'Psiphon', 'выход для выбранных доменов'));
-  if (E.psi) rows.push(h('label', { class: 'field' }, h('label', {}, 'Страна выхода'), textIn(E.region, 'авто, или DE, NL', x => { E.region = x.toUpperCase(); saveExtras(E); }, true, 'right')),
-    h('label', { class: 'field stack' }, h('label', {}, 'Домены через Psiphon'), areaIn(E.psiDomains, 4, x => { E.psiDomains = x; saveExtras(E); })));
+  if (E.psi) rows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Страна выхода'), textIn(E.region, 'авто, или DE, NL', x => { E.region = x.toUpperCase(); saveExtras(E); }, true, 'right')),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Домены через Psiphon'), areaIn(E.psiDomains, 4, x => { E.psiDomains = x; saveExtras(E); })));
   rows.push(tog('warp', 'WARP', 'выход Cloudflare WARP, например для TikTok'));
-  if (E.warp) rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Домены через WARP'), areaIn(E.warpDomains, 3, x => { E.warpDomains = x; saveExtras(E); })));
+  if (E.warp) rows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Домены через WARP'), areaIn(E.warpDomains, 3, x => { E.warpDomains = x; saveExtras(E); })));
   if (!opts.noXhttp) {
     rows.push(tog('xhttp', 'Запасной XHTTP', 'второй вход: напрямую на порт 2083 и/или через Cloudflare CDN'));
     if (E.xh) {
@@ -1413,6 +1441,19 @@ function extrasRows(E, have, opts) {
         : 'Появятся два хоста: ' + direct + ', и ' + cdn + '.' + cdnWhy));
     }
   }
+  return rows;
+}
+// выбор одного из нескольких вариантов с длинными подписями — строками с галочкой, а не лентой чипов, которая не помещается
+function choiceRows(options, value, onChange) {
+  const rows = options.map(o => {
+    const r = row({ title: o.label, sub: o.sub, cls: 'wrap', chevron: false, label: o.label,
+      right: h('span', { class: 'check-slot' }, o.value === value ? icon('check', 'check') : null),
+      onClick: () => { if (o.value === value) return; value = o.value; UI.haptic('select');
+        rows.forEach((x, i) => { x.setAttribute('aria-checked', String(options[i].value === value)); x.querySelector('.check-slot').replaceChildren(...(options[i].value === value ? [icon('check', 'check')] : [])); });
+        onChange(o.value); } });
+    r.setAttribute('role', 'radio'); r.setAttribute('aria-checked', String(o.value === value));
+    return r;
+  });
   return rows;
 }
 // действие внутри списка — строка цвета акцента; пока идёт запрос, повторные нажатия игнорируются
@@ -1618,7 +1659,7 @@ function deployView(pid) {
       const ta = h('textarea', { class: 'code', rows: Math.min(6, it.count + 1), placeholder: `${it.count}, по одному в строке`, spellcheck: false, autocapitalize: 'off' });
       ta.value = D.manual[it.loc] || '';
       ta.addEventListener('input', () => { D.manual[it.loc] = ta.value; D.picked = false; });
-      domBody.push(h('label', { class: 'field stack' }, h('label', {}, `${loc.flag} ${loc.name}, ${it.count}`), ta));
+      domBody.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, `${loc.flag} ${loc.name}, ${it.count}`), ta));
     }
     const chk = act('Проверить домены', async () => {
       const got = {};
@@ -1665,7 +1706,7 @@ function deployView(pid) {
   setPrev();
   const modes = [{ value: 'simple', label: 'Обычные' }, { value: 'balancer', label: 'По стране' }, { value: 'normal', label: 'Общий NORMAL' }];
   const hbody = [h('div', { class: 'seg-row' }, UI.segmented(modes, D.hostMode, x => { D.hostMode = x; D.hostTouched = true; UI.nav.refresh(); })),
-    h('label', { class: 'field stack' }, h('label', {}, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), input(D.remark, '{flag} {country} {n}', x => { D.remark = x; setPrev(); })),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, D.hostMode === 'balancer' ? 'Название хостов нод (скрытые)' : 'Название хоста'), input(D.remark, '{flag} {country} {n}', x => { D.remark = x; setPrev(); })),
     row({ title: 'Страна', chevron: false, right: UI.segmented([{ value: 'ru', label: 'Рус' }, { value: 'en', label: 'Eng' }], D.lang,
       x => { D.lang = x; try { localStorage.setItem('remark_lang', x); } catch (e) {} setPrev(); }, 'compact') }),
     h('div', { class: 'in-note' }, prevEl)];
@@ -1674,14 +1715,14 @@ function deployView(pid) {
   if (!D.portMode) { D.portMode = lsGet('port_mode', 'std'); D.port = lsGet('port', '8443'); }
   const crows = [row({ title: 'Порт', chevron: false, right: UI.segmented([{ value: 'std', label: '443' }, { value: 'custom', label: 'Свой' }], D.portMode,
     x => { D.portMode = x; lsSet('port_mode', x); UI.nav.refresh(); }, 'compact') })];
-  if (D.portMode === 'custom') crows.push(h('label', { class: 'field' }, h('label', {}, 'Номер порта'), textIn(D.port, '8443', x => { D.port = x.replace(/\D/g, ''); lsSet('port', D.port); }, true, 'right')));
+  if (D.portMode === 'custom') crows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Номер порта'), textIn(D.port, '8443', x => { D.port = x.replace(/\D/g, ''); lsSet('port', D.port); }, true, 'right')));
   crows.push(row({ title: 'Final Mask', sub: 'фрагментация ClientHello на клиенте', right: UI.toggle(D.mask, on => { D.mask = on; lsSet('final_mask', on); UI.nav.refresh(); }, 'Final Mask') }));
-  if (D.mask) crows.push(h('label', { class: 'field stack' }, h('label', {}, 'JSON Final Mask'), areaIn(D.maskJson, 10, x => { D.maskJson = x; lsSet('final_mask_json', x); }, jsonOk)));
+  if (D.mask) crows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON Final Mask'), areaIn(D.maskJson, 10, x => { D.maskJson = x; lsSet('final_mask_json', x); }, jsonOk)));
   crows.push(h('div', { class: 'in-note' }, (D.portMode === 'custom' ? `Хосты получат порт ${D.port || '…'}; на ноде он переадресуется на порт Xray, 443 тоже продолжит работать. ` : '')
     + 'Часть российских операторов режет ClientHello на 443/TCP — помогают Final Mask, свой порт или оба.'));
   adv.push(...UI.fold({ title: 'Подключение клиентов', summary: `порт ${D.portMode === 'custom' ? (D.port || '…') : '443'}, Final Mask ${D.mask ? 'включён' : 'выключен'}`, key: 'd-conn', body: crows }));
   if (D.hostMode === 'normal') {
-    hbody.push(h('label', { class: 'field stack' }, h('label', {}, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
+    hbody.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
       h('div', { class: 'in-note' }, 'Хосты видимые, с тегом ' + (D.tags || 'NORMAL').toUpperCase() + ' — их подхватит ваш общий балансировщик. Шаблоны и хосты-балансировщики бот не создаёт.'));
   } else if (D.hostMode === 'balancer') {
     const bases = tpls.filter(t => t.balancer_tag);
@@ -1689,9 +1730,9 @@ function deployView(pid) {
     const existing = tagsFor.filter(t => tpls.some(x => x.balancer_tag === t));
     if (!D.btpl || !bases.some(t => t.uuid === D.btpl)) D.btpl = (tpls.find(t => t.balancer_tag === tagsFor[0]) || bases[0] || {}).uuid;
     const brows = hbody;
-    if (!multi) brows.push(h('label', { class: 'field stack' }, h('label', {}, 'Тег балансировщика'), input(D.tag, defTag, x => { D.tag = x.toUpperCase(); D.tagTouched = true; }, true)));
-    brows.push(h('label', { class: 'field stack' }, h('label', {}, 'Ещё теги хостов нод'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста-балансировщика'), input(D.bremark, '{flag} {country}', x => { D.bremark = x; })));
+    if (!multi) brows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Тег балансировщика'), input(D.tag, defTag, x => { D.tag = x.toUpperCase(); D.tagTouched = true; }, true)));
+    brows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Ещё теги хостов нод'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста-балансировщика'), input(D.bremark, '{flag} {country}', x => { D.bremark = x; })));
     if (bases.length > 1 && existing.length < tagsFor.length) brows.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Копировать шаблон'),
       UI.chips(bases.map(t => ({ value: t.uuid, label: t.name })), D.btpl, x => { D.btpl = x; })));
     const fresh = tagsFor.filter(t => !existing.includes(t));
@@ -1881,7 +1922,7 @@ function poll(fn, ms) { clearTimeout(jobTimer); jobTimer = setTimeout(fn, ms); }
 async function loadJobs() { try { JOBS = (await api('jobs')).jobs; } catch (e) { JOBS = { error: e.message }; } }
 function jobsView() {
   if (JOBS === null) { loadJobs().then(() => UI.nav.refresh()); return h('div', {}, ...title('Задачи'), group(null, [h('div', { class: 'skeleton' })])); }
-  if (JOBS.error) return h('div', {}, ...title('Задачи'), h('div', { class: 'notice bad' }, JOBS.error));
+  if (JOBS.error) return h('div', {}, ...title('Задачи'), UI.failed(JOBS.error, () => { JOBS = null; UI.nav.refresh(); }));
   if (JOBS.some(j => ACTIVE_ST.includes(j.status)))
     poll(async () => { if (!document.querySelector('#root .jobs-page')) return; await loadJobs(); UI.nav.refresh(); }, 4000);
   const v = h('div', { class: 'jobs-page' }, ...title('Задачи'));

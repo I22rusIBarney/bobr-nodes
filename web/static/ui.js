@@ -52,9 +52,9 @@
             method, headers: { 'Content-Type': 'application/json', 'X-Init-Data': UI.initData() },
             body: body === undefined ? undefined : JSON.stringify(body),
           });
-        } catch (e) { throw new Error('Нет соединения с сервером. Проверьте интернет и попробуйте снова.'); }
+        } catch (e) { const err = new Error('Нет соединения с сервером. Проверьте интернет и попробуйте снова.'); err.status = 0; throw err; }
         let j = null; try { j = await r.json(); } catch (e) {}
-        if (!r.ok) throw new Error(UI.errText(j, r.status));
+        if (!r.ok) { const err = new Error(UI.errText(j, r.status)); err.status = r.status; throw err; }
         return j;
       };
     },
@@ -75,7 +75,6 @@
         if (v === undefined || v === null || v === false) continue;
         if (k === 'class') n.className = v;
         else if (k === 'style') n.style.cssText = v;
-        else if (k === 'html') n.innerHTML = v;
         else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
         else if (k in n && typeof v !== 'string') n[k] = v;
         else n.setAttribute(k, v === true ? '' : v);
@@ -161,18 +160,30 @@
         b.onclick = () => { if (o.value === value) return; value = o.value; [...wrap.children].forEach((c, i) => c.setAttribute('aria-pressed', String(options[i].value === value))); UI.haptic('select'); onChange(o.value); };
         wrap.append(b);
       });
+      requestAnimationFrame(() => UI.scrollHint(wrap));
       return wrap;
     },
 
     chips(options, value, onChange) {
       const wrap = UI.h('div', { class: 'chips', role: 'group' });
       options.forEach(o => {
-        const b = UI.h('button', { type: 'button', 'aria-pressed': String(o.value === value) }, o.flag ? UI.h('span', { class: 'f', 'aria-hidden': 'true' }, o.flag) : null, o.label);
+        const b = UI.h('button', { type: 'button', 'aria-pressed': String(o.value === value), title: String(o.label).length > 28 ? o.label : null },
+          o.flag ? UI.h('span', { class: 'f', 'aria-hidden': 'true' }, o.flag) : null, UI.h('span', { class: 'l' }, o.label));
         b.onclick = () => { if (o.value === value) return; value = o.value; UI.haptic('select'); onChange(o.value); };
         wrap.append(b);
       });
-      requestAnimationFrame(() => { const on = wrap.querySelector('[aria-pressed="true"]'); if (on && on.offsetLeft + on.offsetWidth > wrap.clientWidth) wrap.scrollLeft = on.offsetLeft - 16; });
+      requestAnimationFrame(() => { const on = wrap.querySelector('[aria-pressed="true"]'); if (on && on.offsetLeft + on.offsetWidth > wrap.clientWidth) wrap.scrollLeft = on.offsetLeft - 16; UI.scrollHint(wrap); });
       return wrap;
+    },
+    /* Горизонтальная лента, которая не помещается: тающий край, пока не докрутили до конца. */
+    scrollHint(el) {
+      const upd = () => { const more = el.scrollWidth > el.clientWidth + 2; el.classList.toggle('more', more); el.classList.toggle('end', more && el.scrollLeft + el.clientWidth >= el.scrollWidth - 2); };
+      upd(); el.addEventListener('scroll', upd, { passive: true });
+    },
+    /* Блок «не загрузилось»: что случилось и «Повторить». */
+    failed(message, retry, what) {
+      return UI.h('div', { class: 'failed', role: 'alert' }, UI.h('p', {}, UI.h('b', {}, what || 'Не удалось загрузить'), message),
+        retry ? UI.h('button', { class: 'btn secondary', type: 'button', onclick: retry }, 'Повторить') : null);
     },
 
     /* Аватар: фото из Telegram, иначе инициалы на цветном круге. src — функция, возвращающая Promise<url|null>. */
@@ -258,7 +269,7 @@
       else fallback();
       function fallback() { const ta = UI.h('textarea', { style: 'position:fixed;opacity:0' }); ta.value = text; document.body.append(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} ta.remove(); }
     },
-    openLink(url) { try { if (tg) return tg.openLink(url); } catch (e) {} window.open(url, '_blank'); },
+    openLink(url) { if (!/^https:\/\//i.test(String(url || ''))) return; try { if (tg) return tg.openLink(url); } catch (e) {} window.open(url, '_blank'); },
 
     /* Переписка: messages [{author, text, created}], mine — какие авторы «свои» (справа). */
     chat(messages, mine, labels) {
@@ -381,6 +392,9 @@
     bell: S('<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>'),
     megaphone: S('<path d="M3 10.5v3a1 1 0 0 0 1 1h2.5L12 18V6L6.5 9.5H4a1 1 0 0 0-1 1z"/><path d="M15.5 9a3.5 3.5 0 0 1 0 6M18.5 6a7.5 7.5 0 0 1 0 12"/>'),
     stack: S('<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>'),
+    up: S('<path d="M12 19V5M6 11l6-6 6 6"/>'),
+    down: S('<path d="M12 5v14M6 13l6 6 6-6"/>'),
+    close: S('<path d="M6 6l12 12M18 6 6 18"/>'),
   };
 
   window.UI = UI;

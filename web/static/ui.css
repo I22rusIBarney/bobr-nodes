@@ -25,11 +25,12 @@
   /* текст */
   --text: #E7E9EC;
   --hint: #969CA6;
-  --hint-2: #686E78;
+  --hint-2: #858B95;        /* 4.8:1 на списках: счётчики, подсказки в полях, шевроны */
 
-  /* акцент — сдержанный сине-фиолетовый; статусы приглушены */
-  --accent: #6F7FF2;
-  --accent-press: #6170DE;
+  /* акцент — сдержанный сине-фиолетовый, общий с Bobr Cloud; статусы приглушены.
+     Заливка кнопок темнее ссылок: белый текст на ней — 4.5:1 */
+  --accent: #5B6BE0;
+  --accent-press: #5060D4;
   --accent-text: #9AA6FF;
   --accent-soft: rgba(111, 127, 242, .14);
   --accent-ring: rgba(128, 144, 255, .6);
@@ -79,6 +80,7 @@ a { color: var(--accent-text); text-decoration: none; }
 .mono { font-family: var(--mono); font-size: 13px; letter-spacing: 0; font-variant-ligatures: none; }
 :focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; border-radius: 6px; }
 ::selection { background: rgba(111, 127, 242, .35); }
+button, [role="button"], .row.tap, .fold { cursor: pointer; touch-action: manipulation; }
 
 /* ── Заголовок экрана ── */
 .nav { display: flex; align-items: center; min-height: 40px; padding: 0 var(--gutter); }
@@ -164,7 +166,7 @@ a { color: var(--accent-text); text-decoration: none; }
 .field select option { background: var(--cell); }
 .field input::placeholder, textarea::placeholder { color: var(--hint-2); }
 .field.stack { flex-direction: column; align-items: stretch; gap: 0; padding-top: 10px; }
-.field.stack > label { font-size: 12px; line-height: 16px; color: var(--hint); font-weight: 500; }
+.field.stack > .lbl { font-size: 12px; line-height: 16px; color: var(--hint); font-weight: 500; }
 .field.stack input, .field.stack textarea { text-align: left; padding: 4px 0 10px; }
 .field.stack input { padding-top: 2px; }
 textarea { width: 100%; border: 0; background: none; outline: none; resize: vertical; min-height: 64px; padding: 6px 0 11px; color: var(--text); line-height: 1.45; }
@@ -201,6 +203,10 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 }
 .chips button[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent-ring); }
 .chips button .f { font-size: 15px; line-height: 1; }
+.chips button .l { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* лента не помещается — край тает: видно, что дальше есть ещё */
+.chips.more, .segmented.more { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - 28px), transparent); }
+.chips.more.end, .segmented.more.end { -webkit-mask-image: none; mask-image: none; }
 
 /* ── Кнопки ── */
 .btn {
@@ -216,8 +222,11 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .btn.danger { background: var(--danger-soft); color: var(--danger); }
 .btn.plain { background: none; color: var(--accent-text); min-height: 40px; font-weight: 500; }
 .btn.plain[disabled] { background: none; }
-.btn.small { min-height: 32px; width: auto; padding: 0 12px; font-size: 13px; border-radius: 8px; font-weight: 500; }
-.icon-btn { border: 0; background: none; color: var(--hint); padding: 8px; margin: -8px -8px -8px 0; cursor: pointer; display: grid; place-items: center; border-radius: 8px; flex: none; }
+.btn.small { min-height: 36px; min-width: 36px; width: auto; padding: 0 12px; font-size: 13px; border-radius: 8px; font-weight: 500; position: relative; }
+/* мелкие кнопки рисуются 36px, а нажимаются на 44px */
+.btn.small::after, .icon-btn::after { content: ""; position: absolute; inset: -4px; }
+.btn.small svg { width: 16px; height: 16px; }
+.icon-btn { border: 0; background: none; color: var(--hint); padding: 9px; margin: -9px -9px -9px 0; cursor: pointer; display: grid; place-items: center; border-radius: 8px; flex: none; position: relative; }
 .icon-btn:active { background: var(--fill); color: var(--text); }
 .icon-btn svg { width: 18px; height: 18px; }
 
@@ -265,12 +274,21 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; background: var(--hint-2); }
 .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--danger); }
 
+/* ── Ошибка загрузки: что случилось и кнопка «Повторить» прямо в блоке ── */
+.failed { margin: 0 var(--gutter) var(--s5); padding: 14px 16px; border-radius: var(--r-group); background: var(--danger-soft); }
+.failed p { margin: 0 0 12px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+.failed p b { display: block; font-weight: 600; margin-bottom: 2px; }
+.failed .btn { width: auto; min-height: 38px; padding: 0 16px; font-size: 14px; }
+
 /* ── Пусто, загрузка ── */
 .empty { padding: 40px 24px; color: var(--hint); text-align: center; }
 .empty b { display: block; color: var(--text); font-size: 17px; font-weight: 600; margin: 0 0 6px; }
 .empty > svg { display: none; }
 .empty .btn { margin-top: 20px; }
-.skeleton { height: 48px; background: linear-gradient(90deg, transparent 0, rgba(255, 255, 255, .035) 50%, transparent 100%); background-size: 200% 100%; animation: sk 1.2s infinite; }
+.skeleton::before, .skeleton::after { content: ""; position: absolute; left: var(--s4); height: 10px; border-radius: 5px; background: rgba(255, 255, 255, .06); }
+.skeleton::before { top: 14px; width: 42%; }
+.skeleton::after { top: 33px; width: 64%; height: 8px; background: rgba(255, 255, 255, .04); }
+.skeleton { position: relative; height: 56px; background: linear-gradient(90deg, transparent 0, rgba(255, 255, 255, .035) 50%, transparent 100%); background-size: 200% 100%; animation: sk 1.2s infinite; }
 @keyframes sk { to { background-position: -200% 0; } }
 
 /* ── Смена экрана: короткое появление в ответ на нажатие ── */
@@ -336,6 +354,7 @@ html.fx-on :is(.large-title, .subtitle, .group-h, .group-f, .empty, .nav) { text
 .tile .sw .plus { position: absolute; inset: 0; display: grid; place-items: center; color: var(--hint); }
 .tile .sw .plus svg { width: 22px; height: 22px; }
 .row .check { width: 18px; height: 18px; color: var(--accent-text); flex: none; }
+.check-slot { width: 18px; height: 18px; flex: none; display: grid; place-items: center; }
 
 /* прозрачность списков поверх фона (настраивается в «Оформлении»): --glass — доля прозрачности 0–.8 */
 html.glass :is(.list, .card) {
