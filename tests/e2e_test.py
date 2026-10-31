@@ -1182,7 +1182,7 @@ async def main():
     ok(oj['status'] == 'done' and oj['data']['server_id'] == own[0] and oj['data']['ip'] == osrv.ip
        and oj['data']['password'] == 'Own1Passw0rdXnl' and set(astra.made) == made0 and bal1 == bal0,
        f'нода на своём сервере: без покупки, IP и пароль из bcloud: {oj["error"]}')
-    ok('Покупка' not in job_text_of(oj) and 'Сервер из bcloud' in job_text_of(oj), 'в карточке задачи нет этапа покупки')
+    ok('Покупка' not in job_text_of(oj) and 'Сервер из Bobr Cloud' in job_text_of(oj), 'в карточке задачи нет этапа покупки')
     st, js = await wapi('deploy', 'POST', {'pid': pid, 'items': [{'location': 'nl', 'servers': [own[0]], 'domains': ['nl51.example.com']}]})
     ok(st == 400 and 'уже нода' in js['detail'], 'сервер с нодой повторно не берётся')
     # из чата: «Уже купленные серверы» → выбрать → домены → установить
