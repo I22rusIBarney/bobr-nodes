@@ -53,8 +53,20 @@ def hub_tags(timeout: float = 10) -> list[str]:
     return tags
 
 
+_pv_cache: dict[str, tuple[float, str]] = {}
+
+
 def panel_version(panel: engine.Panel) -> str:
-    """Версия панели Remnawave, если панель её отдаёт."""
+    """Версия панели Remnawave, если панель её отдаёт (кэш на 10 минут — версия меняется редко)."""
+    hit = _pv_cache.get(panel.url)
+    if hit and time.time() - hit[0] < (600 if hit[1] else 60):
+        return hit[1]
+    v = _panel_version(panel)
+    _pv_cache[panel.url] = (time.time(), v)
+    return v
+
+
+def _panel_version(panel: engine.Panel) -> str:
     for path in ('/api/system/metadata', '/api/metadata'):
         try:
             d = panel.call('GET', path)
