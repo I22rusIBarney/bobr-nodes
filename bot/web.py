@@ -1726,6 +1726,41 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.save_profile({**p, 'auto': a})
         return J({'ok': True, **a})
 
+    # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
+    def wallet_tg(request) -> int:
+        """Чей баланс: у администратора — аккаунт из «Bobr Cloud», у пользователя — его собственный."""
+        tg = int(store.get('bcloud_tg_id') or 0) if is_admin(request) else uid_of(request)
+        if not tg or not (store.get('bcloud_url') and store.get('bcloud_token')):
+            raise ApiError('Bobr Cloud не подключён — задайте адрес, токен и аккаунт в «Bobr Cloud»')
+        return tg
+
+    @r.get('/api/wallet')
+    async def wallet(request):
+        try:
+            o = await bc_ui(store, wallet_tg(request)).topup_options()
+        except BcloudError as e:
+            raise ApiError(str(e)) from None
+        return J({**o, 'account': 'аккаунт из настроек' if is_admin(request) else 'ваш аккаунт'})
+
+    @r.post('/api/wallet/topup')
+    async def wallet_topup(request):
+        b = await body(request)
+        try:
+            amount = int(b.get('amount_rub') or 0)
+        except (TypeError, ValueError):
+            raise ApiError('Сумма — целое число рублей') from None
+        mid = b.get('method_id')
+        if mid is not None and (not isinstance(mid, int) or isinstance(mid, bool)):
+            raise ApiError('Неверный способ оплаты')
+        prov = b.get('provider') if isinstance(b.get('provider'), str) else None
+        try:
+            r = await bc_ui(store, wallet_tg(request)).topup(amount, prov, mid)
+        except BcloudError as e:
+            raise ApiError(str(e).replace('Bobr Cloud 400: ', '')) from None
+        if r.get('url') and not str(r['url']).startswith('https://'):
+            raise ApiError('Bobr Cloud вернул странную ссылку на оплату')
+        return J(r)
+
     @r.get('/api/profiles/{pid}/rent')
     async def rent_get(request):
         p = profile_or_404(request.match_info['pid'], request)

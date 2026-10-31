@@ -120,11 +120,20 @@ class Bcloud:
     async def set_autorenew(self, sid: int, value: bool) -> dict:
         return await self._new_api(self._call('POST', f'/servers/{sid}/autorenew', json={'tg_id': self.tg_id, 'value': bool(value)}))
 
+    async def topup_options(self) -> dict:
+        """Баланс, пределы суммы, способы оплаты и привязанные карты/счета СБП клиента."""
+        return await self._new_api(self._call('GET', '/topup', params={'tg_id': self.tg_id}))
+
+    async def topup(self, amount_rub: int, provider: str | None = None, method_id: int | None = None) -> dict:
+        """Пополнение: {'url'} — оплатить на странице банка, {'status'} — списано привязанным способом."""
+        return await self._new_api(self._call('POST', '/topup', json={'tg_id': self.tg_id, 'amount_rub': int(amount_rub),
+                                                                       'provider': provider, 'method_id': method_id}))
+
     @staticmethod
     async def _new_api(coro):
         try:
             return await coro
         except BcloudError as e:
             if str(e).startswith(('Bobr Cloud 404', 'Bobr Cloud 405')) and str(e).endswith(('Not Found', 'Method Not Allowed')):
-                raise BcloudError('Bobr Cloud не умеет продлевать через API — обновите его: bcloud update') from None
+                raise BcloudError('Bobr Cloud не умеет этого через API — обновите его: bcloud update') from None
             raise

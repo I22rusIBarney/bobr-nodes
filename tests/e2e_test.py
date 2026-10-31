@@ -1514,6 +1514,26 @@ async def main():
        and (await wapi('host', headers=HV))[0] == 403, 'нагрузка сервера — только администратору')
     ok('Сервер бота' in await pilot.summary(1) and 'Сервер бота' not in await pilot.summary(77), 'строка о сервере бота — в сводке администратора')
 
+    # кошелёк: баланс своего аккаунта Bobr Cloud и пополнение
+    st, wv = await wapi('wallet')
+    ok(st == 200 and wv['balance_kop'] >= 0 and wv['providers'] == [] and wv['min_rub'] > 0, f'кошелёк: баланс и пределы: {wv}')
+    st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 500})
+    ok(st == 400 and 'недоступна' in js.get('detail', ''), f'пополнение без платёжки — понятный отказ: {js}')
+
+    class FakeYK:
+        configured = True; enabled = True; calls = []
+        async def create_payment(s, **kw): s.calls.append(kw); return {'id': 'yk-1', 'confirmation': {'confirmation_url': 'https://yoomoney.test/pay/1'}}
+        async def close(s): pass
+    bctx.yk = FakeYK()
+    st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 700})
+    ok(st == 200 and js['url'].startswith('https://') and FakeYK.calls[-1]['metadata']['tg_id'] == 1, f'пополнение администратора — на аккаунт из настроек: {js}')
+    st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 300}, headers=HV)
+    ok(st == 200 and FakeYK.calls[-1]['metadata']['tg_id'] == 77, 'пользователь пополняет только свой баланс')
+    ok((await wapi('wallet/topup', 'POST', {'amount_rub': 'x'}))[0] == 400 and (await wapi('wallet/topup', 'POST', {'amount_rub': 500, 'method_id': '1'}))[0] == 400,
+       'кривая сумма или способ — отказ')
+    st, wv = await wapi('wallet', headers=HV)
+    ok(st == 200 and [x['code'] for x in wv['providers']] == ['yookassa'] and wv['account'] == 'ваш аккаунт', 'кошелёк пользователя — его аккаунт')
+
     # удалить ноду из панели: нода, её хосты и DNS; со входами через Россию — отказ
     st, L = await wapi(f'profiles/{pid}/nodes')
     relayed = {x['node_uuid'] for x in store.relays() if x['pid'] == pid}

@@ -160,7 +160,7 @@ function heroImg(key, cls) {
 function home() {
   const v = h('div', { class: 'home-page' }, h('div', { class: 'appbar' },
     h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Все разделы', onclick: allSections }, icon('menu')),
-    h('div', { class: 'ttl' }, h('span', { class: 'brand' }, svgEl(BRAND), 'Bobr Nodes')), bellBtn()));
+    h('span', { class: 'brand' }, svgEl(BRAND), h('span', { class: 'bt' }, 'Bobr Nodes')), h('div', { class: 'sp' }), ST && !ST.error ? walletChip() : null, bellBtn()));
   if (!ST) {
     v.append(h('div', { 'aria-busy': 'true', 'aria-label': 'Загрузка' }, h('div', { class: 'hero skeleton', style: 'background-color:var(--cell)' }),
       h('div', { class: 'stats' }, [1, 2, 3].map(() => h('div', { class: 'stat skeleton', style: 'height:72px' }))),
@@ -214,6 +214,63 @@ function home() {
   }
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Статус сервисов',
     h('button', { class: 'more', type: 'button', onclick: () => UI.nav.setTab('settings') }, 'Настройки', icon('chevron'))), group(null, serviceRows()).lastChild));
+  return v;
+}
+// ───────── кошелёк: баланс Bobr Cloud и пополнение ─────────
+let WAL = null, walAt = 0;
+function loadWallet(force) {
+  if (!force && WAL && !WAL.error && Date.now() - walAt < 60000) return;
+  if (WAL === undefined) return;  // уже грузится
+  const had = WAL; WAL = undefined;
+  api('wallet').then(r => { WAL = r; walAt = Date.now(); }).catch(e => { WAL = had && !had.error ? had : { error: e.message }; })
+    .then(() => { if (document.querySelector('#root .home-page, #root .wallet-page, #root .settings-page')) UI.nav.refresh(); });
+}
+const walletText = () => WAL && !WAL.error && WAL.balance_kop != null ? rubK(WAL.balance_kop) : WAL && WAL.error ? '—' : '…';
+function walletChip() {
+  if (WAL === null) loadWallet();
+  return h('button', { class: 'wallet-chip', type: 'button', 'aria-label': 'Баланс Bobr Cloud: ' + walletText() + '. Пополнить', onclick: () => UI.nav.push(walletView) },
+    icon('wallet'), h('span', { class: 'num' }, walletText()));
+}
+// вернулись из оплаты в браузере — баланс мог измениться
+document.addEventListener('visibilitychange', () => { if (!document.hidden && WAL && !WAL.error) loadWallet(true); });
+const TOPUP = { amount: 1000, how: null, custom: '' };
+function walletView() {
+  if (WAL === null) loadWallet();
+  const v = h('div', { class: 'wallet-page' }, ...head('Баланс', { sub: 'Bobr Cloud · ' + (WAL && WAL.account ? WAL.account : 'ваш аккаунт'),
+    menu: [{ text: 'Обновить баланс', icon: 'restart', color: 'blue', fn: () => loadWallet(true) }] }));
+  if (!WAL) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton', style: 'height:110px' })]))); return v; }
+  if (WAL.error) { v.append(UI.failed(WAL.error, () => { WAL = null; UI.nav.refresh(); }, 'Баланс не загрузился')); return v; }
+  v.append(h('section', { class: 'group' }, h('div', { class: 'balance-card' }, h('span', {}, 'На балансе'), h('b', { class: 'num' }, rubK(WAL.balance_kop)),
+    h('span', {}, 'С него покупаются и продлеваются серверы групп.'))));
+  const ways = [...WAL.methods.map(m => ({ value: 'm' + m.id, label: m.title || ('•• ' + (m.last4 || '')), sub: [m.bank, 'без страницы банка'].filter(Boolean).join(' · ') })),
+    ...WAL.providers.map(p => ({ value: 'p:' + p.code, label: p.label, sub: 'откроется страница оплаты' }))];
+  if (!ways.length) { v.append(h('div', { class: 'notice' }, h('b', {}, 'Пополнение сейчас недоступно. '), 'В Bobr Cloud не включён ни один способ оплаты.')); return v; }
+  if (!ways.some(w => w.value === TOPUP.how)) TOPUP.how = ways[0].value;
+  const presets = [500, 1000, 2000, 5000].filter(x => x >= WAL.min_rub && x <= WAL.max_rub);
+  const amount = () => TOPUP.custom ? parseInt(TOPUP.custom, 10) || 0 : TOPUP.amount;
+  const go = h('button', { class: 'btn', type: 'button' });
+  const label = () => { const a = amount(); go.replaceChildren(icon('wallet'), a ? `Пополнить на ${UI.rub(a)}` : 'Введите сумму'); go.disabled = !a; };
+  const sum = h('input', { type: 'text', inputmode: 'numeric', placeholder: `Своя сумма, от ${WAL.min_rub} до ${WAL.max_rub} ₽`, 'aria-label': 'Своя сумма' });
+  sum.value = TOPUP.custom;
+  sum.addEventListener('input', () => { sum.value = sum.value.replace(/\D/g, '').slice(0, 7); TOPUP.custom = sum.value; chips.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(!TOPUP.custom && +b.dataset.v === TOPUP.amount))); label(); });
+  const chips = h('div', { class: 'days', style: `grid-template-columns:repeat(${presets.length},1fr)` }, presets.map(x => h('button', { type: 'button', 'data-v': x, 'aria-pressed': String(!TOPUP.custom && TOPUP.amount === x),
+    onclick: () => { TOPUP.amount = x; TOPUP.custom = ''; sum.value = ''; chips.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.v === x))); UI.haptic('select'); label(); } }, UI.rub(x))));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сумма'), h('div', { class: 'list' }, h('div', { class: 'seg-row' }, chips), h('div', { class: 'seg-row sepd', style: 'padding-top:12px' }, h('div', { class: 'inbox' }, sum, h('span', { style: 'color:var(--hint);padding-right:10px' }, '₽'))))));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Способ оплаты'), h('div', { class: 'list' }, choiceRows(ways, TOPUP.how, x => { TOPUP.how = x; }))));
+  label();
+  go.onclick = UI.busy(go, async () => {
+    const a = amount();
+    if (a < WAL.min_rub || a > WAL.max_rub) return UI.toast(`Сумма — от ${WAL.min_rub} до ${WAL.max_rub} ₽`, true);
+    const saved = TOPUP.how.startsWith('m');
+    if (saved && !(await UI.ask({ title: `Списать ${UI.rub(a)}?`, message: 'Деньги спишутся привязанным способом без страницы банка и придут на баланс Bobr Cloud.', buttons: [{ id: 'y', text: 'Списать' }] }))) return;
+    const r = await UI.run(() => api('wallet/topup', 'POST', saved ? { amount_rub: a, method_id: +TOPUP.how.slice(1) } : { amount_rub: a, provider: TOPUP.how.slice(2) }));
+    if (!r) return;
+    if (r.url) { UI.openLink(r.url); UI.toast('Оплатите на странице банка — баланс обновится сам'); }
+    else if (r.status === 'succeeded') { UI.toast('Баланс пополнен'); loadWallet(true); }
+    else UI.toast('Платёж обрабатывается — баланс обновится через минуту');
+    setTimeout(() => loadWallet(true), 15000);
+  });
+  v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Платёж принимает Bobr Cloud — чек и история пополнений там же.')));
   return v;
 }
 const statTile = (n, label, tone) => h('div', { class: 'stat' }, h('b', { class: tone || null }, String(n)), h('span', {}, label));
@@ -2291,10 +2348,12 @@ function toolsView() {
   return v;
 }
 function settingsTab() {
-  const v = h('div', {}, ...head('Настройки'));
+  const v = h('div', { class: 'settings-page' }, ...head('Настройки'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin();
+  if (WAL === null) loadWallet();
   v.append(group('Для вас', [
+    row({ icon: 'wallet', color: 'green', title: 'Баланс Bobr Cloud', sub: 'пополнить картой или СБП', detail: walletText(), onClick: () => UI.nav.push(walletView) }),
     row({ icon: 'sun', color: 'amber', title: 'Утренняя сводка', sub: 'итог по группам раз в день', onClick: () => { SUM = null; UI.nav.push(summaryView); } }),
     row({ icon: 'palette', color: 'pink', title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })],
     admin ? null : 'Серверы покупаются с вашего баланса в Bobr Cloud, домены — вашим токеном Cloudflare.'));

@@ -397,7 +397,14 @@
       refresh() { this.render(null); },
       render(isPop) {
         const fn = this.stack.length ? this.stack[this.stack.length - 1] : this._onRoot;
-        const node = fn();
+        let node;
+        // экран упал — показываем, что случилось, а не молча остаёмся на прежнем
+        try { node = fn(); } catch (e) {
+          console.error(e);
+          node = UI.h('div', {}, UI.h('h1', { class: 'large-title' }, 'Экран не открылся'),
+            UI.failed(String((e && e.message) || e) + (e && e.stack ? '\n' + String(e.stack).split('\n').slice(0, 2).join('\n') : ''),
+              this.stack.length ? () => this.back() : () => this.refresh(), 'Ошибка интерфейса'));
+        }
         const v = UI.h('div', { class: isPop === null ? '' : 'view' + (isPop === 'tab' ? ' tab' : isPop ? ' pop' : '') }, node);
         this.root.replaceChildren(v);
         document.body.classList.toggle('has-composer', !!v.querySelector('.composer'));
@@ -495,6 +502,18 @@
     calendar: S('<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>'),
     flag: S('<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>'),
   };
+
+  // необработанные ошибки — коротким сообщением: иначе кнопка «молча не нажимается»
+  let lastErr = 0;
+  const report = msg => { if (Date.now() - lastErr < 3000) return; lastErr = Date.now(); try { UI.toast('Ошибка: ' + String(msg).slice(0, 140), true); } catch (e) {} };
+  window.addEventListener('error', e => report(e.message || 'сбой скрипта'));
+  // касание пришлось не на интерфейс (что-то прозрачное поверх) — назвать перехватчика, чтобы найти и убрать
+  document.addEventListener('click', e => {
+    const t = e.target;
+    if (!(t instanceof Element) || t === document.body || t === document.documentElement || t.closest('#root, .tabbar, .sheet, .dlg, .scrim, .toast, .composer')) return;
+    report('касание перехватил ' + t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + (t.className && typeof t.className === 'string' ? '.' + t.className.trim().split(/\s+/).join('.') : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', e => report((e.reason && e.reason.message) || e.reason || 'сбой'));
 
   window.UI = UI;
 })();

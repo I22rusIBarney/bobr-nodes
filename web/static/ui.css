@@ -350,8 +350,7 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 
 /* ── Нижняя панель разделов ── */
 .tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; justify-content: space-around; align-items: stretch;
-  height: calc(var(--tabbar) + var(--sab)); padding: 0 8px var(--sab); background: color-mix(in srgb, var(--bg) 92%, transparent);
-  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px); border-top: 1px solid var(--line); }
+  height: calc(var(--tabbar) + var(--sab)); padding: 0 8px var(--sab); background: #0F1219; border-top: 1px solid var(--line); }
 .tabbar button { flex: 1; max-width: 120px; border: 0; background: none; color: var(--hint-2); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; font-size: 11px; font-weight: 500; position: relative; }
 .tabbar button svg { width: 24px; height: 24px; }
 .tabbar button[aria-current="page"] { color: var(--accent-text); }
@@ -441,7 +440,7 @@ body.has-composer .tabbar { display: none; }
 
 /* ── Ошибка загрузки: что случилось и «Повторить» ── */
 .failed { margin: 0 var(--gutter) var(--s5); padding: 16px; border-radius: var(--r-group); background: var(--danger-soft); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 25%, transparent); }
-.failed p { margin: 0 0 12px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
+.failed p { margin: 0 0 12px; font-size: 14px; line-height: 20px; overflow-wrap: anywhere; white-space: pre-line; }
 .failed p b { display: block; font-weight: 600; margin-bottom: 2px; }
 .failed .btn { width: auto; min-height: 40px; padding: 0 16px; font-size: 14px; }
 
@@ -551,4 +550,17 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .avatar img { width: 100%; height: 100%; object-fit: cover; }
 .hero .st { align-items: flex-start; }
 .hero .st::before { margin-top: 6px; }
-@media (min-width: 960px) { .home-page > .appbar .ttl, .home-page > .appbar > .round-btn:first-child { visibility: hidden; } }
+@media (min-width: 960px) { .home-page > .appbar .brand, .home-page > .appbar > .round-btn:first-child { display: none; } }
+
+/* кошелёк в шапке главной */
+.appbar .brand { margin-left: 2px; }
+.wallet-chip { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px 0 10px; border: 0; border-radius: 18px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--text); font-size: 14px; font-weight: 600; white-space: nowrap; position: relative; }
+.wallet-chip::after { content: ""; position: absolute; inset: -4px; }
+.wallet-chip svg { width: 18px; height: 18px; color: var(--ok); }
+.wallet-chip:active { background: var(--surface-2); }
+.balance-card { background: radial-gradient(120% 140% at 100% 0%, rgba(61, 203, 127, .16), transparent 60%), var(--cell); border-radius: var(--r-group); box-shadow: inset 0 0 0 1px var(--line); padding: 18px 16px; }
+.balance-card span { display: block; font-size: 13px; color: var(--hint); }
+.balance-card b { display: block; font-size: 32px; line-height: 40px; font-weight: 650; letter-spacing: -0.03em; margin: 2px 0 6px; }
+.brand { white-space: nowrap; }
+@media (max-width: 379px) { .appbar .brand .bt { display: none; } }
