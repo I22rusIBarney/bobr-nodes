@@ -55,15 +55,28 @@ def test_healthy():
     assert M.Monitor.healthy([off, off, on]) and not M.Monitor.healthy(None)
 
 
-def test_node_hosts_and_skip():
-    nodes = [{'address': '201.10.91.118'}, {'address': 'de.example.com'}]
-    hosts = [{'address': 'pl.example.com'}, {'address': 'pl2.example.com'}, {'address': 'cdn-pl.example.com'},
-             {'address': 'vk.com'}, {'address': 'de.example.com'}, {'address': 'off.example.com', 'isDisabled': True}]
-    dns = {'pl.example.com': {'201.10.91.118'}, 'pl2.example.com': {'201.10.91.118'}, 'cdn-pl.example.com': {'104.16.0.1'},
-           'vk.com': {'87.240.0.1'}, 'de.example.com': {'198.51.100.7'}, 'off.example.com': {'201.10.91.118'}}
-    m = M.Monitor.node_hosts(nodes, hosts, dns, {})
-    assert m['201.10.91.118'] == {'201.10.91.118', 'pl.example.com', 'pl2.example.com'}  # нода по IP — хосты по домену
-    assert m['de.example.com'] == {'de.example.com'}  # CDN, подменный адрес и выключенный хост — ни к кому
+def test_assign_hosts():
+    pl = {'uuid': 'n-pl', 'address': '201.10.91.118', 'configProfile': {'activeInbounds': ['i-pl']}}
+    ee = {'uuid': 'n-ee', 'address': 'ee.example.com', 'configProfile': {'activeInbounds': ['i-ee', 'i-ee-xh', 'i-ws']}}
+    ya = {'uuid': 'n-ya', 'address': '203.0.113.9', 'configProfile': {'activeInbounds': ['i-ya']}}
+    H = lambda a, inb, **kw: {'uuid': a, 'address': a, 'port': 443, 'inbound': {'configProfileInboundUuid': inb}, **kw}  # noqa: E731
+    hosts = [H('pl.example.com', 'i-pl'), H('pl2.example.com', 'i-pl'),
+             H('cdn-ee.example.com', 'i-ee-xh'),                       # CDN: адрес другой, inbound — эстонский
+             H('vk.com', 'i-ws', xrayJsonTemplateUuid='t-bal'),         # балансировщик Poland на эстонском inbound
+             H('full.example.com', 'i-yacdn', nodes=['n-ya']),          # явная привязка «Ноды»
+             H('188.68.218.46', 'i-arenda', remark='Обход 3'),          # хост без ноды: свой xray.json
+             H('off.example.com', 'i-pl', isDisabled=True)]
+    dns = {'pl.example.com': {'201.10.91.118'}, 'pl2.example.com': {'201.10.91.118'}, 'cdn-ee.example.com': {'104.16.0.1'},
+           'ee.example.com': {'198.51.100.7'}, 'full.example.com': {'87.250.0.1'}}
+    out, loose = M.Monitor.assign([pl, ee, ya], hosts, dns, {}, {'t-bal'})
+    got = {k: sorted((h['address'], d) for h, d in v) for k, v in out.items()}
+    assert got['201.10.91.118'] == [('pl.example.com', True), ('pl2.example.com', True)]  # нода по IP — хосты по домену
+    assert got['ee.example.com'] == [('cdn-ee.example.com', False)]  # CDN — к своей ноде, не прямой вход
+    assert got['203.0.113.9'] == [('full.example.com', False)]
+    assert [h['address'] for h in loose] == ['188.68.218.46']  # балансировщик и выключенный — ни к кому
+
+
+def test_skip():
     assert M.Monitor.skip_group('🌀 АВТО-ВЫБОР', M.SKIP_DEFAULT) and not M.Monitor.skip_group('Poland', M.SKIP_DEFAULT)
     assert not M.Monitor.skip_group('', M.SKIP_DEFAULT) and not M.Monitor.skip_group('АВТО-ВЫБОР', '')
     assert M.clean_settings({'mon_skip': ' NORMAL ,, авто '}, {}, [])['mon_skip'] == 'NORMAL, авто'

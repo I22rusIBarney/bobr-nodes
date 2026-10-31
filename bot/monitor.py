@@ -277,66 +277,128 @@ class Monitor:
         return bool(g) and any(w.strip().lower() in g for w in (skip or '').split(',') if w.strip())
 
     @staticmethod
-    def node_hosts(nodes: list[dict], hosts: list[dict], dns: dict[str, set[str]], bj: dict) -> dict[str, set[str]]:
-        """Адрес ноды → адреса, по которым к ней подключаются: сам адрес ноды, домен и IP из задачи бота и хосты панели,
-        чей адрес — это нода или указывает на её IP. Хосты через CDN и балансировщики с подменным адресом (vk.com)
-        ни на одну ноду не указывают — их не берём."""
+    def assign(nodes: list[dict], hosts: list[dict], dns: dict[str, set[str]], bj: dict,
+               injectors: set[str]) -> tuple[dict[str, list[tuple[dict, bool]]], list[dict]]:
+        """Хосты панели → ноды. Порядок правил: «Ноды» хоста (явная привязка) → inbound хоста активен на ноде
+        (если на нескольких — та, на чей IP указывает адрес) → адрес хоста — это нода или указывает на её IP.
+        Возвращает: адрес ноды → [(хост, прямой ли вход)] и хосты без нод (свой профиль, xray.json и сервер не в панели).
+        Прямой вход — адрес хоста ведёт на саму ноду; иначе это CDN или посредник.
+        Хосты-балансировщики (шаблон с injectHosts) ни к кому не относятся: их хосты проверяются по отдельности."""
         def ips(a: str) -> set[str]:
             return {a} if engine.is_ip(a) else set(dns.get(a) or ())
-        out, ip_of = {}, {}
+        by_uuid = {n['uuid']: n for n in nodes}
+        alias, node_ips = {}, {}
         for n in nodes:
             al = {n['address']}
             d = bj.get(n['address'])
             if d:
                 al |= {d.get('ip') or '', d.get('domain') or ''} - {''}
-            out[n['address']] = al
-            for a in list(al):
-                for ip in ips(a):
-                    ip_of.setdefault(ip, n['address'])
+            alias[n['address']] = al
+            node_ips[n['address']] = set().union(*(ips(a) for a in al))
+        by_inbound: dict[str, list[dict]] = {}
+        for n in nodes:
+            for i in engine.active_inbounds(n):
+                by_inbound.setdefault(i, []).append(n)
+
+        def points_to(h: dict, n: dict) -> bool:
+            a = h.get('address') or ''
+            return a in alias[n['address']] or bool(ips(a) & node_ips[n['address']])
+
+        out: dict[str, list[tuple[dict, bool]]] = {n['address']: [] for n in nodes}
+        loose = []
         for h in hosts:
             a = h.get('address') or ''
-            if not a or h.get('isDisabled') or a.startswith(engine.CDN_PREFIX):
+            if not a or h.get('isDisabled') or h.get('xrayJsonTemplateUuid') in injectors:
                 continue
-            owner = next((k for k, al in out.items() if a in al), None) or next((ip_of[ip] for ip in ips(a) if ip in ip_of), None)
-            if owner:
-                out[owner].add(a)
-        return out
+            pinned = [by_uuid[x] for x in (h.get('nodes') or []) if isinstance(x, str) and x in by_uuid] + \
+                [by_uuid[x['uuid']] for x in (h.get('nodes') or []) if isinstance(x, dict) and x.get('uuid') in by_uuid]
+            if pinned:
+                owners = pinned
+            else:
+                cand = by_inbound.get(str(((h.get('inbound') or {}).get('configProfileInboundUuid')) or ''), [])
+                if len(cand) > 1:
+                    cand = [n for n in cand if points_to(h, n)] or []
+                owners = cand or [n for n in nodes if points_to(h, n)][:1]
+            if not owners:
+                loose.append(h)
+            for n in owners:
+                out[n['address']].append((h, points_to(h, n) and not a.startswith(engine.CDN_PREFIX)))
+        return out, loose
+
+    @staticmethod
+    def _norm(s) -> str:
+        return ' '.join(str(s or '').split()).casefold()
 
     def votes(self, prof: dict, results: dict, nodes: list[dict], hosts: list[dict] | None = None,
-              dns: dict[str, set[str]] | None = None) -> dict[str, dict]:
-        """Адрес ноды → {data, fail, uuid, name, connected, hosts}: сколько исправных чекеров видят её хосты и у скольких
-        не проходит ни один. Хосты через CDN не считаются: нода жива, если проходит хоть один прямой вход.
+              dns: dict[str, set[str]] | None = None, injectors: set[str] | None = None) -> dict[str, dict]:
+        """Ключ → состояние по чекерам. Нода: голосуют её прямые входы, а если их нет в подписке — входы через CDN;
+        нода «не проходит» у чекера, если не прошёл ни один. Хост без ноды (свой xray.json): его проверки —
+        по названию хоста (группа или имя в подписке) или адресу; «не проходит», если не прошла ни одна.
         Группы общего балансировщика (настройка «не проверять») пропускаются."""
-        name = ck.sub_name(prof['id'])
+        sub = ck.sub_name(prof['id'])
         skip = settings_of(prof)['mon_skip']
         bj = svc.bot_jobs_by_ip(self.store, prof['id'])
-        addrs = self.node_hosts(nodes, hosts or [], dns or {}, bj)
-        out = {}
-        for pos, n in enumerate(nodes):
-            aliases = addrs[n['address']]
+        mine_all = {cid: [p for p in res if p.get('subName') == sub and not self.skip_group(p.get('groupName'), skip)]
+                    for cid, res in results.items() if self.healthy(res)}
+        assigned, loose = self.assign(nodes, hosts or [], dns or {}, bj, injectors or set())
+
+        def by_addr(hs: list[dict], ps: list[dict]) -> list[dict]:
+            keys = {(h.get('address'), int(h.get('port') or 0)) for h in hs}
+            addrs = {h.get('address') for h in hs}
+            return [p for p in ps if (p.get('server'), int(p.get('port') or 0)) in keys
+                    or (p.get('server') in addrs and not p.get('port'))]
+
+        def tally(pick) -> dict:
             data = fail = 0
-            for res in results.values():
-                if not self.healthy(res):
-                    continue
-                mine = [p for p in res if p.get('subName') == name and p.get('server') in aliases and p.get('lastCheck')
-                        and not str(p.get('server') or '').startswith(engine.CDN_PREFIX)
-                        and not self.skip_group(p.get('groupName'), skip)]
-                if not mine:
+            up = total = 0
+            for ps in mine_all.values():
+                got = [p for p in pick(ps) if p.get('lastCheck')]
+                if not got:
                     continue
                 data += 1
-                if not any(p.get('online') for p in mine):
-                    fail += 1
-            out[n['address']] = {'data': data, 'fail': fail, 'uuid': n['uuid'], 'name': n.get('name') or n['address'],
+                ok_n = sum(1 for p in got if p.get('online'))
+                fail += 0 if ok_n else 1
+                if len(got) > total:
+                    up, total = ok_n, len(got)
+            return {'data': data, 'fail': fail, 'up': up, 'total': total}
+
+        out = {}
+        for pos, n in enumerate(nodes):
+            hs = assigned[n['address']]
+            direct = [h for h, d in hs if d]
+            indirect = [h for h, d in hs if not d]
+
+            def pick(ps, direct=direct, indirect=indirect):
+                got = by_addr(direct, ps)
+                return got or by_addr(indirect, ps)
+            out[n['address']] = {'kind': 'node', **tally(pick), 'uuid': n['uuid'], 'name': n.get('name') or n['address'],
                                  'connected': bool(n.get('isConnected')), 'country': n.get('countryCode') or '', 'pos': pos,
-                                 'hosts': sorted(aliases - {n['address']} - {a for a in aliases if engine.is_ip(a)})}
+                                 'online_users': n.get('usersOnline'),
+                                 'hosts': [h.get('address') for h in direct if h.get('address') != n['address']],
+                                 'cdn_hosts': sorted({h.get('address') for h in indirect})}
+        for i, h in enumerate(loose):
+            name = self._norm(h.get('remark'))
+
+            def pick(ps, h=h, name=name):
+                return [p for p in ps if name and (self._norm(p.get('groupName')) == name or self._norm(p.get('name')) == name)] \
+                    or by_addr([h], ps)
+            out['host:' + h['uuid']] = {'kind': 'host', **tally(pick), 'uuid': h['uuid'], 'name': h.get('remark') or h['address'],
+                                        'connected': True, 'country': '', 'pos': 10000 + i, 'hosts': [], 'cdn_hosts': [],
+                                        'address': h.get('address')}
         return out
 
     async def check_group(self, prof: dict, results: dict) -> None:
         panel = engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''))
         nodes = await asyncio.to_thread(panel.call, 'GET', '/api/nodes')
         hosts = await asyncio.to_thread(panel.call, 'GET', '/api/hosts')
+        try:
+            tpls = await asyncio.to_thread(panel.templates)
+        except engine.StepError:
+            tpls = []
+        injectors = {t['uuid'] for t in tpls if isinstance(t.get('templateJson'), dict)
+                     and ((t['templateJson'].get('remnawave') or {}).get('injectHosts'))}
         dns = await asyncio.to_thread(resolve_all, {n['address'] for n in nodes} | {h.get('address') or '' for h in hosts})
-        votes = self.votes(prof, results, nodes, hosts, dns)
+        votes = self.votes(prof, results, nodes, hosts, dns, injectors)
         cfg = settings_of(prof)
         now = time.time()
         seen = set()
@@ -344,8 +406,9 @@ class Monitor:
             key = f'{prof["id"]}:{addr}'
             seen.add(key)
             st = self.store.mon(key) or {'status': 'ok', 'fails': 0}
-            st.update(uuid=v['uuid'], name=v['name'], addr=addr, data=v['data'], fail=v['fail'], pos=v['pos'], hosts=v['hosts'],
-                      connected=v['connected'], country=v['country'], checked_at=int(now))
+            st.update(uuid=v['uuid'], name=v['name'], addr=v.get('address') or addr, data=v['data'], fail=v['fail'], pos=v['pos'],
+                      hosts=v['hosts'], cdn_hosts=v['cdn_hosts'], kind=v['kind'], up=v['up'], total=v['total'],
+                      online_users=v.get('online_users'), connected=v['connected'], country=v['country'], checked_at=int(now))
             down = v['data'] > 0 and v['fail'] * 2 > v['data']
             if v['data'] == 0:  # ни один исправный чекер ноду не видит — нет данных, ничего не решаем
                 self.store.set_mon(key, st)
@@ -361,7 +424,7 @@ class Monitor:
                 st.update(status='down', since=int(now), tok=secrets.token_hex(4), steps_done=[])
                 self.store.set_mon(key, st)
                 await self.alert(prof, st, cfg)
-                if cfg['mon_mode'] == 'auto':
+                if cfg['mon_mode'] == 'auto' and st.get('kind', 'node') == 'node':
                     st = self.store.mon(key)
                     await self.start_repair(prof, st)
                 continue
@@ -396,6 +459,11 @@ class Monitor:
         why = f'не проходит проверку у {st["fail"]} из {st["data"]} чекеров в России уже {st["fails"] * self.every // 60} мин'
         why += '' if st.get('connected') else '; с панелью тоже нет связи — похоже, сервер лежит'
         text = f'🔴 {self.head(prof, st)}\n{why}.'
+        if st.get('kind') == 'host':  # свой сервер с xray.json: починить его бот не может — только сообщает
+            if st.get('total'):
+                text += f'\nИз {st["total"]} выходов хоста не прошёл ни один.'
+            return await self.say(text + '\n\nЭто хост без ноды (свой xray.json) — бот его не чинит.',
+                                  kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]))
         steps = [STEP_LABEL[s] for s in cfg['mon_steps']]
         if cfg['mon_mode'] == 'auto':
             text += '\n\nЧиню по шагам: ' + (', '.join(steps) if steps else 'шагов не выбрано') + '.'
@@ -437,6 +505,8 @@ class Monitor:
             st['status'] = 'ignored'
             self.store.set_mon(key, st)
             return 'Не трогаю, пока нода не оживёт'
+        if st.get('kind') == 'host':
+            return 'Хост без ноды бот не чинит — только сообщает'
         if st.get('status') == 'repairing':
             return 'Починка уже идёт'
         st['steps_done'] = [x for x in STEPS if x != 'replace'] if what == 'replace' else []
