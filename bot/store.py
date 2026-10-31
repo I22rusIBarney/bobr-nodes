@@ -242,6 +242,8 @@ class Store:
             data = json.loads(r['data'])
             if data.get('removed'):  # сервер удалён, A-запись снята — имя снова свободно
                 continue
+            if data.get('kind') in ('node', 'reip', 'upgrade'):  # задачи по готовой ноде: домен считается по её покупке
+                continue
             d = data.get('domain')
             if d:
                 out.add(d.lower())
