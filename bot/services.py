@@ -52,10 +52,10 @@ def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
 def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict:
     """Доступ для задачи: сохранённый, иначе — пароль из задачи покупки."""
     saved = runner.ssh_of(pid, uuid)
-    if saved.get('mode'):
+    if saved:
         return saved
     d = bot_jobs_by_ip(store, pid).get(ip)
-    return {'mode': 'password', 'user': 'root', 'port': 22, 'password': d.get('password', '')} if d else {}
+    return {'user': 'root', 'port': 22, 'password': d.get('password', ''), 'key': ''} if d else {}
 
 
 def cf_for(store: Store, prof: dict) -> engine.Cloudflare:

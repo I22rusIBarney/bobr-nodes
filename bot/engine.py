@@ -14,6 +14,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import socket
 import subprocess
 import threading
@@ -1006,10 +1007,28 @@ def forget_host(known_hosts: str, host: str) -> None:
         pass
 
 
+SUDO_PROMPT = '[bnodes-sudo] '
+READY = '__BN_READY__'
+
+
 class Remote:
+    """Команды на сервере по SSH. Вход: пароль, ключ или оба сразу; не-root пользователь — через sudo
+    (пароль sudo — sudo_password, иначе пароль SSH). Все запросы входа обрабатываются здесь, до начала команды:
+    команда сначала печатает READY, и только после него её вывод отдаётся дальше."""
+
     def __init__(self, node: dict, logfile):
         self.n = node
         self.logfile = logfile
+
+    @property
+    def sudo(self) -> bool:
+        return (self.n.get('ssh_user') or 'root') != 'root'
+
+    def wrap(self, cmd: str, tty: bool) -> str:
+        inner = f'echo {READY}; {cmd}'
+        if not self.sudo:
+            return inner
+        return f"sudo {'' if tty else '-S '}-p '{SUDO_PROMPT}' -- bash -c {shlex.quote(inner)}"
 
     def argv(self, cmd, tty):
         n = self.n
@@ -1020,41 +1039,70 @@ class Remote:
         a = ['-tt' if tty else '-T', *hk, '-o', 'LogLevel=ERROR',
              '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20',
              '-p', str(n.get('ssh_port') or 22)]
-        if n.get('ssh_key'):
-            a += ['-i', os.path.expanduser(n['ssh_key']), '-o', 'IdentitiesOnly=yes']
+        if n.get('ssh_key'):  # ключ — и, если задан, ещё пароль (сервер может требовать оба)
+            a += ['-i', os.path.expanduser(n['ssh_key']), '-o', 'IdentitiesOnly=yes', '-o',
+                  'PreferredAuthentications=publickey' + (',password,keyboard-interactive' if n.get('ssh_password') else '')]
         elif n.get('ssh_password'):
             a += ['-o', 'PubkeyAuthentication=no', '-o', 'PreferredAuthentications=password,keyboard-interactive']
         return a + [f'{n.get("ssh_user") or "root"}@{n["ip"]}', cmd]
 
     def spawn(self, cmd, tty, timeout):
-        child = pexpect.spawn('ssh', self.argv(cmd, tty), encoding='utf-8', codec_errors='replace',
-                              timeout=timeout, dimensions=(50, 120))
+        # echo=False: пароль sudo без TTY уходит через stdin ssh — локальное эхо отдало бы его в журнал
+        child = pexpect.spawn('ssh', self.argv(self.wrap(cmd, tty), tty), encoding='utf-8', codec_errors='replace',
+                              timeout=timeout, dimensions=(50, 120), echo=tty)
         child.logfile_read = self.logfile
+        self.login(child, min(timeout, 90))
         return child
 
-    def run(self, cmd, timeout=120):
-        child = self.spawn(cmd, False, timeout)
-        out = []
-        sent_pw = False
+    def login(self, child, timeout: float) -> None:
+        """Пароль SSH, пароль sudo — до READY; дальше вывод принадлежит команде."""
+        user = self.n.get('ssh_user') or 'root'
+        sent_pw = sent_sudo = False
+        pats = [r'(?i)enter passphrase for', r'(?i)password:', re.escape(SUDO_PROMPT.strip()), READY, pexpect.EOF, pexpect.TIMEOUT]
         while True:
-            i = child.expect([r'(?i)password:', pexpect.EOF, pexpect.TIMEOUT])
-            out.append(child.before or '')
+            i = child.expect(pats, timeout=timeout)
             if i == 0:
+                child.close(force=True)
+                raise StepError('SSH-ключ защищён парольной фразой — такой ключ бот не использует')
+            if i == 1:
                 if not self.n.get('ssh_password') or sent_pw:
                     child.close(force=True)
                     raise StepError('SSH не принял пароль' if sent_pw else 'SSH спрашивает пароль, а он не задан')
                 child.sendline(self.n['ssh_password'])
                 sent_pw = True
-                out.clear()
                 continue
             if i == 2:
-                child.close(force=True)
-                raise StepError(f'таймаут команды: {cmd[:60]}')
-            break
+                pw = self.n.get('sudo_password') or self.n.get('ssh_password')
+                if not pw or sent_sudo:
+                    child.close(force=True)
+                    raise StepError('sudo не принял пароль' if sent_sudo else
+                                    f'sudo для {user} спрашивает пароль — укажите пароль sudo')
+                child.sendline(pw)
+                sent_sudo = True
+                continue
+            if i == 3:
+                return
+            text = strip_ansi(child.before or '')
+            child.close(force=True)
+            if 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text or 'Host key verification failed' in text:
+                raise StepError(HOSTKEY_CHANGED)
+            if i == 5:
+                raise StepError('SSH: нет ответа при входе')
+            if re.search(r'not in the sudoers|may not run sudo|is not allowed to (run|execute)', text):
+                raise StepError(f'пользователь {user} не может выполнять команды через sudo')
+            if 'Permission denied' in text:
+                raise StepError('SSH: вход не принят (Permission denied) — проверьте пользователя, ключ и пароль')
+            tail = [x for x in text.strip().splitlines() if x.strip()]
+            raise StepError('SSH: ' + (tail[-1][-200:] if tail else f'соединение закрыто (код {child.exitstatus})'))
+
+    def run(self, cmd, timeout=120):
+        child = self.spawn(cmd, False, timeout)
+        i = child.expect([pexpect.EOF, pexpect.TIMEOUT])
+        text = child.before or ''
+        if i == 1:
+            child.close(force=True)
+            raise StepError(f'таймаут команды: {cmd[:60]}')
         child.close()
-        text = ''.join(out)
-        if 'REMOTE HOST IDENTIFICATION HAS CHANGED' in text or 'Host key verification failed' in text:
-            raise StepError(HOSTKEY_CHANGED)
         return child.exitstatus, text
 
 

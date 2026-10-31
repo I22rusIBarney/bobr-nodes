@@ -1137,10 +1137,11 @@ async def main():
         cids.append(js['id'])
     await asyncio.gather(*list(monitor._bg))
     chs = store.checkers()
-    ok(all(c['status'] == 'idle' and c['auth'] == 'key' and not c['password'] and c['api_password'] for c in chs),
+    ok(all(c['status'] == 'idle' and c['key'] == 'bot' and not c['password'] and c['api_password'] for c in chs),
        f'чекеры поставлены: вход по ключу бота, пароль root не хранится, без подписок — ждут: {[(c["status"], c.get("error")) for c in chs]}')
     st, mv = await wapi('monitor')
-    ok(st == 200 and len(mv['checkers']) == 3 and all('api_password' not in c and 'password' not in c for c in mv['checkers']),
+    ok(st == 200 and len(mv['checkers']) == 3 and all('api_password' not in c and 'password' not in c and c['access'] == 'root, ключ бота'
+                                                       for c in mv['checkers']),
        'админка: чекеры без паролей')
     st, js = await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_sub': 'https://sub.example.com/x#y'})
     ok(st == 400 and 'без пробелов' in js['detail'], 'ссылка подписки с # отклонена')

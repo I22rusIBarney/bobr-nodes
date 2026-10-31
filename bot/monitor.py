@@ -2,8 +2,8 @@
 
 Цикл (раз в ~5 минут): опросить все чекеры → по каждой группе с подпиской сопоставить проверки с нодами панели →
 нода «недоступна», если её не пропускает большинство исправных чекеров. После FAILS_TO_ALERT таких циклов подряд —
-сообщение и, по настройке группы, починка по шагам: смена IP → Final Mask и свой порт → переустановка другим
-скриптом → запасной XHTTP через CDN → новая нода в той же локации. После каждого шага ждём RECOVER_CYCLES
+сообщение и, по настройке группы, починка по шагам: Final Mask и свой порт → переустановка другим скриптом →
+запасной XHTTP через CDN → смена IP в bcloud (платно) → новая нода в той же локации. После каждого шага ждём RECOVER_CYCLES
 циклов: нода ожила — готово, нет — следующий шаг.
 
 Состояние ноды хранится по ключу «группа:адрес ноды» (домен не меняется при смене IP и переустановке)."""
@@ -20,12 +20,13 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from . import checker as ck
 from . import engine
 from . import services as svc
+from . import sshaccess
 from .bcloud import BcloudError
 from .store import ACTIVE, Store
 
 log = logging.getLogger(__name__)
 
-STEPS = ['reip', 'mask', 'script', 'xhttp', 'replace']
+STEPS = ['mask', 'script', 'xhttp', 'reip', 'replace']  # смена IP платная — после бесплатных шагов, перед покупкой
 STEP_LABEL = {'reip': 'смена IP в bcloud', 'mask': 'Final Mask и свой порт', 'script': 'переустановка другим скриптом',
               'xhttp': 'запасной XHTTP через CDN', 'replace': 'новая нода в той же локации'}
 MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам'}
@@ -541,8 +542,9 @@ class Monitor:
     def view(self) -> dict:
         checkers = []
         for ch in self.store.checkers():
-            checkers.append({k: ch.get(k) for k in ('id', 'name', 'ip', 'port', 'user', 'auth', 'status', 'error', 'log',
-                                                     'polled_at', 'poll_error', 'proxies', 'online', 'installed_at')})
+            checkers.append({**{k: ch.get(k) for k in ('id', 'name', 'ip', 'status', 'error', 'log',
+                                                       'polled_at', 'poll_error', 'proxies', 'online', 'installed_at')},
+                             'ssh': sshaccess.view(ch), 'access': sshaccess.describe(ch)})
         groups = []
         for p in self.store.profiles():
             cfg = settings_of(p)

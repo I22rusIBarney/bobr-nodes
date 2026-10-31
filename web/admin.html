@@ -268,24 +268,22 @@ function monitorView() {
   return v;
 }
 function checkerAddView() {
-  const f = { name: '', ip: '', port: '22', password: '' };
+  const f = { name: '', ip: '' }, F = sshState({});
   const status = statusLine();
-  const pw = h('input', { type: 'password', autocomplete: 'off', placeholder: 'root-пароль' });
-  pw.addEventListener('input', () => { f.password = pw.value; });
   const add = h('button', { class: 'btn', type: 'button' }, 'Поставить чекер');
   add.onclick = UI.busy(add, async () => {
     try {
-      const r = await api('checkers', 'POST', f);
+      const r = await api('checkers', 'POST', { ...f, ...F });
       MON = null; await loadMon(); UI.nav.back(); UI.nav.push(() => checkerView(r.id));
     } catch (e) { showStatus(status, { ok: false, message: e.message }); }
   });
   return h('div', {}, ...title('Новый чекер', 'Мониторинг'),
     h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
       h('label', { class: 'field stack' }, h('label', {}, 'Название'), textIn(f.name, 'Москва, МТС', x => { f.name = x; })),
-      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'SSH-порт'), textIn(f.port, '22', x => { f.port = x.replace(/\D/g, ''); }, true)),
-      h('label', { class: 'field stack' }, h('label', {}, 'Пароль root'), pw)),
-      h('div', { class: 'group-f' }, 'Бот зайдёт по паролю, добавит свой SSH-ключ, поставит Docker и xray-checker. Дальше входит по ключу, пароль не хранит. Лучше брать серверы у разных операторов: так видно, где блокировка, а где сбой у одного провайдера.'), status),
+      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))),
+      h('div', { class: 'group-f' }, 'Ubuntu или Debian. Лучше брать серверы у разных операторов: так видно, где блокировка, а где сбой у одного провайдера.')),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, MON && MON.bot_key)),
+      h('div', { class: 'group-f' }, 'Бот поставит Docker и xray-checker. Если вход под root по паролю — дальше бот заходит своим ключом и пароль не хранит.'), status),
     h('div', { class: 'pad' }, add));
 }
 function checkerView(id) {
@@ -296,15 +294,19 @@ function checkerView(id) {
   v.append(group(null, [
     row({ title: 'Состояние', status: CST[c.status] || [c.status, ''] }),
     row({ title: 'Сервер', detail: c.ip + (c.port && c.port !== 22 ? ':' + c.port : ''), mono: true, copy: c.ip }),
-    row({ title: 'Вход', detail: c.auth === 'key' ? 'по ключу бота' : 'по паролю' }),
+    row({ title: 'Вход', detail: c.access }),
     row({ title: 'Последний опрос', detail: ago(c.polled_at), status: c.poll_error ? ['ошибка', 'bad'] : null }),
     c.status === 'running' ? row({ title: 'Проверок', detail: `${c.online ?? 0} из ${c.proxies ?? 0} проходят` }) : null].filter(Boolean),
     c.poll_error || c.error || null));
   if ((c.log || []).length) v.append(group('Установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, c.log.join('\n'))]));
-  const pw = h('input', { type: 'password', autocomplete: 'off', placeholder: c.auth === 'key' ? 'не нужен — вход по ключу' : 'root-пароль, если сменился' });
+  if (!c._ssh) c._ssh = sshState(c.ssh);
   const re = h('button', { class: 'btn tinted', type: 'button', disabled: c.status === 'installing' }, c.status === 'failed' ? 'Повторить установку' : 'Переустановить и обновить');
-  re.onclick = UI.busy(re, async () => { if (await UI.run(() => api('checkers/' + id + '/install', 'POST', { password: pw.value }), 'Ставлю')) { await loadMon(); UI.nav.refresh(); } });
-  v.append(h('section', { class: 'group' }, h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Пароль root'), pw))), h('div', { class: 'pad' }, re));
+  re.onclick = UI.busy(re, async () => {
+    const F = c._ssh, changed = F.password || F.key_text || F.sudo_password || F.user !== c.ssh.user || F.port !== String(c.ssh.port) || F.key !== c.ssh.key;
+    if (await UI.run(() => api('checkers/' + id + '/install', 'POST', changed ? F : {}), 'Ставлю')) { await loadMon(); UI.nav.refresh(); }
+  });
+  v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: c.access, key: 'c-ssh', body: () => sshFields(c._ssh, c.ssh, MON.bot_key) }),
+    'Поменяйте, если сменился пароль или ключ, — новый доступ сохранится при переустановке.'), h('div', { class: 'pad' }, re));
   v.append(group(null, [row({ title: 'Удалить чекер', cls: 'destructive', onClick: async () => {
     const ok = await UI.ask({ title: 'Удалить чекер?', message: 'Бот остановит xray-checker на сервере и перестанет его опрашивать. Сам сервер не трогаем.', buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] });
     if (ok && await UI.run(() => api('checkers/' + id, 'DELETE'), 'Чекер удалён') !== undefined) { await loadMon(); UI.nav.back(); }
@@ -648,6 +650,30 @@ function securityView() {
   return v;
 }
 
+// ───────── доступ по SSH: пароль, свой ключ, ключ бота (можно ключ + пароль), не-root — через sudo ─────────
+function sshState(view) { view = view || {}; return { user: view.user || 'root', port: String(view.port || 22), password: '', key: view.key || '', key_text: '', sudo_password: '' }; }
+function sshFields(F, view, botKey) {
+  view = view || {};
+  const pwIn = (ph, k) => { const i = h('input', { type: 'password', autocomplete: 'off', placeholder: ph }); i.value = F[k] || ''; i.addEventListener('input', () => { F[k] = i.value; }); return i; };
+  const out = [
+    h('label', { class: 'field' }, h('label', {}, 'Пользователь'), textIn(F.user, 'root', x => { const was = F.user === 'root'; F.user = x.trim(); if (was !== (F.user === 'root')) UI.nav.refresh(); }, true, 'right')),
+    h('label', { class: 'field' }, h('label', {}, 'Порт'), textIn(F.port, '22', x => { F.port = x.replace(/\D/g, ''); }, true, 'right')),
+    h('label', { class: 'field' }, h('label', {}, 'Пароль'), pwIn(view.has_password ? 'сохранён («-» — убрать)' : 'если нужен', 'password')),
+    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Ключ'), UI.segmented([{ value: '', label: 'Без ключа' }, { value: 'own', label: 'Свой' }, { value: 'bot', label: 'Ключ бота' }], F.key, x => { F.key = x; UI.nav.refresh(); }))];
+  if (F.key === 'own') {
+    const ta = h('textarea', { class: 'code', rows: 5, spellcheck: false, autocapitalize: 'off', placeholder: view.has_key && view.key === 'own' ? 'сохранён — вставьте новый, чтобы заменить' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----', style: 'text-align:left' });
+    ta.value = F.key_text; ta.addEventListener('input', () => { F.key_text = ta.value; });
+    out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta));
+  }
+  if (F.key === 'bot') out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, botKey || 'ssh-keygen недоступен'), copy: botKey || null, copyLabel: 'Ключ' }));
+  if (F.user && F.user !== 'root') out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));
+  out.push(h('div', { class: 'in-note' }, 'Можно пароль, ключ или оба сразу — если сервер требует и то, и другое (Сбер Клауд). '
+    + (F.user && F.user !== 'root' ? `Вход под ${F.user}, команды — через sudo.` : 'Под root — без sudo.')
+    + (F.key === 'own' ? ' Ключ без парольной фразы; хранится на сервере бота файлом с доступом только для root.' : '')
+    + (F.key === 'bot' ? ` Добавьте ключ бота в ~/.ssh/authorized_keys пользователя ${F.user || 'root'}.` : '')));
+  return out;
+}
+
 // ───────── ноды панели ─────────
 const NODES = {}, NODE = {};
 const FEAT = { psiphon: 'Psiphon', warp: 'WARP', xhttp: 'XHTTP' };
@@ -679,7 +705,7 @@ function nodeView(pid, uuid) {
     NODE[uuid] = null;
     api(`profiles/${pid}/nodes/${uuid}`).then(r => {
       r.E = extrasState(); r.mask = 'keep'; r.maskJson = lsGet('final_mask_json', MASK_DEF); r.portMode = 'keep'; r.port = lsGet('port', '8443');
-      r.sshForm = { mode: r.ssh.mode || 'password', user: r.ssh.user, port: String(r.ssh.port), password: '' };
+      r.sshForm = sshState(r.ssh);
       NODE[uuid] = r; UI.nav.refresh();
     }).catch(e => { NODE[uuid] = { error: e.message }; UI.nav.refresh(); });
   }
@@ -750,24 +776,16 @@ function nodeView(pid, uuid) {
 
   // SSH — по запросу
   const F = n.sshForm, sshSt = statusLine();
-  const SRC = { bot: 'пароль из покупки', saved: 'сохранён в боте' };
-  v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: `${F.user || 'root'}, порт ${F.port}, ${SRC[n.ssh.source] || 'не указан'}`, key: 'n-ssh', open: !n.ssh.source, body: () => {
-    const out = [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'password', label: 'Пароль' }, { value: 'key', label: 'Ключ бота' }], F.mode, x => { F.mode = x; UI.nav.refresh(); })),
-      h('label', { class: 'field' }, h('label', {}, 'Пользователь'), textIn(F.user, 'root', x => { F.user = x; }, false, 'right')),
-      h('label', { class: 'field' }, h('label', {}, 'Порт'), textIn(F.port, '22', x => { F.port = x; }, false, 'right'))];
-    if (F.mode === 'password') out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль'),
-      h('input', { type: 'password', placeholder: n.ssh.has_password ? 'сохранён' : 'пароль', autocomplete: 'off', oninput: e => { F.password = e.target.value; } })));
-    else out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, n.bot_key || 'ssh-keygen недоступен'), copy: n.bot_key || null, copyLabel: 'Ключ' }));
-    out.push(act('Сохранить и проверить вход', async () => {
-      try { const r = await api(`profiles/${pid}/nodes/${uuid}/ssh`, 'POST', { ...F, ip: n.address }); n.ssh = { ...n.ssh, mode: F.mode, has_password: n.ssh.has_password || !!F.password, source: 'saved' }; showStatus(sshSt, r); }
+  v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: `${n.ssh.summary}, порт ${n.ssh.port}`, key: 'n-ssh', open: !n.ssh.source, body: () => [
+    ...sshFields(F, n.ssh, n.bot_key),
+    act('Сохранить и проверить вход', async () => {
+      try { const r = await api(`profiles/${pid}/nodes/${uuid}/ssh`, 'POST', { ...F, ip: n.address }); n.ssh = { ...n.ssh, source: 'saved', user: F.user, port: F.port, key: F.key }; F.password = F.key_text = F.sudo_password = ''; showStatus(sshSt, r); }
       catch (e) { showStatus(sshSt, { ok: false, message: e.message }); }
     }), act('Забыть ключ сервера', async () => {
       const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на ноде переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
       if (!yes) return;
       try { showStatus(sshSt, await api(`profiles/${pid}/nodes/${uuid}/forget-hostkey`, 'POST', { ip: n.address })); } catch (e) { showStatus(sshSt, { ok: false, message: e.message }); }
-    }), sshSt);
-    return out;
-  } }), n.ssh.source === 'bot' ? 'Нода куплена ботом — root-пароль уже известен.' : 'Нужен для Psiphon, WARP, смены порта и IP. Для Final Mask не нужен.' + (F.mode === 'key' ? ' Добавьте ключ бота в /root/.ssh/authorized_keys.' : '')));
+    }), sshSt] }), n.ssh.source === 'bot' ? 'Нода куплена ботом — root-пароль уже известен.' : 'Нужен для Psiphon, WARP, смены порта и IP. Для Final Mask не нужен.'));
 
   const go = h('button', { class: 'btn', type: 'button' }, 'Применить');
   go.onclick = UI.busy(go, async () => {

@@ -449,14 +449,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return svc.bot_jobs_by_ip(store, pid)
 
     def ssh_view(pid: int, uuid: str, ip: str) -> dict:
+        from . import sshaccess
         saved = runner.ssh_of(pid, uuid)
-        if saved.get('mode'):
-            return {'mode': saved['mode'], 'user': saved.get('user') or 'root', 'port': int(saved.get('port') or 22),
-                    'has_password': bool(saved.get('password')), 'source': 'saved'}
-        d = bot_jobs_by_ip(pid).get(ip)
-        if d:  # нода куплена ботом: root-пароль известен из задачи покупки
-            return {'mode': 'password', 'user': 'root', 'port': 22, 'has_password': True, 'source': 'bot'}
-        return {'mode': '', 'user': 'root', 'port': 22, 'has_password': False, 'source': ''}
+        if saved:
+            return {**sshaccess.view(saved), 'source': 'saved', 'summary': sshaccess.describe(saved)}
+        if bot_jobs_by_ip(pid).get(ip):  # нода куплена ботом: root-пароль известен из задачи покупки
+            return {**sshaccess.view({'user': 'root', 'password': 'x'}), 'source': 'bot', 'summary': 'root, пароль из покупки'}
+        return {**sshaccess.view({}), 'source': '', 'summary': 'не указан'}
 
     def node_ssh(pid: int, uuid: str, ip: str) -> dict:
         return svc.node_ssh(store, runner, pid, uuid, ip)
@@ -525,32 +524,18 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/ssh')
     async def panel_node_ssh(request):
-        """Сохранить доступ по SSH (mode key|password) и проверить вход."""
+        """Сохранить доступ по SSH (пароль, свой ключ или ключ бота, можно вместе; не-root — через sudo) и проверить вход."""
+        from . import sshaccess
         p = profile_or_404(request.match_info['pid'])
         uuid, b = request.match_info['uuid'], await body(request)
-        cur = runner.ssh_of(p['id'], uuid)
-        mode = b.get('mode') if b.get('mode') in ('key', 'password') else 'password'
-        user = str(b.get('user') or 'root').strip()
-        if not re.fullmatch(r'[a-z_][a-z0-9_.-]{0,31}', user):
-            raise ApiError('Пользователь: латиница, например root')
         try:
-            port = int(b.get('port') or 22)
-            assert 1 <= port <= 65535
-        except (ValueError, AssertionError):
-            raise ApiError('SSH-порт: число от 1 до 65535') from None
-        pw = b.get('password')
-        new = {'mode': mode, 'user': user, 'port': port,
-               'password': (str(pw) if pw else cur.get('password', '')) if mode == 'password' else ''}
-        if mode == 'password' and not new['password']:
-            raise ApiError('Введите пароль')
+            new = sshaccess.clean(b, runner.ssh_of(p['id'], uuid), runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
         ip = str(b.get('ip') or '')
         result = {'ok': True, 'message': 'Сохранено'}
         if ip:
-            node = {'ip': ip, 'ssh_user': user, 'ssh_port': port, 'known_hosts': runner.known_hosts()}
-            if mode == 'key':
-                node['ssh_key'] = runner.bot_key()[0]
-            else:
-                node['ssh_password'] = new['password']
+            node = {'ip': ip, **sshaccess.to_node(new, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}
 
             def check():
                 rr = engine.Remote(node, None)
@@ -558,8 +543,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 return rc == 0 and out.strip().splitlines()[-1:] == ['0'], out
             try:
                 good, out = await asyncio.to_thread(check)
-                result = {'ok': good, 'message': 'Вход по SSH работает, права root есть' if good else
-                          'Вход есть, но не под root — нужен root или sudo без пароля'}
+                result = {'ok': good, 'message': ('Вход по SSH работает, права root ' + ('через sudo' if new['user'] != 'root' else 'есть'))
+                          if good else 'Вход есть, но прав root нет'}
             except engine.StepError as e:
                 result = {'ok': False, 'message': f'SSH: {e}'}
             except Exception as e:  # noqa: BLE001
@@ -1139,6 +1124,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         v = mon().view()
         for g in v['groups']:
             g['sub_hint'] = hint((store.profile(g['id']) or {}).get('mon_sub') or '')
+        v['bot_key'] = runner.bot_key()[1]
         v['scripts'] = [{'id': x['id'], 'title': x.get('title') or x.get('path')} for x in store.scripts() if x.get('status') == 'approved']
         return J(v)
 
@@ -1151,18 +1137,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
         if any(x['ip'] == ip for x in store.checkers()):
             raise ApiError('Чекер с этим IP уже есть')
+        from . import sshaccess
         try:
-            port = int(b.get('port') or 22)
-        except (TypeError, ValueError):
-            port = 0
-        if not 1 <= port <= 65535:
-            raise ApiError('SSH-порт: от 1 до 65535')
-        pw = str(b.get('password') or '')
-        if not pw and not b.get('use_key'):
-            raise ApiError('Нужен root-пароль сервера (или ключ бота уже добавлен на сервер)')
-        cid = store.save_checker({'name': name, 'ip': ip, 'port': port, 'user': str(b.get('user') or 'root').strip() or 'root',
-                                  'password': pw, 'auth': 'key' if b.get('use_key') and not pw else 'password',
-                                  'status': 'new', 'created_at': int(time.time())})
+            acc = sshaccess.clean(b, None, runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        cid = store.save_checker({'name': name, 'ip': ip, **acc, 'status': 'new', 'created_at': int(time.time())})
         mon().install(cid)
         return J({'id': cid})
 
@@ -1171,9 +1151,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         ch = checker_or_404(request.match_info['cid'])
         if ch.get('status') == 'installing':
             raise ApiError('Установка уже идёт')
-        pw = str((await body(request)).get('password') or '')
-        if pw:
-            store.patch_checker(ch['id'], password=pw, auth='password')
+        from . import sshaccess
+        b = await body(request)
+        if any(str(b.get(k) or '').strip() for k in ('user', 'port', 'password', 'key', 'key_text', 'sudo_password')):
+            try:  # новый доступ: пустые поля — оставить сохранённое
+                store.patch_checker(ch['id'], **sshaccess.clean(b, ch, runner.keydir))
+            except ValueError as e:
+                raise ApiError(str(e)) from None
         mon().install(ch['id'])
         return J({'ok': True})
 

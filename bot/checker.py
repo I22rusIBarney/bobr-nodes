@@ -76,11 +76,8 @@ COMPOSE = f"""services:
 
 
 def remote(ch: dict, keypath: str, known_hosts: str, logfile=None) -> engine.Remote:
-    n = {'ip': ch['ip'], 'ssh_user': ch.get('user') or 'root', 'ssh_port': int(ch.get('port') or 22), 'known_hosts': known_hosts}
-    if ch.get('auth') == 'key' and keypath:
-        n['ssh_key'] = keypath
-    else:
-        n['ssh_password'] = ch.get('password', '')
+    from . import sshaccess
+    n = {'ip': ch['ip'], **sshaccess.to_node(ch, keypath), 'known_hosts': known_hosts}
     return engine.Remote(n, logfile if logfile is not None else io.StringIO())
 
 
@@ -126,12 +123,13 @@ def install(ch: dict, subs: list[tuple[int, str]], keypath: str, pubkey: str, kn
     log(f'образ {image}')
     fields = {'api_password': password, 'image': image}
     apply_subs({**ch, **fields}, subs, keypath, known_hosts, log, logfile, r=r)
-    if keypath and pubkey:  # дальше — по ключу бота, пароль root больше не храним
+    # root по паролю — дальше по ключу бота, пароль root больше не храним. Свой ключ или не-root (sudo) — как задано
+    if keypath and pubkey and (ch.get('user') or 'root') == 'root' and (ch.get('key') or '') == '':
         try:
-            rk = remote({**ch, 'auth': 'key'}, keypath, known_hosts, logfile)
+            rk = remote({**ch, 'key': 'bot', 'password': ''}, keypath, known_hosts, logfile)
             rc, out = rk.run('id -u', 30)
             if rc == 0 and out.strip().splitlines()[-1:] == ['0']:
-                fields.update(auth='key', password='')
+                fields.update(key='bot', password='')
                 log('вход на чекер — по ключу бота, пароль root не сохраняется')
         except StepError as e:
             log(f'вход по ключу не прошёл ({e}) — остаётся пароль')

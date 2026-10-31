@@ -258,13 +258,10 @@ class Runner:
         return saved
 
     def _node_ssh(self, d: dict, prof: dict) -> dict:
-        ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
-        out = {'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22), 'known_hosts': self.known_hosts()}
-        if ssh.get('mode') == 'key':
-            out['ssh_key'] = self.bot_key()[0]
-        else:
-            out['ssh_password'] = ssh.get('password', '')
-        return out
+        """Поля входа для задачи по ноде: сохранённый доступ, иначе — из задачи (пароль root из покупки)."""
+        from . import sshaccess
+        ssh = self.ssh_of(prof['id'], d['node_uuid']) or d.get('ssh') or {}
+        return {**sshaccess.to_node(ssh, self.bot_key()[0]), 'known_hosts': self.known_hosts()}
 
     async def _run_reip(self, jid: int, d: dict, prof: dict) -> None:
         """Новый IP ноды: сменить в bcloud (или взять уже сменённый), затем DNS, SSH и адрес в панели."""
@@ -318,16 +315,10 @@ class Runner:
     async def _run_node(self, jid: int, d: dict, prof: dict) -> None:
         """Дополнения на уже работающей ноде панели (без покупки и установки)."""
         loop = asyncio.get_running_loop()
-        ssh = {**(d.get('ssh') or {}), **self.ssh_of(prof['id'], d['node_uuid'])}
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
                 'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                 'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'),
-                'ssh_user': ssh.get('user') or 'root', 'ssh_port': int(ssh.get('port') or 22),
-                'known_hosts': self.known_hosts()}
-        if ssh.get('mode') == 'key':
-            node['ssh_key'] = self.bot_key()[0]
-        else:
-            node['ssh_password'] = ssh.get('password', '')
+                **self._node_ssh(d, prof)}
         pconf = {**prof, 'ssh_pubkey': self.pubkeys(), 'cf_token': prof.get('cf_token') or self.store.get('cf_token')}
         self.last[jid] = 'ждём свободный слот'
         await self.render(jid)

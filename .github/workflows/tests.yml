@@ -57,6 +57,8 @@ jobs:
         run: |
           set -o pipefail
           pytest -q -rA 2>&1 | tee /tmp/pytest.out || {
+            grep -E '^(FAIL |FAILED |E  )' /tmp/pytest.out | grep -v ' PASS ' | head -9 | cut -c1-300 | sed 's/%/%25/g; s/^/::error::/'
+            grep -E 'Error|error|Traceback' /tmp/pytest.out | tail -1 | cut -c1-300 | sed 's/^/::error::LAST /'
             # одна аннотация (GitHub показывает не больше 10 на шаг): FAIL-строки и хвост вывода
             { grep -E 'FAIL ' /tmp/pytest.out | grep -v PASS | head -20; echo ----; grep -v ' PASS ' /tmp/pytest.out | tail -50; } \
               | cut -c1-400 | python3 -c 'import sys; print("::error::" + sys.stdin.read().replace("%", "%25").replace("\n", "%0A"))'
