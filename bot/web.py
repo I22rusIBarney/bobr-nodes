@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 
 from . import engine, forms, naming, relay as rl, scripts as sc, services as svc, upgrade as up
+from .pcache import CACHE as PC
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
 from .runner import SERVICE_KINDS, Runner, bcloud_from, buyer_of, stages_for
@@ -154,6 +155,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             access.touch(user)
             if admin_only(request.method, request.path):
                 return web.json_response({'detail': 'Это доступно только администратору бота.'}, status=403)
+        if request.method != 'GET':  # что-то меняем в группе — её кэш панели больше не верен
+            m = re.match(r'/api/profiles/(\d+)(/|$)', request.path)
+            if m:
+                PC.drop(int(m.group(1)))
         try:
             return await handler(request)
         except ApiError as e:
@@ -605,28 +610,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def node_ssh(pid: int, uuid: str, ip: str) -> dict:
         return svc.node_ssh(store, runner, pid, uuid, ip)
 
-    nodes_inflight: dict[int, asyncio.Task] = {}
+    async def cached(p: dict, *what: str, stale_ok: bool = True) -> tuple[list, bool]:
+        """Данные панели из кэша (см. pcache): [данные по каждому what], устарело ли хоть что-то."""
+        try:
+            res = await asyncio.gather(*(PC.get(p, w, stale_ok) for w in what))
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        return [d for d, _ in res], any(st for _, st in res)
 
     @r.get('/api/profiles/{pid}/nodes')
     async def panel_nodes(request):
-        """Одновременные запросы списка нод одной группы (главная, страница группы, повторное открытие) — одним
-        походом в панель: иначе медленная панель занимает все потоки бота."""
+        """Список нод группы — из кэша, если он свежий; устаревший тоже отдаём сразу (stale: true), а свежий
+        тем временем уже запрошен — веб-апп перезапросит с fresh=1. Повторные открытия не ходят в панель."""
         p = profile_or_404(request.match_info['pid'], request)
-        t = nodes_inflight.get(p['id'])
-        if t is None or t.done():
-            t = nodes_inflight[p['id']] = asyncio.ensure_future(panel_nodes_load(p))
-        return J(await asyncio.shield(t))
+        return J(await panel_nodes_load(p, stale_ok=not request.query.get('fresh')))
 
-    async def panel_nodes_load(p: dict) -> dict:
-
-        pl = panel_of(p)
-        try:  # список нод, профили и версии — одновременно
-            nodes, profiles, versions = await asyncio.gather(
-                asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
-                asyncio.to_thread(pl.call, 'GET', '/api/config-profiles'),
-                node_versions(p))
-        except engine.StepError as e:
-            raise ApiError(f'Панель: {e}') from None
+    async def panel_nodes_load(p: dict, stale_ok: bool = True) -> dict:
+        ((nodes, profiles), stale), versions = await asyncio.gather(
+            cached(p, 'nodes', 'profiles', stale_ok=stale_ok), node_versions(p))
         profiles = {x['uuid']: x for x in profiles['configProfiles']}
         bot = bot_jobs_by_ip(p['id'])
         busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
@@ -641,7 +642,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                         'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
-        return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': versions}
+        return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': versions, 'stale': stale}
 
     async def node_versions(p: dict) -> dict:
         """Версия панели и последняя подходящая к ней версия ноды (Docker Hub) — цель обновления по умолчанию."""
@@ -688,14 +689,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         uuid = request.match_info['uuid']
 
         pl = panel_of(p)
-        try:  # три запроса к панели — одновременно, а не по очереди
-            nodes, profiles, all_hosts = await asyncio.gather(
-                asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
-                asyncio.to_thread(pl.call, 'GET', '/api/config-profiles'),
-                asyncio.to_thread(pl.call, 'GET', '/api/hosts'))
-        except engine.StepError as e:
-            raise ApiError(f'Панель: {e}') from None
+        # ноды, профили и хосты — из кэша (одновременно, если надо идти в панель)
+        (nodes, profiles, all_hosts), stale = await cached(p, 'nodes', 'profiles', 'hosts',
+                                                           stale_ok=not request.query.get('fresh'))
         n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n and stale:  # нода могла появиться недавно — кэш старый, смотрим в панели
+            (nodes, profiles, all_hosts), stale = await cached(p, 'nodes', 'profiles', 'hosts', stale_ok=False)
+            n = next((x for x in nodes if x['uuid'] == uuid), None)
         if not n:
             raise ApiError('Ноды нет в панели', 404)
         pr = next((x for x in profiles['configProfiles']
@@ -736,7 +736,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'relay_port': rl.target_port_of(hosts),
                   'load': autopilot.load_of(p['id'], uuid, hist=True) if autopilot else {},
                   'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),
-                  'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id'])})
+                  'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']),
+                  'stale': stale})
 
     def load_watched(p: dict) -> bool:
         from . import autopilot as ap
@@ -981,6 +982,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Неизвестный способ')
         nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
         n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n and stale:  # нода могла появиться недавно — кэш старый, смотрим в панели
+            (nodes, profiles, all_hosts), stale = await cached(p, 'nodes', 'profiles', 'hosts', stale_ok=False)
+            n = next((x for x in nodes if x['uuid'] == uuid), None)
         if not n:
             raise ApiError('Ноды нет в панели', 404)
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
@@ -1061,6 +1065,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         uuid = request.match_info['uuid']
         nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
         n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n and stale:  # нода могла появиться недавно — кэш старый, смотрим в панели
+            (nodes, profiles, all_hosts), stale = await cached(p, 'nodes', 'profiles', 'hosts', stale_ok=False)
+            n = next((x for x in nodes if x['uuid'] == uuid), None)
         if not n:
             raise ApiError('Ноды нет в панели', 404)
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
@@ -1111,6 +1118,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         parsed = parse_apply(p, b)
         nodes = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/nodes'))
         n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n and stale:  # нода могла появиться недавно — кэш старый, смотрим в панели
+            (nodes, profiles, all_hosts), stale = await cached(p, 'nodes', 'profiles', 'hosts', stale_ok=False)
+            n = next((x for x in nodes if x['uuid'] == uuid), None)
         if not n:
             raise ApiError('Ноды нет в панели', 404)
         try:

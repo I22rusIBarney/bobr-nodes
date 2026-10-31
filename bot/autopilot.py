@@ -24,6 +24,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from . import engine, services as svc, sshaccess, upgrade as up
 from .bcloud import BcloudError
+from .pcache import CACHE
 from .runner import bcloud_from, buyer_of
 from .store import ACTIVE, Store
 
@@ -389,6 +390,7 @@ class Autopilot:
                 nodes = await asyncio.to_thread(lambda p=prof: self.panel(p).call('GET', '/api/nodes'))
             except (engine.StepError, OSError, ValueError):
                 continue
+            CACHE.put(prof, 'nodes', nodes)  # веб-апп откроет список нод без похода в панель
             t = now if now is not None else time.time()
             for n in nodes:
                 smp = panel_sample(n) if isinstance(n, dict) and n.get('uuid') else None

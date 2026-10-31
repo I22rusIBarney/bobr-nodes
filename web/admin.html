@@ -345,13 +345,22 @@ function loadNodes(pid, quiet) {
   const had = NODES[pid];
   if (had && !had.error && had.nodes) had._loading = true;  // старые данные видны, пока грузятся новые
   else NODES[pid] = null;
-  api('profiles/' + pid + '/nodes').then(r => { r._at = Date.now(); NODES[pid] = r; saveCache(); })
+  api('profiles/' + pid + '/nodes').then(r => {
+    r._at = Date.now(); NODES[pid] = r; saveCache();
+    // бот отдал данные из кэша, но им больше 30 с — свежие он уже запросил у панели, дотягиваем их тихо
+    if (r.stale) api('profiles/' + pid + '/nodes?fresh=1').then(f => { if (NODES[pid] === r) { f._at = Date.now(); NODES[pid] = f; saveCache(); quietRefresh('.home-page, .servers-page, .group-page'); } }).catch(() => {});
+  })
     .catch(e => { NODES[pid] = had && !had.error && had.nodes ? { ...had, _loading: false } : { error: e.message }; })
     // фоновая загрузка не перерисовывает экраны с полями ввода — только списки
     .then(() => {
       const typing = document.activeElement && /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
       if (!quiet || (!typing && document.querySelector('#root .home-page, #root .servers-page, #root .group-page'))) UI.nav.refresh();
     });
+}
+// перерисовать экран после фонового обновления — только если открыт нужный экран и пользователь ничего не вводит
+function quietRefresh(sel) {
+  const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (!typing && document.querySelector(sel.split(',').map(x => '#root ' + x.trim()).join(', '))) UI.nav.refresh();
 }
 function nodeStats(pid) {
   const ps = pid ? [pid] : (ST.profiles || []).map(p => p.id);
@@ -1594,6 +1603,12 @@ function nodeView(pid, uuid) {
       r.E = extrasState(); r.mask = 'keep'; r.maskJson = lsGet('final_mask_json', MASK_DEF); r.portMode = 'keep'; r.port = lsGet('port', '8443');
       r.sshForm = sshState(r.ssh);
       NODE[uuid] = r;
+      if (r.stale) api(`profiles/${pid}/nodes/${uuid}?fresh=1`).then(f => {  // показали кэш — дотягиваем свежее
+        if (NODE[uuid] !== r) return;
+        const { E, mask, maskJson, portMode, port, sshForm } = r;  // введённое на странице не трогаем
+        Object.assign(r, f, { E, mask, maskJson, portMode, port, sshForm });
+        quietRefresh('.node-page');
+      }).catch(() => {});
     }).catch(e => { NODE[uuid] = { error: e.message }; }).then(() => { if (document.querySelector('#root .node-page')) UI.nav.refresh(); });
   }
   if (!n) return h('div', { class: 'node-page' }, ...pageHead('Нода'), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));

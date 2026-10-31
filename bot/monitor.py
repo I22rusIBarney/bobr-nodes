@@ -22,6 +22,7 @@ from . import engine
 from . import services as svc
 from . import sshaccess
 from .bcloud import BcloudError
+from .pcache import CACHE
 from .runner import cf_token_of
 from .store import ACTIVE, Store
 
@@ -433,8 +434,10 @@ class Monitor:
 
     async def check_group(self, prof: dict, results: dict) -> None:
         panel = engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''))
-        nodes = await asyncio.to_thread(panel.call, 'GET', '/api/nodes')
-        hosts = await asyncio.to_thread(panel.call, 'GET', '/api/hosts')
+        nodes, hosts = await asyncio.gather(asyncio.to_thread(panel.call, 'GET', '/api/nodes'),
+                                            asyncio.to_thread(panel.call, 'GET', '/api/hosts'))
+        CACHE.put(prof, 'nodes', nodes)  # веб-апп возьмёт их отсюда, а не из панели
+        CACHE.put(prof, 'hosts', hosts)
         try:
             tpls = await asyncio.to_thread(panel.templates)
         except engine.StepError:
