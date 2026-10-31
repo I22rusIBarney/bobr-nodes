@@ -275,6 +275,11 @@ class Runner:
     # ── этапы ──
     async def _set(self, jid: int, **fields) -> None:
         self.store.update_job(jid, **fields)
+        if fields.get('status') in ('done', 'failed'):  # задача поменяла панель — кэш группы устарел
+            from .pcache import CACHE
+            j = self.store.job(jid)
+            if j and j.get('profile_id'):
+                CACHE.drop(j['profile_id'])
         await self.render(jid, force='status' in fields)
 
     def ssh_of(self, pid: int, node_uuid: str) -> dict:
