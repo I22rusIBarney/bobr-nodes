@@ -724,8 +724,27 @@ function sshFields(F, view, botKey) {
     const out = [];
     if (F.key === 'own') {
       const ta = h('textarea', { class: 'code', rows: 5, spellcheck: false, autocapitalize: 'off', placeholder: view.has_key && view.key === 'own' ? 'сохранён — вставьте новый, чтобы заменить' : '-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----', style: 'text-align:left' });
-      ta.value = F.key_text; ta.addEventListener('input', () => { F.key_text = ta.value; });
-      out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta));
+      ta.value = F.key_text; ta.addEventListener('input', () => { F.key_text = ta.value; fileNote.textContent = ''; });
+      // файл ключа (id_ed25519, key.pem…) читается здесь же, на устройстве, и попадает в поле — как вставка
+      const fileNote = h('div', { class: 'in-note' });
+      const file = h('input', { type: 'file', style: 'display:none' });
+      file.addEventListener('change', () => {
+        const fl = file.files && file.files[0];
+        file.value = '';
+        if (!fl) return;
+        if (fl.size > 32 * 1024) { UI.toast('Это не похоже на файл ключа: больше 32 КБ', true); return; }
+        const rd = new FileReader();
+        rd.onload = () => {
+          const t = String(rd.result || '');
+          if (/PuTTY-User-Key-File/.test(t)) { UI.toast('Это ключ PuTTY (.ppk) — сохраните его в PuTTYgen как OpenSSH key', true); return; }
+          if (!/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(t)) { UI.toast(/^ssh-|^ecdsa-/.test(t.trim()) ? 'Это публичный ключ (.pub) — нужен закрытый, без .pub' : 'В файле нет закрытого ключа', true); return; }
+          F.key_text = t; ta.value = t; fileNote.textContent = 'Загружен ' + fl.name + '. Сохраните, чтобы бот его запомнил.'; UI.haptic('success');
+        };
+        rd.onerror = () => UI.toast('Не удалось прочитать файл', true);
+        rd.readAsText(fl);
+      });
+      out.push(h('label', { class: 'field stack' }, h('label', {}, 'Закрытый ключ'), ta),
+        act('Загрузить файл ключа', () => file.click()), file, fileNote);
     }
     if (F.key === 'bot') out.push(row({ cls: 'wrap', title: 'Ключ бота', sub: h('span', { class: 'mono', style: 'word-break:break-all' }, botKey || 'ssh-keygen недоступен'), copy: botKey || null, copyLabel: 'Ключ' }));
     if (!isRoot()) out.push(h('label', { class: 'field' }, h('label', {}, 'Пароль sudo'), pwIn(view.has_sudo_password ? 'сохранён' : 'как пароль SSH', 'sudo_password')));

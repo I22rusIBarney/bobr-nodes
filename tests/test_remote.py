@@ -115,8 +115,12 @@ def test_access_forms(tmp_path):
     assert sshaccess.clean({'password': ''}, acc, tmp_path)['password'] == 'pw'
     assert sshaccess.to_node({'mode': 'key', 'user': 'root'}, '/b') == {'ssh_user': 'root', 'ssh_port': 22, 'ssh_key': '/b'}
     assert sshaccess.describe(acc) == 'user, пароль + ключ бота, через sudo'
-    with pytest.raises(ValueError, match='закрытый ключ'):
+    with pytest.raises(ValueError, match='публичный ключ'):
         sshaccess.clean({'key': 'own', 'key_text': 'ssh-ed25519 AAAA'}, None, tmp_path)
+    with pytest.raises(ValueError, match='PuTTYgen'):
+        sshaccess.clean({'key': 'own', 'key_text': 'PuTTY-User-Key-File-3: ssh-ed25519'}, None, tmp_path)
+    with pytest.raises(ValueError, match='закрытый ключ'):
+        sshaccess.clean({'key': 'own', 'key_text': 'просто текст'}, None, tmp_path)
     with pytest.raises(ValueError, match='пароль, ключ'):
         sshaccess.clean({'user': 'root'}, None, tmp_path)
 

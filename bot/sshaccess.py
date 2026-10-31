@@ -29,6 +29,10 @@ def legacy(acc: dict | None) -> dict:
 def save_key(text: str, keydir: str | Path) -> str:
     """Закрытый ключ из админки → файл 600. Проверяем ssh-keygen: ключ целый и без парольной фразы."""
     t = (text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if 'PuTTY-User-Key-File' in t:
+        raise ValueError('это ключ PuTTY (.ppk) — откройте его в PuTTYgen и сохраните как OpenSSH key')
+    if re.match(r'(ssh-|ecdsa-)', t):
+        raise ValueError('это публичный ключ (.pub) — нужен закрытый')
     m = re.fullmatch(r'(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----)\s*(.+?)\s*(-----END [A-Z0-9 ]*PRIVATE KEY-----)', t, re.S)
     if not m:
         raise ValueError('нужен закрытый ключ целиком: от «-----BEGIN … PRIVATE KEY-----» до «-----END … PRIVATE KEY-----»')
