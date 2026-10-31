@@ -26,12 +26,14 @@ from .store import ACTIVE, Store
 
 log = logging.getLogger(__name__)
 
-STEPS = ['mask', 'script', 'xhttp', 'reip', 'replace']  # смена IP платная — после бесплатных шагов, перед покупкой
-STEP_LABEL = {'reip': 'смена IP в bcloud', 'mask': 'Final Mask и свой порт', 'script': 'переустановка другим скриптом',
-              'xhttp': 'запасной XHTTP через CDN', 'replace': 'новая нода в той же локации'}
+STEPS = ['mask', 'script', 'xhttp', 'reip', 'replace']  # порядок по умолчанию: платная смена IP — перед покупкой
+STEP_LABEL = {'mask': 'Final Mask и свой порт', 'script': 'переустановка другим скриптом',
+              'xhttp': 'запасной XHTTP через CDN', 'reip': 'смена IP в bcloud', 'replace': 'новая нода в той же локации'}
 MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам'}
 OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в bcloud', 'keep': 'ничего не трогать'}
-DEFAULTS = {'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
+BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации', 'none': 'не покупать — сообщить'}
+DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest',
+            'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
             'mon_old': 'panel', 'mon_max_buys': 2}
 FAILS_TO_ALERT = 3
 RECOVER_CYCLES = 2
@@ -39,7 +41,8 @@ RECOVER_CYCLES = 2
 
 def settings_of(prof: dict) -> dict:
     out = {k: prof[k] if prof.get(k) is not None else v for k, v in DEFAULTS.items()}
-    out['mon_steps'] = [x for x in STEPS if x in (out['mon_steps'] or [])]
+    out['mon_steps'] = list(dict.fromkeys(x for x in (out['mon_steps'] or []) if x in STEPS))  # порядок — как задан
+    out['mon_buy'] = list(out['mon_buy'] or [])
     return out
 
 
@@ -56,9 +59,15 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
         out['mon_mode'] = raw['mon_mode']
     if raw.get('mon_steps') is not None:
         steps = raw['mon_steps']
-        if not isinstance(steps, list) or any(x not in STEPS for x in steps):
-            raise ValueError('шаги починки: ' + ', '.join(STEPS))
-        out['mon_steps'] = [x for x in STEPS if x in steps]
+        if not isinstance(steps, list) or any(x not in STEPS for x in steps) or len(set(steps)) != len(steps):
+            raise ValueError('шаги починки: ' + ', '.join(STEPS) + ', каждый не больше раза')
+        out['mon_steps'] = list(steps)  # включённые шаги в заданном порядке
+    if raw.get('mon_buy') is not None:
+        out['mon_buy'] = clean_buy(raw['mon_buy'])
+    if raw.get('mon_buy_last') is not None:
+        if raw['mon_buy_last'] not in BUY_LAST:
+            raise ValueError('если ни одна конфигурация не подошла: cheapest или none')
+        out['mon_buy_last'] = raw['mon_buy_last']
     if 'mon_script' in raw:
         sid = raw['mon_script']
         if sid not in (None, '', 0):
@@ -86,6 +95,36 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
             raise ValueError('покупок в сутки: от 0 до 20')
         out['mon_max_buys'] = n
     return out
+
+
+def clean_buy(raw) -> list[dict]:
+    """Конфигурации новой ноды по приоритету: same — как у старой, preset — готовый тариф с такими vCPU/памятью/диском,
+    custom — своя конфигурация (конструктор bcloud)."""
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 8:
+        raise ValueError('конфигурации новой ноды: от 1 до 8 вариантов')
+    out = []
+    for c in raw:
+        t = (c or {}).get('type') if isinstance(c, dict) else None
+        if t == 'same':
+            item = {'type': 'same'}
+        elif t in ('preset', 'custom'):
+            try:
+                item = {'type': t, **{k: int(c[k]) for k in ('cpu', 'ram', 'disk')}}
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('конфигурация: vCPU, память и диск числами') from None
+            if not (1 <= item['cpu'] <= 256 and 1 <= item['ram'] <= 2048 and 5 <= item['disk'] <= 20000):
+                raise ValueError('конфигурация: странные значения vCPU, памяти или диска')
+        else:
+            raise ValueError('конфигурация: same, preset или custom')
+        if item not in out:
+            out.append(item)
+    return out
+
+
+def spec_label(c: dict) -> str:
+    if c['type'] == 'same':
+        return 'как у старой ноды'
+    return f'{c["cpu"]} vCPU · {c["ram"]} ГБ · {c["disk"]} ГБ' + (' (своя)' if c['type'] == 'custom' else '')
 
 
 def kb(*rows) -> InlineKeyboardMarkup:
@@ -492,19 +531,51 @@ class Monitor:
         L = next((x for x in cat['locations'] if x['code'] == loc), None)
         if not L:
             raise ValueError(f'локации «{loc or "?"}» сейчас нет в bcloud')
-        idx, custom = bd.get('idx'), None
-        if bd.get('custom'):
-            custom = await svc.custom_offer(self.store, prof, cat, loc, bd['custom'])
-            idx = None
-        elif idx is None or not any(o['idx'] == idx for o in L['offers']):
-            idx = min(L['offers'], key=lambda o: o['price_kop'])['idx']
+        idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
         doms = await svc.auto_domains(self.store, prof, loc, 1)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
         ids = await svc.create_jobs(self.store, self.runner, self.chat(), prof['id'], cat, loc, idx, '1m', doms,
                                     squads=bd.get('squads'), host=bd.get('host'), extras=extras, custom=custom,
                                     note={'monitor': True, 'replaces': st['addr']})
         self.store.set(f'mon_buys:{prof["id"]}', json.dumps(buys + [time.time()]))
-        return ids[0], f'покупаю новую ноду {doms[0]} в {L["flag"]} {L["name"]}'
+        return ids[0], f'покупаю новую ноду {doms[0]} в {L["flag"]} {L["name"]}, {why}'
+
+    async def pick_offer(self, prof: dict, cat: dict, L: dict, bd: dict, cfg: dict) -> tuple[int | None, dict | None, str]:
+        """Первая доступная в локации конфигурация из списка группы → (idx, своя конфигурация, подпись)."""
+        offers, loc = L['offers'], L['code']
+        tried = []
+
+        async def custom_of(spec: dict):
+            try:
+                return await svc.custom_offer(self.store, prof, cat, loc, spec)
+            except (ValueError, BcloudError):
+                return None
+
+        def preset_of(spec: dict):
+            return next((o for o in offers if (o['cpu'], o['ram'], o['disk']) == (spec['cpu'], spec['ram'], spec['disk'])), None)
+
+        for n, c in enumerate(cfg['mon_buy'], 1):
+            note = spec_label(c) + ('' if n == 1 else f' (вариант {n})')
+            if c['type'] == 'same':
+                if bd.get('custom'):
+                    o = await custom_of(bd['custom'])
+                    if o:
+                        return None, o, note
+                elif bd.get('idx') is not None and any(x['idx'] == bd['idx'] for x in offers):
+                    return bd['idx'], None, note
+            elif c['type'] == 'preset':
+                o = preset_of(c)
+                if o:
+                    return o['idx'], None, note
+            else:
+                o = await custom_of(c)
+                if o:
+                    return None, o, note
+            tried.append(spec_label(c))
+        if cfg['mon_buy_last'] == 'cheapest' and offers:
+            o = min(offers, key=lambda x: x['price_kop'])
+            return o['idx'], None, f'самый дешёвый тариф {svc.spec_text(o)} — не нашлось: {", ".join(tried)}'
+        raise ValueError(f'в {L["name"]} нет ни одной из заданных конфигураций: {", ".join(tried)}')
 
     async def finish_replace(self, prof: dict, st: dict, job: dict) -> None:
         """Новая нода готова: со старой — по настройке группы."""
@@ -554,7 +625,7 @@ class Monitor:
                            **{k: v for k, v in cfg.items() if k != 'mon_sub'}, 'nodes': nodes,
                            'buys_today': len(self.buys_today(p['id']))})
         return {'checkers': checkers, 'groups': groups, 'polled_at': int(self.polled_at), 'every': int(self.every),
-                'steps': STEP_LABEL, 'modes': MODES, 'old': OLD}
+                'steps': STEP_LABEL, 'modes': MODES, 'old': OLD, 'buy_last': BUY_LAST}
 
 
 class _Sink:

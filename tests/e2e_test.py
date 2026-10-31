@@ -1146,7 +1146,10 @@ async def main():
     st, js = await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_sub': 'https://sub.example.com/x#y'})
     ok(st == 400 and 'без пробелов' in js['detail'], 'ссылка подписки с # отклонена')
     st, js = await wapi(f'profiles/{pid}/monitor', 'POST', {'mon_sub': 'https://sub.example.com/AbC123', 'mon_mode': 'auto',
-                                                             'mon_steps': ['mask', 'replace'], 'mon_old': 'delete', 'mon_max_buys': 1, 'mon_port': '8443'})
+                                                             'mon_steps': ['mask', 'replace'], 'mon_old': 'delete', 'mon_max_buys': 1, 'mon_port': '8443',
+                                                             # нового 9-ядерного тарифа нет в локации — берётся следующий вариант
+                                                             'mon_buy': [{'type': 'preset', 'cpu': 9, 'ram': 9, 'disk': 90},
+                                                                         {'type': 'preset', 'cpu': 2, 'ram': 2, 'disk': 30}, {'type': 'same'}]})
     ok(st == 200 and js['resync'], f'мониторинг группы включён: {js}')
     await asyncio.gather(*list(monitor._bg))
     env = fakes_remote.files.get(('192.0.2.50', CK.DIR + '/.env'), '')
@@ -1189,7 +1192,9 @@ async def main():
     await runner.wait_all()
     nj = store.job(stv['job'])
     ok(nj['status'] == 'done' and nj['data']['location'] == vd['location'] and nj['data']['replaces'] == victim['address']
-       and len(set(astra.made) - made0) == 1, f'куплена и поставлена новая нода в той же локации: {nj["error"]}')
+       and len(set(astra.made) - made0) == 1 and astra.made[max(astra.made)]['idx'] == 1,
+       f'куплена и поставлена новая нода в той же локации, тарифом из второго варианта: {nj["error"]}')
+    ok(any('вариант 2' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'в сообщении — какой вариант конфигурации взят')
     n1 = len(sess.sent)
     await monitor.tick()
     msgs = [m.text for name, m in sess.sent[n1:] if name == 'SendMessage']

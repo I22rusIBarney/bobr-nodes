@@ -21,7 +21,19 @@ def test_sub_url_rejected(bad):
 def test_settings():
     cfg = M.clean_settings({'mon_sub': 'https://sub.example/AbC', 'mon_mode': 'auto', 'mon_steps': ['replace', 'reip'],
                             'mon_port': '443', 'mon_old': 'keep', 'mon_max_buys': '0'}, {}, [])
-    assert cfg['mon_steps'] == ['reip', 'replace'] and cfg['mon_port'] == 443 and cfg['mon_max_buys'] == 0
+    assert cfg['mon_steps'] == ['replace', 'reip'] and cfg['mon_port'] == 443 and cfg['mon_max_buys'] == 0  # порядок — как задан
+    with pytest.raises(ValueError):
+        M.clean_settings({'mon_steps': ['mask', 'mask']}, {}, [])
+    buy = M.clean_settings({'mon_buy': [{'type': 'preset', 'cpu': '2', 'ram': 4, 'disk': 40}, {'type': 'same'},
+                                        {'type': 'custom', 'cpu': 1, 'ram': 2, 'disk': 30}, {'type': 'same'}],
+                            'mon_buy_last': 'none'}, {}, [])
+    assert buy['mon_buy'] == [{'type': 'preset', 'cpu': 2, 'ram': 4, 'disk': 40}, {'type': 'same'},
+                              {'type': 'custom', 'cpu': 1, 'ram': 2, 'disk': 30}] and buy['mon_buy_last'] == 'none'
+    for bad in ({'mon_buy': []}, {'mon_buy': [{'type': 'gold'}]}, {'mon_buy': [{'type': 'preset', 'cpu': 'x'}]},
+                {'mon_buy_last': 'maybe'}):
+        with pytest.raises(ValueError):
+            M.clean_settings(bad, {}, [])
+    assert M.spec_label({'type': 'custom', 'cpu': 1, 'ram': 2, 'disk': 30}) == '1 vCPU · 2 ГБ · 30 ГБ (своя)'
     # пустая ссылка — оставить текущую, «-» — убрать
     assert M.clean_settings({'mon_sub': ''}, {'mon_sub': 'https://x/1'}, [])['mon_sub'] == 'https://x/1'
     assert M.clean_settings({'mon_sub': '-'}, {'mon_sub': 'https://x/1'}, [])['mon_sub'] == ''
@@ -30,6 +42,8 @@ def test_settings():
         with pytest.raises(ValueError):
             M.clean_settings(bad, {}, [{'id': 5, 'status': 'draft'}])
     assert M.settings_of({})['mon_steps'] == M.STEPS and M.settings_of({})['mon_mode'] == 'ask'
+    assert M.settings_of({})['mon_buy'] == [{'type': 'same'}] and M.settings_of({})['mon_buy_last'] == 'cheapest'
+    assert M.STEPS.index('reip') == M.STEPS.index('replace') - 1  # платная смена IP — прямо перед покупкой
 
 
 def test_healthy():

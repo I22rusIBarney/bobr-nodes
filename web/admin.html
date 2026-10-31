@@ -234,6 +234,7 @@ function otherView() {
 
 // ───────── мониторинг: чекеры в России, подписки групп, починка ─────────
 let MON = null, monTimer = 0;
+const MONF = {};  // несохранённые настройки мониторинга групп
 const MST = { ok: ['', 'ok', 'доступна'], down: ['недоступна', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
   ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
 const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
@@ -259,7 +260,7 @@ function monitorView() {
     const bad = g.nodes.filter(n => ['down', 'repairing', 'gave_up'].includes(n.status)).length;
     return row({ title: g.name, sub: g.enabled ? `нод ${g.nodes.length}, ${MON.modes[g.mon_mode]}` : 'подписка не задана',
       status: !g.enabled ? null : bad ? ['проблем: ' + bad, 'bad'] : g.nodes.length ? ['', 'ok', 'всё доступно'] : null,
-      onClick: () => UI.nav.push(() => monGroupView(g.id)) });
+      onClick: () => { delete MONF[g.id]; UI.nav.push(() => monGroupView(g.id)); } });
   });
   v.append(group('Группы', gRows.length ? gRows : [row({ title: 'Групп пока нет', cls: 'is-dim' })]));
   const go = h('button', { class: 'btn tinted', type: 'button', disabled: !MON.checkers.some(c => c.status === 'running') }, 'Проверить сейчас');
@@ -340,20 +341,74 @@ function monGroupView(pid) {
       g.nodes.some(n => ['down', 'gave_up', 'ignored'].includes(n.status)) ? 'Нажмите на недоступную ноду, чтобы запустить починку.' : null));
   }
   // настройки
-  const S = { mon_sub: '', mon_mode: g.mon_mode, mon_steps: new Set(g.mon_steps), mon_script: g.mon_script, mon_port: String(g.mon_port || 8443), mon_old: g.mon_old, mon_max_buys: String(g.mon_max_buys) };
+  // правки живут, пока страница открыта: перерисовка страницы (опрос) их не сбрасывает
+  const S = MONF[pid] || (MONF[pid] = { mon_sub: '', mon_mode: g.mon_mode, mon_on: new Set(g.mon_steps),
+    mon_order: [...g.mon_steps, ...Object.keys(MON.steps).filter(k => !g.mon_steps.includes(k))],
+    mon_script: g.mon_script, mon_port: String(g.mon_port || 8443), mon_old: g.mon_old, mon_max_buys: String(g.mon_max_buys),
+    mon_buy: g.mon_buy.map(x => ({ ...x })), mon_buy_last: g.mon_buy_last });
   const sub = h('input', { type: 'password', class: 'code', autocomplete: 'off', placeholder: g.sub_hint ? 'оставить ' + g.sub_hint + ' («-» — убрать)' : 'https://sub.example.com/…' });
   sub.addEventListener('input', () => { S.mon_sub = sub.value.trim(); });
-  const stepRows = Object.entries(MON.steps).map(([k, t]) => {
-    const extra = k === 'script' ? h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Чем переустановить'),
-      UI.chips([{ value: null, label: 'Nuvrion Vision' }, ...MON.scripts.map(x => ({ value: x.id, label: x.title }))], S.mon_script, x => { S.mon_script = x; }))
-      : k === 'mask' ? h('label', { class: 'field' }, h('label', {}, 'Порт для клиентов'), textIn(S.mon_port, '8443', x => { S.mon_port = x.replace(/\D/g, ''); }, true, 'right')) : null;
-    return [row({ title: t, right: UI.toggle(S.mon_steps.has(k), on => { on ? S.mon_steps.add(k) : S.mon_steps.delete(k); }, t) }), extra];
-  }).flat().filter(Boolean);
+  // шаги: включить/выключить и порядок стрелками; список перерисовывается сам, без перерисовки страницы
+  const stepBox = h('div', { class: 'list' });
+  const moveBtn = (label, dis, fn) => h('button', { class: 'btn secondary small', type: 'button', 'aria-label': label, disabled: dis, onclick: () => { UI.haptic('select'); fn(); } }, label === 'Выше' ? '↑' : label === 'Ниже' ? '↓' : '✕');
+  const swap = (arr, i, j) => { [arr[i], arr[j]] = [arr[j], arr[i]]; };
+  const drawSteps = () => {
+    let n = 0;
+    stepBox.replaceChildren(...S.mon_order.map((k, i) => {
+      const on = S.mon_on.has(k), t = MON.steps[k];
+      const extra = !on ? null : k === 'script' ? h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Чем переустановить'),
+        UI.chips([{ value: null, label: 'Nuvrion Vision' }, ...MON.scripts.map(x => ({ value: x.id, label: x.title }))], S.mon_script, x => { S.mon_script = x; }))
+        : k === 'mask' ? h('label', { class: 'field' }, h('label', {}, 'Порт для клиентов'), textIn(S.mon_port, '8443', x => { S.mon_port = x.replace(/\D/g, ''); }, true, 'right')) : null;
+      const r = row({ title: (on ? (++n) + '. ' : '') + t, cls: on ? '' : 'is-dim', chevron: false,
+        right: h('div', { class: 'counter', style: 'gap:6px' }, moveBtn('Выше', i === 0, () => { swap(S.mon_order, i, i - 1); drawSteps(); }),
+          moveBtn('Ниже', i === S.mon_order.length - 1, () => { swap(S.mon_order, i, i + 1); drawSteps(); }),
+          UI.toggle(on, v2 => { v2 ? S.mon_on.add(k) : S.mon_on.delete(k); drawSteps(); }, t)) });
+      return [r, extra];
+    }).flat().filter(Boolean));
+  };
+  drawSteps();
+  // конфигурации новой ноды по приоритету
+  const buyBox = h('div', { class: 'list' });
+  const BL = c => c.type === 'same' ? 'Как у старой ноды' : `${c.cpu} vCPU · ${c.ram} ГБ · ${c.disk} ГБ` + (c.type === 'custom' ? ' — своя' : ' — тариф');
+  const addBuy = c => { if (S.mon_buy.some(x => JSON.stringify(x) === JSON.stringify(c))) return UI.toast('Такой вариант уже есть', true); if (S.mon_buy.length >= 8) return UI.toast('Не больше 8 вариантов', true); S.mon_buy.push(c); drawBuy(); };
+  let cat = null;
+  const needCat = async () => { if (!cat) cat = await api('catalog?pid=' + pid); return cat; };
+  const pickPreset = async () => {
+    const c = await UI.run(needCat); if (!c) return;
+    const specs = {};  // тарифы по всем локациям: одинаковые конфигурации — одной строкой, с разбросом цены
+    c.locations.forEach(l => l.offers.forEach(o => { const k = `${o.cpu}/${o.ram}/${o.disk}`; const e = specs[k] || (specs[k] = { cpu: o.cpu, ram: o.ram, disk: o.disk, min: o.price_kop, max: o.price_kop, n: 0 }); e.min = Math.min(e.min, o.price_kop); e.max = Math.max(e.max, o.price_kop); e.n++; }));
+    const list = Object.values(specs).sort((a, b) => a.min - b.min);
+    UI.sheet('Готовый тариф', close => h('div', {}, group(null, list.map(e => row({ title: `${e.cpu} vCPU · ${e.ram} ГБ · ${e.disk} ГБ`,
+      sub: `локаций: ${e.n}`, detail: e.min === e.max ? rubK(e.min) : `${rubK(e.min)}–${rubK(e.max)}`,
+      onClick: () => { close(); addBuy({ type: 'preset', cpu: e.cpu, ram: e.ram, disk: e.disk }); } })), 'Тариф ищется в локации старой ноды по vCPU, памяти и диску. Нет там такого — следующий вариант.')));
+  };
+  const pickCustom = async () => {
+    const c = await UI.run(needCat); if (!c) return;
+    if (!c.configurator) return UI.alert('В bcloud нет конструктора — доступны только готовые тарифы.');
+    const sp = defSpec(c.configurator);
+    UI.sheet('Своя конфигурация', close => h('div', {}, group(null, [['cpu', 'vCPU'], ['ram', 'Память, ГБ'], ['disk', 'Диск, ГБ']].map(([k, t]) =>
+      row({ title: t, chevron: false, right: rangeStepper(sp[k], c.configurator[k], x => { sp[k] = x; }) }))),
+      h('div', { class: 'pad' }, h('button', { class: 'btn', type: 'button', onclick: () => { close(); addBuy({ type: 'custom', ...sp }); } }, 'Добавить'))));
+  };
+  const drawBuy = () => {
+    buyBox.replaceChildren(...S.mon_buy.map((c, i) => row({ title: (i + 1) + '. ' + BL(c), chevron: false,
+      right: h('div', { class: 'counter', style: 'gap:6px' }, moveBtn('Выше', i === 0, () => { swap(S.mon_buy, i, i - 1); drawBuy(); }),
+        moveBtn('Ниже', i === S.mon_buy.length - 1, () => { swap(S.mon_buy, i, i + 1); drawBuy(); }),
+        moveBtn('Убрать', S.mon_buy.length === 1, () => { S.mon_buy.splice(i, 1); drawBuy(); })) })),
+      ...(S.mon_buy.some(x => x.type === 'same') ? [] : [act('+ Как у старой ноды', () => addBuy({ type: 'same' }))]),
+      act('+ Готовый тариф', pickPreset), act('+ Своя конфигурация', pickCustom),
+      h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Если не подошёл ни один'),
+        UI.chips(Object.entries(MON.buy_last).map(([k, t]) => ({ value: k, label: t })), S.mon_buy_last, x => { S.mon_buy_last = x; })));
+  };
+  drawBuy();
   const status = statusLine();
   const save = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
   save.onclick = UI.busy(save, async () => {
-    const r = await UI.run(() => api('profiles/' + pid + '/monitor', 'POST', { ...S, mon_steps: [...S.mon_steps], mon_max_buys: S.mon_max_buys, mon_port: S.mon_port }));
+    const body = { mon_sub: S.mon_sub, mon_mode: S.mon_mode, mon_steps: S.mon_order.filter(k => S.mon_on.has(k)), mon_script: S.mon_script,
+      mon_port: S.mon_port, mon_old: S.mon_old, mon_max_buys: S.mon_max_buys, mon_buy: S.mon_buy, mon_buy_last: S.mon_buy_last };
+    const r = await UI.run(() => api('profiles/' + pid + '/monitor', 'POST', body));
     if (!r) return;
+    delete MONF[pid];
     UI.toast(r.resync ? 'Сохранено — обновляю подписки на чекерах' : 'Сохранено');
     sub.value = ''; await loadMon(); UI.nav.refresh();
   });
@@ -363,12 +418,14 @@ function monGroupView(pid) {
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Когда нода недоступна'),
     h('div', { class: 'seg-row' }, UI.chips(Object.entries(MON.modes).map(([k, t]) => ({ value: k, label: t })), S.mon_mode, x => { S.mon_mode = x; })),
     h('div', { class: 'group-f' }, '«Предлагать» — сообщение с кнопками «Починить», «Сразу новая нода», «Не трогать». «Чинить сам» — шаги ниже по порядку без вопросов.')));
-  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Шаги починки, по порядку'), h('div', { class: 'list' }, stepRows),
-    h('div', { class: 'group-f' }, 'После каждого шага бот ждёт две проверки (~10 мин): нода ожила — готово, нет — следующий шаг. Смена IP — только для нод, купленных ботом; переустановка — на том же сервере с тем же доменом.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Шаги починки'), stepBox,
+    h('div', { class: 'group-f' }, 'Включённые шаги идут сверху вниз, стрелками — порядок. После каждого шага бот ждёт две проверки (~10 мин): нода ожила — готово, нет — следующий шаг. Смена IP — только для нод, купленных ботом; переустановка — на том же сервере с тем же доменом.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Конфигурация новой ноды'), buyBox,
+    h('div', { class: 'group-f' }, 'Локация — та же, что у старой ноды. Бот берёт первый вариант, который там есть; нет — следующий.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Новая нода'), h('div', { class: 'list' },
     h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Старый сервер после замены'), UI.chips(Object.entries(MON.old).map(([k, t]) => ({ value: k, label: t })), S.mon_old, x => { S.mon_old = x; })),
     h('label', { class: 'field' }, h('label', {}, 'Покупок за сутки, не больше'), textIn(S.mon_max_buys, '2', x => { S.mon_max_buys = x.replace(/\D/g, ''); }, true, 'right'))),
-    h('div', { class: 'group-f' }, `Та же локация и тариф, что у старой ноды, имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в bcloud сервер не вернуть — остаток срока возвращается по правилам bcloud.`)));
+    h('div', { class: 'group-f' }, `Имя — по шаблону группы. Сегодня куплено: ${g.buys_today}. Удалённый в bcloud сервер не вернуть — остаток срока возвращается по правилам bcloud.`)));
   v.append(h('div', { class: 'pad', style: 'margin-bottom:var(--s2)' }, status), h('div', { class: 'actions' }, save));
   return v;
 }
