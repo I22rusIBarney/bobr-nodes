@@ -1503,7 +1503,9 @@ async def main():
     hour = _tm.gmtime().tm_hour
     pilot._load_at = pilot._rent_at = _tm.time()  # замеры и аренду здесь не ждём — они проверены выше
     target = next(x for x in world.nodes if x['uuid'] == two[0])
-    target['nodeVersion'] = '2.2.0'
+    target['versions'] = {'node': '2.2.0', 'xray': '25.9.11'}  # как в Remnawave 2.2+
+    tv = next(x for x in (await wapi(f'profiles/{pid}/nodes'))[1]['nodes'] if x['uuid'] == two[0])
+    ok(tv['version'] == '2.2.0' and tv['xray'] == '25.9.11', f'версия ноды из versions (Remnawave 2.2+): {tv["version"]}')
     st, js = await wapi(f'profiles/{pid}/auto', 'POST', {'update': True, 'hour': hour, 'weekday': None, 'tz': 0})
     ok(st == 200 and js['update'] and js['hour'] == hour, 'автообновление включено')
     n0, u0 = len(sess.sent), len(fakes_remote.upgrades)

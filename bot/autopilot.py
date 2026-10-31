@@ -286,7 +286,7 @@ class Autopilot:
         if tag == 'latest':  # без списка версий не знаем, что устарело — ночью наугад не обновляем
             return
         old = [n['uuid'] for n in nodes if not n.get('isDisabled') and n.get('isConnected')
-               and up.semver(n.get('nodeVersion')) and up.semver(n['nodeVersion']) < up.semver(tag)]
+               and up.semver(up.node_version(n)) and up.semver(up.node_version(n)) < up.semver(tag)]
         if old:
             st.update(tag=tag, queue=old, done=[], failed=[], started=now, reported=False)
             self.put(key, st)
@@ -526,7 +526,7 @@ class Autopilot:
                 lines.append('🔥 нагрузка: ' + ', '.join(hotl)[:300])
             target = up.pick_target(tags, pv)
             if target != 'latest':
-                old = [n for n in on if up.semver(n.get('nodeVersion')) and up.semver(n['nodeVersion']) < up.semver(target)]
+                old = [n for n in on if up.semver(up.node_version(n)) and up.semver(up.node_version(n)) < up.semver(target)]
                 if old:
                     lines.append(f'🆕 устарели: {len(old)} {"нода" if len(old) == 1 else "ноды" if len(old) < 5 else "нод"} (есть {target})')
             try:

@@ -128,6 +128,17 @@ def node_info(panel: engine.Panel, uuid: str) -> dict | None:
     return next((n for n in panel.call('GET', '/api/nodes') if n['uuid'] == uuid), None)
 
 
+def node_version(n: dict | None) -> str:
+    """Версия ноды из ответа панели: старые Remnawave — nodeVersion, новые (2.2+) — versions.node."""
+    n = n or {}
+    return str(n.get('nodeVersion') or (n.get('versions') or {}).get('node') or '')
+
+
+def xray_version(n: dict | None) -> str:
+    n = n or {}
+    return str(n.get('xrayVersion') or (n.get('versions') or {}).get('xray') or '')
+
+
 def upgrade_node(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Callable[[str], None],
                  check_tries: int = 12, check_every: float = 10) -> str:
     """node: node_uuid, name, ip, tag, ssh_*. Возвращает итог строкой; StepError — не обновилась (и откачена)."""
@@ -135,7 +146,7 @@ def upgrade_node(node: dict, prof: dict, logfile, log: Callable[[str], None], st
     pn = node_info(panel, node['node_uuid'])
     if not pn:
         raise engine.StepError('ноды больше нет в панели')
-    was = pn.get('nodeVersion') or ''
+    was = node_version(pn)
     stage('ssh')
     r = engine.Remote({**node, 'ip': node.get('ip') or pn['address']}, logfile)
     rc, out = r.run('id -u', 60)
@@ -165,7 +176,7 @@ def upgrade_node(node: dict, prof: dict, logfile, log: Callable[[str], None], st
         _, st = r.run(check_cmd(), 60)
         cur = node_info(panel, node['node_uuid']) or {}
         if 'UP_RUNNING' in st and cur.get('isConnected'):
-            now = cur.get('nodeVersion') or tag
+            now = node_version(cur) or tag
             log(f'нода на связи: {was or "?"} → {now}')
             return f'{was} → {now}' if was else f'версия {now}'
         why = 'контейнер не запущен' if 'UP_RUNNING' not in st else 'нет связи с панелью'

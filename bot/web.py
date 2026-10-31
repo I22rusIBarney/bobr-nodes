@@ -632,7 +632,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         out = []
         for n in nodes:
             pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
-            out.append({'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
+            out.append({'version': up.node_version(n), 'xray': up.xray_version(n),
                         'load': autopilot.load_of(p['id'], n['uuid']) if autopilot else {},
                         'has_ssh': bool(runner.ssh_of(p['id'], n['uuid']) or n['address'] in bot), 'busy': n['uuid'] in busy,
                         'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
@@ -720,7 +720,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'ip': ip, 'domain': dom, 'address_is_ip': engine.is_ip(n['address']), 'bcloud': bc,
                   'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1],
                   'relays': [relay_view(x) for x in store.relays() if x['pid'] == p['id'] and x['node_uuid'] == uuid],
-                  'version': n.get('nodeVersion') or '', 'xray': n.get('xrayVersion') or '',
+                  'version': up.node_version(n), 'xray': up.xray_version(n),
                   'relay_port': rl.target_port_of(hosts),
                   'load': autopilot.load_of(p['id'], uuid, hist=True) if autopilot else {},
                   'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),

@@ -26,3 +26,10 @@ def test_tag_bad(tag):
 def test_commands_marked():
     assert up.MARK in up.upgrade_cmd('2.3.1') and '"$REPO:"2.3.1;' in up.upgrade_cmd('2.3.1')
     assert 'BNODES_UPGRADE_CHECK' in up.check_cmd() and 'BNODES_UPGRADE_ROLLBACK' in up.rollback_cmd()
+
+
+def test_node_version_old_and_new_panel():
+    assert up.node_version({'nodeVersion': '2.1.0', 'xrayVersion': '25.1.1'}) == '2.1.0'
+    new = {'versions': {'node': '3.4.3', 'xray': '25.9.11'}}  # Remnawave 2.2+: версии в versions
+    assert up.node_version(new) == '3.4.3' and up.xray_version(new) == '25.9.11'
+    assert up.node_version({'versions': None}) == '' and up.node_version(None) == '' and up.xray_version({}) == ''
