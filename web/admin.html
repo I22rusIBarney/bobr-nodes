@@ -1123,7 +1123,7 @@ function groupStats(v, pid, L) {
     sub: h('span', {}, `CPU ${n.load.cpu}% · RAM ${n.load.mem ?? '—'}%` + (n.load.rx != null ? ` · ↓${n.load.rx} ↑${n.load.tx} Мбит/с` : ''),
       h('div', { class: 'bar', style: 'margin-top:8px' }, h('i', { class: tone(n.load.cpu), style: `width:${Math.min(100, n.load.cpu)}%` }))),
     status: nodeHot(n) ? ['высокая', 'warn'] : null, onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } })))
-    : group(null, [row({ cls: 'wrap is-dim', chevron: false, title: 'Замеров пока нет', sub: 'Включите «Следить за нагрузкой» в автоматизации группы — бот будет заходить на ноды по SSH раз в 15 минут.' })]).lastChild));
+    : group(null, [row({ cls: 'wrap is-dim', chevron: false, title: 'Замеров пока нет', sub: 'Данные появятся через несколько минут: Remnawave 2.2+ отдаёт нагрузку сама. Для старой панели включите «Следить за нагрузкой» в автоматизации группы — бот будет заходить на ноды по SSH.' })]).lastChild));
   // версии
   const vs = {};
   ns.forEach(n => { const k = n.version || '—'; vs[k] = (vs[k] || 0) + 1; });
@@ -1531,12 +1531,14 @@ function loadCard(n) {
       h('span', {}, h('i', { style: 'background:var(--ic-amber)' }), 'Сеть ', h('b', {}, last.rx != null ? `↓${last.rx} ↑${last.tx} Мбит/с` : '—')));
     const chart = pts.length >= 2 ? UI.chart([{ color: '#4466F2', pts: pts.map(x => [x.t, x.cpu]) }, { color: '#3CC4C9', pts: pts.map(x => [x.t, x.mem]) }], { t0, t1: now, max: 100, limit: 85 })
       : h('div', { class: 'chart', style: 'display:grid;place-items:center;text-align:center;color:var(--hint);font-size:13px;padding:0 12px' },
-        !n.load_on ? 'Замеры выключены: включите «Следить за нагрузкой» в автоматизации группы.'
+        L.source === 'panel' || !hist.length ? 'График появится через несколько минут: панель отдаёт нагрузку, бот записывает её раз в 3 минуты. '
+            + 'Если панель старше Remnawave 2.2, нагрузку можно снимать по SSH — включите «Следить за нагрузкой» в автоматизации группы.'
           : L.error ? 'Бот не смог зайти на ноду по SSH: ' + L.error
-          : n.ssh && !n.ssh.source ? 'Нужен доступ по SSH — укажите его ниже, и бот начнёт замеры.'
-          : 'График появится после пары замеров — бот заходит на ноду раз в 15 минут.');
+          : 'График появится после пары замеров — по SSH бот заходит на ноду раз в 15 минут.');
     box.replaceChildren(h('div', { class: 'chart-h' }, h('b', {}, 'Нагрузка сервера'),
-      UI.segmented([{ value: 'h6', label: '6 ч' }, { value: 'h24', label: '24 ч' }], NPERIOD, x => { NPERIOD = x; draw(); }, 'compact')), chart, legend);
+      UI.segmented([{ value: 'h6', label: '6 ч' }, { value: 'h24', label: '24 ч' }], NPERIOD, x => { NPERIOD = x; draw(); }, 'compact')), chart, legend,
+      pts.length >= 2 ? h('div', { class: 'group-f', style: 'margin-top:8px' }, L.source === 'panel'
+        ? 'Из панели, раз в 3 минуты. CPU — средняя загрузка на ядро.' : 'По SSH, раз в 15 минут.') : null);
   };
   draw();
   return h('section', { class: 'group' }, box);

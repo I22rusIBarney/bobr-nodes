@@ -1477,6 +1477,18 @@ async def main():
     await pilot.check_load()
     ok(any('нагрузка спала' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'нагрузка спала — сообщение')
     hn = next(x for x in L['nodes'] if x['load'].get('hot') == ['cpu'])
+    # нагрузка из панели (Remnawave 2.2+): чаще и без SSH
+    pn = next(n for n in world.nodes if n['uuid'] == hn['uuid'])
+    pn['system'] = {'info': {'cpus': 2, 'memoryTotal': 4_000}, 'stats': {'memoryUsed': 1_000, 'memoryFree': 3_000, 'loadAvg': [0.5, 0.4, 0.3],
+                                                                        'interface': {'rxBytesPerSec': 1_250_000, 'txBytesPerSec': 625_000}}}
+    import time as _t0
+    await pilot.panel_load(_t0.time() - 200)
+    await pilot.panel_load()
+    st, pd_ = await wapi(f'profiles/{pid}/nodes/{hn["uuid"]}')
+    ok(st == 200 and pd_['load']['source'] == 'panel' and len(pd_['load']['hist']) == 2 and pd_['load']['cpu'] == 25
+       and pd_['load']['rx'] == 10.0 and pd_['load']['hot'] == [], f'нагрузка из панели: {pd_["load"].get("source")}, {pd_["load"].get("cpu")}')
+    del pn['system']
+    store.set(f'ap:pload:{pid}:{hn["uuid"]}', '{}')
     st, nd = await wapi(f'profiles/{pid}/nodes/{hn["uuid"]}')
     ok(st == 200 and len(nd['load'].get('hist') or []) >= 4 and nd['load_on'] and 'hist' not in hn['load']
        and nd['load']['hist'][-1].get('cpu') is not None, f'история нагрузки ноды для графика: {nd.get("load", {}).get("hist", [])[-1:]}')

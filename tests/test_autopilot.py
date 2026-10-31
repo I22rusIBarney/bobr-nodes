@@ -58,3 +58,12 @@ def test_load_hist_keeps_a_day():
     assert h[-1] == {'t': 100_000, 'cpu': 50, 'mem': 40, 'rx': 1.5, 'tx': 0.5}
     assert len(ap.load_hist([{'t': 99_000 + i} for i in range(300)], {}, 100_000.0)) == 200
     assert ap.load_hist(None, {'cpu': 1}, 5.0) == [{'t': 5, 'cpu': 1, 'mem': None, 'rx': None, 'tx': None}]
+
+
+def test_panel_sample_from_remnawave_system():
+    n = {'system': {'info': {'cpus': 2, 'memoryTotal': 4_000}, 'stats': {'memoryUsed': 1_000, 'memoryFree': 3_000, 'loadAvg': [1.5, 1, 1],
+                                                                        'interface': {'rxBytesPerSec': 5_000_000, 'txBytesPerSec': 2_500_000}}}}
+    assert ap.panel_sample(n) == {'cpu': 75, 'mem': 25, 'rx': 40.0, 'tx': 20.0, 'cores': 2}
+    assert ap.panel_sample({'system': None}) is None and ap.panel_sample({}) is None
+    over = {'system': {'info': {'cpus': 1}, 'stats': {'loadAvg': [3.0], 'memoryUsed': 1, 'memoryFree': 1, 'interface': None}}}
+    assert ap.panel_sample(over) == {'cpu': 100, 'mem': 50, 'cores': 1}

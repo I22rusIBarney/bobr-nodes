@@ -30,6 +30,7 @@ from .store import ACTIVE, Store
 log = logging.getLogger(__name__)
 
 LOAD_EVERY = 15 * 60
+PANEL_EVERY = 3 * 60         # нагрузка из панели (Remnawave 2.2+ отдаёт её сама) — без SSH и чаще
 RENT_EVERY = 6 * 3600
 HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
 HIGH_CYCLES = 3              # подряд высоких замеров до сообщения (~45 минут)
@@ -134,11 +135,35 @@ def parse_load(out: str, prev: dict | None, now: float) -> dict:
 HIST_KEEP = 24 * 3600
 
 
-def load_hist(prev: list | None, s: dict, now: float) -> list[dict]:
+def load_hist(prev: list | None, s: dict, now: float, keep: int = 200) -> list[dict]:
     """История замеров ноды за сутки для графика: процессор, память, трафик."""
     pts = [x for x in (prev or []) if isinstance(x, dict) and x.get('t', 0) > now - HIST_KEEP]
     pts.append({'t': int(now), **{k: s.get(k) for k in ('cpu', 'mem', 'rx', 'tx')}})
-    return pts[-200:]
+    return pts[-keep:]
+
+
+def panel_sample(n: dict) -> dict | None:
+    """Нагрузка ноды из ответа панели: system.stats (память, средняя загрузка, трафик интерфейса).
+    Процессор — средняя загрузка за минуту на ядро, в процентах (точнее панель не отдаёт). Нет данных — None."""
+    sysd = n.get('system') if isinstance(n.get('system'), dict) else {}
+    info, st = sysd.get('info') or {}, sysd.get('stats') or {}
+    if not st:
+        return None
+    out: dict = {}
+    la, cpus = st.get('loadAvg') or [], info.get('cpus') or 0
+    if la and isinstance(la[0], (int, float)) and cpus:
+        out['cpu'] = min(100, round(100 * la[0] / cpus))
+    used, free = st.get('memoryUsed'), st.get('memoryFree')
+    total = info.get('memoryTotal') or ((used or 0) + (free or 0))
+    if isinstance(used, (int, float)) and total:
+        out['mem'] = min(100, round(100 * used / total))
+    iface = st.get('interface') or {}
+    if isinstance(iface.get('rxBytesPerSec'), (int, float)):
+        out['rx'] = round(iface['rxBytesPerSec'] * 8 / 1e6, 1)
+        out['tx'] = round((iface.get('txBytesPerSec') or 0) * 8 / 1e6, 1)
+    if cpus:
+        out['cores'] = cpus
+    return out or None
 
 
 def hot(sample: dict) -> list[str]:
@@ -168,6 +193,7 @@ class Autopilot:
         self.public_url = public_url
         self.every = every
         self._load_at = 0.0
+        self._pload_at = 0.0
         self._rent_at = 0.0
         self._bg: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
@@ -228,6 +254,9 @@ class Autopilot:
                     log.exception('autopilot update %s', prof.get('id'))
             await self.summaries(now)
             await self.host_alert(now)
+        if now - self._pload_at >= PANEL_EVERY:
+            self._pload_at = now
+            self._bg_task(self.panel_load())
         if now - self._load_at >= LOAD_EVERY:
             self._load_at = now
             self._bg_task(self.check_load())
@@ -353,13 +382,35 @@ class Autopilot:
             await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.')
         self.put(key, s)
 
+    async def panel_load(self, now: float | None = None) -> None:
+        """Нагрузка всех нод из панелей групп: один запрос на группу, история за сутки."""
+        for prof in self.store.profiles():
+            try:
+                nodes = await asyncio.to_thread(lambda p=prof: self.panel(p).call('GET', '/api/nodes'))
+            except (engine.StepError, OSError, ValueError):
+                continue
+            t = now if now is not None else time.time()
+            for n in nodes:
+                smp = panel_sample(n) if isinstance(n, dict) and n.get('uuid') else None
+                if not smp:
+                    continue
+                key = f'ap:pload:{prof["id"]}:{n["uuid"]}'
+                prev = self.get(key)
+                self.put(key, {**smp, 'at': t, 'hist': load_hist(prev.get('hist'), smp, t, keep=600)})
+
     def load_of(self, pid: int, uuid: str, hist: bool = False) -> dict:
-        s = self.get(f'ap:load:{pid}:{uuid}')
-        if not s:
+        """Нагрузка ноды: замер по SSH (точный процессор, диск, предупреждения) и/или из панели (чаще, без SSH).
+        Текущие значения — из более свежего, история — из панели, если она есть."""
+        s, p = self.get(f'ap:load:{pid}:{uuid}'), self.get(f'ap:pload:{pid}:{uuid}')
+        if not s and not p:
             return {}
-        out = {k: s.get(k) for k in ('cpu', 'mem', 'disk', 'rx', 'tx', 'at', 'cores')} | {'hot': hot(s), 'error': s.get('error')}
+        out = {k: s.get(k) for k in ('cpu', 'mem', 'disk', 'rx', 'tx', 'at', 'cores')} | {'hot': hot(s) if s else [], 'error': s.get('error')}
+        if p and (not s or s.get('cpu') is None or (p.get('at') or 0) > (s.get('at') or 0)):
+            out.update({k: p.get(k) for k in ('cpu', 'mem', 'rx', 'tx', 'at', 'cores') if p.get(k) is not None})
+        ph = p.get('hist') or []
+        out['source'] = 'panel' if len(ph) >= 2 or not s else 'ssh'
         if hist:
-            out['hist'] = s.get('hist') or []
+            out['hist'] = ph if out['source'] == 'panel' else (s.get('hist') or [])
         return out
 
     # ───────── аренда ─────────
