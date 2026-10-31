@@ -229,7 +229,8 @@ def make_server(world: World) -> ThreadingHTTPServer:
                     return self.send(201, {'response': t})
                 if p == '/api/hosts':
                     if b.get('securityLayer') == 'TLS':
-                        assert b['alpn'] == 'h2,http/1.1' and b['sni'] == b['address']
+                        # SNI — домен ноды; у хостов входа через Россию адрес — российский IP
+                        assert b['alpn'] == 'h2,http/1.1' and b['sni'] and (b['sni'] == b['address'] or b['address'].count('.') == 3)
                     else:
                         assert b['securityLayer'] == 'DEFAULT' and 'alpn' not in b and 'sni' not in b
                     import re as _re
@@ -332,10 +333,24 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
         psiphon_calls: list = []
         checker_polls: list = []
         files: dict = {}
+        relay_cfg: dict = {}   # ip российского сервера → конфиг HAProxy входа через Россию
 
         def run(self, cmd, timeout=120):
             ip = self.n['ip']
             assert self.n.get('ssh_password') or self.n.get('ssh_key'), 'нет ни пароля root, ни ключа'
+            if 'BOBR_RELAY' in cmd:  # вход через Россию: HAProxy на российском сервере
+                import base64 as _b64, re as _re, shlex as _sh
+                if behaviour.get(f'relay-{ip}') == 'down':
+                    raise engine.StepError('SSH: нет ответа при входе')
+                if 'RELAY_REMOVED' in cmd:
+                    FakeRemote.relay_cfg[ip] = ''
+                    return 0, 'RELAY_REMOVED\n'
+                if behaviour.get(f'relay-{ip}') == 'busy':
+                    return 0, 'RELAY_BUSY 443\n'
+                m = _re.search(r'echo (\S+) \| base64 -d > /etc/bobr-relay/haproxy\.cfg\.new', cmd)
+                FakeRemote.relay_cfg[ip] = _b64.b64decode(m.group(1)).decode()
+                ts = _sh.split(_re.search(r'for t in (.+?); do h=', cmd).group(1))
+                return 0, ''.join(f'RELAY_TARGET_OK {t}\n' for t in ts) + 'RELAY_OK\n'
             # чекер доступности (xray-checker под управлением бота)
             if '/api/v1/proxies' in cmd:
                 FakeRemote.checker_polls.append(ip)

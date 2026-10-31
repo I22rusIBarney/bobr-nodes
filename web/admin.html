@@ -142,7 +142,7 @@ function home() {
   const conn = (set, off) => set ? ['', 'ok', 'подключён'] : off === undefined ? ['не настроен', 'bad'] : off;  // настроено — тихо, цветом только то, что требует внимания
   v.append(group('Сервер бота', [
     row({ title: 'Безопасность', status: hd ? (hd.password_login ? ['вход по паролю', 'warn'] : ['', 'ok', 'защищён']) : ['не защищён', 'bad'], onClick: () => UI.nav.push(securityView) }),
-    row({ title: 'bcloud', status: conn(ok('bcloud_url') && ok('bcloud_token')), onClick: () => UI.nav.push(bcloudView) }),
+    row({ title: 'Bobr Cloud', status: conn(ok('bcloud_url') && ok('bcloud_token')), onClick: () => UI.nav.push(bcloudView) }),
     row({ title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ title: 'Gemini', status: conn(ok('gemini_key'), null), detail: ok('gemini_key') ? null : 'не задан', onClick: () => UI.nav.push(geminiView) }),
     row({ title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })]));
@@ -226,7 +226,7 @@ function settingsForm(header, keys, footer, check, opts = {}) {
     footer ? h('div', { class: 'group-f' }, footer) : null, status), h('div', { class: 'actions' }, test, save)];
 }
 function bcloudView() {
-  return h('div', {}, ...title('bcloud'), ...settingsForm('Подключение', ['bcloud_url', 'bcloud_token', 'bcloud_tg_id'],
+  return h('div', {}, ...title('Bobr Cloud'), ...settingsForm('Подключение', ['bcloud_url', 'bcloud_token', 'bcloud_tg_id'],
     h('span', {}, 'Токен и адрес покажет команда ', h('span', { class: 'mono' }, 'bcloud api-token'), ' на сервере Bobr Cloud. Покупки идут с баланса указанного аккаунта — он должен быть в ADMIN_IDS Bobr Cloud.'),
     'check/bcloud', { fields: { bcloud_url: { ph: 'https://bobr-cloud.online' }, bcloud_tg_id: { inputmode: 'numeric' } } }));
 }
@@ -928,7 +928,7 @@ function nodeView(pid, uuid) {
     const out = [];
     if (n.bcloud) {
       const price = n.bcloud.price_kop != null ? rubK(n.bcloud.price_kop) : '';
-      out.push(act('Сменить IP через Bobr Cloud' + (price ? ', ' + price : ''), () => startReip('bcloud', {}, { title: 'Сменить IP?', message: `bcloud сменит IP сервера${price ? ' за ' + price : ''} с баланса владельца. Бот сам обновит DNS и панель.`, buttons: [{ id: 'y', text: 'Сменить' }] })),
+      out.push(act('Сменить IP через Bobr Cloud' + (price ? ', ' + price : ''), () => startReip('bcloud', {}, { title: 'Сменить IP?', message: `Bobr Cloud сменит IP сервера${price ? ' за ' + price : ''} с баланса владельца. Бот сам обновит DNS и панель.`, buttons: [{ id: 'y', text: 'Сменить' }] })),
         act('IP уже сменили в Bobr Cloud — подтянуть', () => startReip('sync', {})));
     }
     if (!n.ip_new) n.ip_new = '';
@@ -974,6 +974,13 @@ function nodeView(pid, uuid) {
   } }));
   v.append(group(['Хосты', h('span', { class: 'n' }, ' ' + n.hosts.length)], hrows, n.inbound_port ? `Xray слушает ${n.inbound_port}. Свой порт переадресуется на него на самой ноде, ${n.inbound_port} продолжит работать.` : null));
 
+  // вход через Россию: проброс со своего российского сервера
+  v.append(group(['Вход через Россию', h('span', { class: 'n' }, n.relays.length ? ' ' + n.relays.length : '')], [
+    ...n.relays.map(x => row({ title: x.remark, sub: h('span', { class: 'mono' }, `${mid(x.address, 22)}:${x.listen} → ${mid(x.target, 22)}:${x.target_port}`),
+      status: RST[x.status] || [x.status, ''], onClick: () => UI.nav.push(() => relayView(pid, uuid, x.id)) })),
+    row({ title: 'Добавить вход', cls: 'accent', onClick: () => { NEWRL = null; UI.nav.push(() => relayAddView(pid, uuid)); } })],
+    'Ваш сервер в России принимает подключения и пробрасывает их на эту ноду как есть. В подписке появятся копии хостов ноды с российским адресом — для операторов, которые пропускают только российские IP.'));
+
   // SSH — по запросу
   const F = n.sshForm, sshSt = statusLine();
   v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: `${n.ssh.summary}, порт ${n.ssh.port}`, key: 'n-ssh', open: !n.ssh.source, body: () => [
@@ -997,6 +1004,80 @@ function nodeView(pid, uuid) {
     if (r) done(r.id);
   });
   v.append(h('div', { class: 'pad' }, go, h('div', { class: 'group-f' }, 'Применяет дополнения, порт и Final Mask. Ход — в задачах и в чате с ботом.')));
+  return v;
+}
+
+// ───────── вход через Россию ─────────
+const RST = { new: ['…', ''], installing: ['ставлю', 'run'], ok: ['', 'ok', 'работает'], warn: ['нода не отвечает', 'warn'], failed: ['ошибка', 'bad'] };
+let NEWRL = null;  // форма нового входа — переживает перерисовку
+const RLF = {};    // несохранённый доступ по SSH на странице входа
+async function reloadNode(pid, uuid) {
+  try { const r = await api(`profiles/${pid}/nodes/${uuid}`); const old = NODE[uuid];
+    if (old && !old.error) Object.assign(old, { relays: r.relays, relay_port: r.relay_port }); else { NODE[uuid] = undefined; } }
+  catch (e) { UI.toast(e.message, true); }
+}
+function relayAddView(pid, uuid) {
+  const n = NODE[uuid];
+  if (!n || n.error) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Откройте ноду заново'));
+  if (!NEWRL) NEWRL = { f: { ip: '', listen: '443', address: '', remark: '🇷🇺 ' + n.name, target_port: String(n.relay_port || 443) }, F: sshState({}) };
+  const { f, F } = NEWRL, status = statusLine();
+  const go = h('button', { class: 'btn', type: 'button' }, 'Поставить проброс');
+  go.onclick = UI.busy(go, async () => {
+    try {
+      showStatus(status, { ok: true, message: 'Ставлю HAProxy на сервер — до пары минут…' });
+      const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', { ...f, ...F });
+      NEWRL = null; await reloadNode(pid, uuid);
+      UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));
+      if (r.ok) UI.toast('Вход работает'); else UI.alert(r.message);
+    } catch (e) { showStatus(status, { ok: false, message: e.message }); }
+  });
+  return h('div', {}, ...title('Новый вход', mid(n.name, 18)),
+    h('div', { class: 'subtitle' }, 'На российском сервере бот поставит HAProxy (отдельная служба bobr-relay) — больше ничего. Шифрование сквозное: сервер в России видит только зашифрованный поток.'),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
+      h('label', { class: 'field stack' }, h('label', {}, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP сервера или ru.example.com', x => { f.address = x.trim(); }, true)),
+      h('label', { class: 'field stack' }, h('label', {}, 'Название хоста в подписке'), textIn(f.remark, '🇷🇺 Германия', x => { f.remark = x; })),
+      h('label', { class: 'field stack' }, h('label', {}, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true))),
+      h('div', { class: 'group-f' }, `Порт входа должен быть свободен на российском сервере. Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол (группы безопасности) откройте сами — ufw бот откроет.`)),
+    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, n.bot_key)),
+      h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — чтобы поставить HAProxy и открыть порт.'), status),
+    h('div', { class: 'pad' }, go));
+}
+function relayView(pid, uuid, rid) {
+  const n = NODE[uuid], x = n && !n.error && (n.relays || []).find(r => r.id === rid);
+  if (!x) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Вход убран'));
+  const v = h('div', {}, ...title(x.remark, mid(n.name, 18)));
+  if (x.error) v.append(h('div', { class: 'notice bad' }, x.error));
+  else if (x.bad.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
+  v.append(group(null, [
+    row({ title: 'Состояние', status: RST[x.status] || [x.status, ''] }),
+    row({ title: 'Клиенты подключаются', detail: `${mid(x.address, 22)}:${x.listen}`, mono: true, copy: x.address }),
+    row({ title: 'Трафик идёт на', detail: `${mid(x.target, 22)}:${x.target_port}`, mono: true }),
+    row({ title: 'Хостов в панели', detail: String(x.hosts) }),
+    row({ title: 'Вход по SSH', detail: x.access })]));
+  if ((x.log || []).length) v.append(group('Последняя установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, x.log.join('\n'))]));
+  const F = RLF[rid] || (RLF[rid] = sshState(x.ssh)), st = statusLine();
+  const re = h('button', { class: 'btn tinted', type: 'button' }, x.status === 'failed' ? 'Повторить установку' : 'Переустановить');
+  re.onclick = UI.busy(re, async () => {
+    const changed = F.password || F.key_text || F.sudo_password || F.user !== x.ssh.user || F.port !== String(x.ssh.port) || F.key !== x.ssh.key;
+    showStatus(st, { ok: true, message: 'Ставлю — до пары минут…' });
+    try { const r = await api(`relays/${rid}/apply`, 'POST', changed ? F : {}); delete RLF[rid]; await reloadNode(pid, uuid); UI.nav.refresh(); showStatus(st, r); }
+    catch (e) { showStatus(st, { ok: false, message: e.message }); }
+  });
+  v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
+    'Новый доступ сохранится при переустановке и будет у всех входов этого сервера.'), h('div', { class: 'pad' }, re, st));
+  v.append(group(null, [row({ title: 'Забыть ключ сервера', onClick: async () => {
+    const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на сервере переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
+    if (yes) { const r = await UI.run(() => api(`relays/${rid}/forget-hostkey`, 'POST')); if (r) UI.toast(r.message); }
+  } }), row({ title: 'Убрать вход', cls: 'destructive', onClick: async () => {
+    const yes = await UI.ask({ title: 'Убрать вход?', message: 'Бот уберёт проброс с российского сервера (другие его входы останутся) и хосты из панели.', buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] });
+    if (!yes) return;
+    const del = async force => { try { return await api(`relays/${rid}` + (force ? '?force=1' : ''), 'DELETE'); } catch (e) { return { ok: false, message: e.message }; } };
+    let r = await del(false);
+    if (!r.ok && await UI.ask({ title: 'Сервер недоступен', message: r.message + '\n\nУбрать вход только из бота и панели? Проброс на сервере останется.', buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] })) r = await del(true);
+    if (r.ok) { UI.toast('Вход убран'); await reloadNode(pid, uuid); UI.nav.back(); }
+  } })]));
   return v;
 }
 

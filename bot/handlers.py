@@ -417,7 +417,7 @@ async def confirm(target, state: FSMContext, store: Store):
     q = svc.quote(w['cat'], w['loc'], w['idx'], w['period'], w['count'], w.get('custom'))
     try:
         bal = await bcloud_from(store, buyer_of(store, p)).balance()
-        bal_line = f'Баланс {html.escape(p.get("owner_label") or "bcloud")}: {rub(bal)}' + ('' if bal >= q['total_kop'] else ' — ⚠️ <b>не хватает</b>')
+        bal_line = f'Баланс {html.escape(p.get("owner_label") or "Bobr Cloud")}: {rub(bal)}' + ('' if bal >= q['total_kop'] else ' — ⚠️ <b>не хватает</b>')
     except BcloudError as e:
         bal, bal_line = None, f'Баланс: ❓ {html.escape(str(e))}'
     loc, offer = q['loc'], q['offer']

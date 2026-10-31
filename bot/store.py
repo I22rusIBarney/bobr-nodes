@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, data 
 CREATE TABLE IF NOT EXISTS scripts (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS checkers (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mon (key TEXT PRIMARY KEY, data TEXT NOT NULL);  -- состояние нод в мониторинге
+CREATE TABLE IF NOT EXISTS relays (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);  -- входы через Россию (проброс)
 CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, data TEXT NOT NULL);  -- приглашённые пользователи
 CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (
@@ -122,6 +123,25 @@ class Store:
 
     def delete_checker(self, cid: int) -> None:
         self._q('DELETE FROM checkers WHERE id=?', (cid,))
+
+    # ── входы через Россию: проброс порта со своего сервера в России на иностранную ноду ──
+    def relays(self) -> list[dict]:
+        return [{**json.loads(r['data']), 'id': r['id']} for r in self._q('SELECT * FROM relays ORDER BY id')]
+
+    def relay(self, rid: int) -> dict | None:
+        rows = self._q('SELECT * FROM relays WHERE id=?', (int(rid),))
+        return {**json.loads(rows[0]['data']), 'id': rows[0]['id']} if rows else None
+
+    def save_relay(self, data: dict) -> int:
+        body = json.dumps({k: v for k, v in data.items() if k != 'id'}, ensure_ascii=False)
+        if data.get('id'):
+            self._q('UPDATE relays SET data=? WHERE id=?', (body, data['id']))
+            return data['id']
+        with self.lock:
+            return self.db.execute('INSERT INTO relays(data) VALUES(?)', (body,)).lastrowid
+
+    def delete_relay(self, rid: int) -> None:
+        self._q('DELETE FROM relays WHERE id=?', (int(rid),))
 
     # ── приглашённые пользователи и приглашения ──
     def users(self) -> list[dict]:

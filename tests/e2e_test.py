@@ -864,6 +864,52 @@ async def main():
     st, nd = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}')
     ok(st == 200 and nd['ip'] == old and nd['domain'] == dom and not nd['address_is_ip'] and nd['bcloud']
        and nd['bcloud']['price_kop'] == 15000, f'страница ноды: IP, домен, смена IP в bcloud с ценой: {nd.get("bcloud")}')
+
+    # вход через Россию: HAProxy на своём российском сервере, в панели — копии хостов ноды с российским адресом
+    RU, RURL = '192.0.2.90', f'profiles/{pid}/nodes/{tn["uuid"]}/relays'
+    ok(nd['relays'] == [] and nd['relay_port'] == 443, f'у ноды пока нет входов, порт хостов 443: {nd.get("relay_port")}')
+    h0 = len(world.hosts)
+    st, js = await wapi(RURL, 'POST', {'ip': 'не ip', 'password': 'x'})
+    ok(st == 400 and 'IPv4' in js['detail'], 'вход: неверный IP отклонён')
+    st, js = await wapi(RURL, 'POST', {'ip': RU, 'listen': '22', 'password': 'RuPassw0rd'})
+    ok(st == 400 and 'SSH' in js['detail'] and not store.relays(), 'вход: порт SSH сервера занять нельзя')
+    behaviour[f'relay-{RU}'] = 'busy'
+    st, js = await wapi(RURL, 'POST', {'ip': RU, 'password': 'RuPassw0rd'})
+    ok(st == 200 and not js['ok'] and 'занят' in js['message'] and store.relay(js['id'])['status'] == 'failed'
+       and len(world.hosts) == h0, f'занятый порт на сервере — понятная ошибка, хостов нет: {js.get("message")}')
+    behaviour.pop(f'relay-{RU}')
+    st, js = await wapi(f'relays/{js["id"]}/apply', 'POST', {})
+    rid = js['id']
+    rx = store.relay(rid)
+    ok(st == 200 and js['ok'] and rx['status'] == 'ok' and rx['target'] == dom and rx['target_port'] == 443 and rx['hosts'],
+       f'вход поставлен повторно: {js.get("message")}')
+    rh = [x for x in world.hosts if x['uuid'] in rx['hosts']]
+    ok(rh and all(x['address'] == RU and x['port'] == 443 and x.get('sni') == dom and x['remark'].startswith('🇷🇺') for x in rh),
+       f'хосты через Россию: российский адрес, SNI — домен ноды: {[(x["address"], x.get("sni")) for x in rh]}')
+    cfg = fakes_remote.relay_cfg.get(RU, '')
+    ok('bind 0.0.0.0:443' in cfg and f'server node {dom}:443 resolvers sys' in cfg, f'HAProxy: вход 443 на домен ноды: {cfg[-200:]}')
+    st, js = await wapi(RURL, 'POST', {'ip': RU, 'listen': '443'})
+    ok(st == 400 and 'уже занят' in js['detail'], 'второй вход на тот же порт сервера отклонён')
+    st, js = await wapi(RURL, 'POST', {'ip': RU, 'listen': '8443', 'remark': '🇷🇺 Второй'})
+    rid2 = js.get('id')
+    cfg = fakes_remote.relay_cfg.get(RU, '')
+    ok(st == 200 and js['ok'] and 'bind 0.0.0.0:8443' in cfg and 'bind 0.0.0.0:443' in cfg
+       and store.relay(rid2)['ssh'] == store.relay(rid)['ssh'], 'второй вход на том же сервере: доступ по SSH общий, оба порта в конфиге')
+    st, nd2 = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}')
+    ok(len(nd2['relays']) == 2 and all(x['hosts'] for x in nd2['relays']) and 'RuPassw0rd' not in json.dumps(nd2),
+       'на странице ноды — оба входа, без паролей')
+    ok((await wapi(f'relays/{rid}', 'DELETE', headers=HV))[0] == 404, 'чужой вход пользователь не видит и не удаляет')
+    hosts2 = store.relay(rid2)['hosts']
+    st, js = await wapi(f'relays/{rid2}', 'DELETE')
+    cfg = fakes_remote.relay_cfg.get(RU, '')
+    ok(st == 200 and store.relay(rid2) is None and 'bind 0.0.0.0:8443' not in cfg and 'bind 0.0.0.0:443' in cfg
+       and not any(x['uuid'] in hosts2 for x in world.hosts), 'второй вход убран: с сервера и из панели, первый остался')
+    behaviour[f'relay-{RU}'] = 'down'
+    st, js = await wapi(f'relays/{rid}', 'DELETE')
+    ok(st == 400 and 'Сервер' in js['detail'] and store.relay(rid), 'сервер недоступен — вход не убран без подтверждения')
+    st, js = await wapi(f'relays/{rid}?force=1', 'DELETE')
+    ok(st == 200 and store.relay(rid) is None and len(world.hosts) == h0, 'убран только из бота и панели по подтверждению')
+    behaviour.pop(f'relay-{RU}')
     bal0 = await _bcf(store, 1).balance()
     st, js = await wapi(f'profiles/{pid}/nodes/{tn["uuid"]}/ip', 'POST', {'mode': 'bcloud'})
     ok(st == 200, f'смена IP через bcloud запущена: {js}')

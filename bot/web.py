@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, scripts as sc, services as svc
+from . import engine, forms, naming, relay as rl, scripts as sc, services as svc
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
 from .runner import Runner, bcloud_from, buyer_of, stages_for
@@ -525,6 +525,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         p = profile_or_404(request.match_info['pid'], request)
         if group_kind(request, p) == 'shared':
             raise ApiError('Эту группу завёл администратор — удалить её может только он')
+        if any(x['pid'] == p['id'] for x in store.relays()):
+            raise ApiError('У группы есть входы через Россию — сначала уберите их на страницах нод')
         if any(j['profile_id'] == p['id'] for j in store.active_jobs()):
             raise ApiError('У группы есть задачи в работе — дождитесь их')
         store.delete_profile(p['id'])
@@ -651,7 +653,179 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                              'port': h.get('port'), 'final_mask': bool(h.get('finalMask')), 'hidden': bool(h.get('isHidden'))}
                             for h in hosts],
                   'ip': ip, 'domain': dom, 'address_is_ip': engine.is_ip(n['address']), 'bcloud': bc,
-                  'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1]})
+                  'ssh': ssh_view(p['id'], uuid, n['address']), 'bot_key': runner.bot_key()[1],
+                  'relays': [relay_view(x) for x in store.relays() if x['pid'] == p['id'] and x['node_uuid'] == uuid],
+                  'relay_port': rl.target_port_of(hosts)})
+
+    # ── вход через Россию: проброс со своего сервера в России на эту ноду ──
+    relay_locks: dict[str, asyncio.Lock] = {}
+
+    def relay_view(x: dict) -> dict:
+        from . import sshaccess
+        return {'id': x['id'], 'ip': x['ip'], 'address': x.get('address') or x['ip'], 'listen': x['listen'],
+                'target': x['target'], 'target_port': x['target_port'], 'remark': x.get('remark', ''),
+                'status': x.get('status', 'new'), 'error': x.get('error', ''), 'bad': x.get('bad') or [],
+                'hosts': len(x.get('hosts') or []), 'ssh': sshaccess.view(x.get('ssh')),
+                'access': sshaccess.describe(x.get('ssh')), 'log': x.get('log') or []}
+
+    def relay_or_404(rid, request) -> dict:
+        try:
+            x = store.relay(int(rid))
+        except (TypeError, ValueError):
+            x = None
+        if not x or not can(request, store.profile(x['pid'])):
+            raise ApiError('Вход не найден', 404)
+        return x
+
+    def relay_remote(acc: dict) -> engine.Remote:
+        from . import sshaccess
+        return engine.Remote({'ip': acc['ip'], **sshaccess.to_node(acc.get('ssh'), runner.bot_key()[0]),
+                              'known_hosts': runner.known_hosts()}, None)
+
+    def node_ctx(p: dict, uuid: str):
+        pl = panel_of(p)
+        n = next((x for x in pl.call('GET', '/api/nodes') if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        ip = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else resolve(n['address']))
+        dom = bd.get('domain') or ('' if engine.is_ip(n['address']) else n['address'])
+        return pl, n, pl.node_hosts(n, {dom} if dom else set(), {ip} if ip else set()), ip, dom
+
+    async def relay_sync(ip: str, log, closed: list[int] = ()) -> dict:
+        """Конфиг HAProxy на сервере — по всем его входам; входов нет — проброс с сервера убираем."""
+        mine = [x for x in store.relays() if x['ip'] == ip]
+        if not mine:
+            return {'bad': []}
+        return await asyncio.to_thread(rl.apply, relay_remote(mine[-1]), mine, log, closed)
+
+    async def relay_hosts(x: dict, p: dict, log) -> list[str]:
+        def run():
+            pl, n, hosts, _ip, _dom = node_ctx(p, x['node_uuid'])
+            return rl.clone_hosts(pl, hosts, x.get('address') or x['ip'], x['listen'], x['target_port'], x['remark'], log)
+        return await asyncio.to_thread(run)
+
+    def check_listen(v, ssh_port: int) -> int:
+        try:
+            port = int(v or 443)
+        except (TypeError, ValueError):
+            raise ApiError('Порт входа: число от 1 до 65535') from None
+        if not 1 <= port <= 65535:
+            raise ApiError('Порт входа: число от 1 до 65535')
+        if port == int(ssh_port or 22):
+            raise ApiError('Этот порт занят SSH сервера — выберите другой')
+        return port
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/relays')
+    async def relay_create(request):
+        """Новый вход через Россию: HAProxy на российском сервере пробрасывает порт на ноду, в панели — копии её хостов."""
+        from . import sshaccess
+        p = profile_or_404(request.match_info['pid'], request)
+        uuid, b = request.match_info['uuid'], await body(request)
+        ip = str(b.get('ip') or '').strip()
+        if not engine.is_ip(ip) or ':' in ip:
+            raise ApiError('IP сервера в России: адрес IPv4, например 203.0.113.10')
+        others = [x for x in store.relays() if x['ip'] == ip]
+        if any(not can(request, store.profile(x['pid'])) for x in others):
+            raise ApiError('Этот сервер уже используют для входа в другой группе')
+        try:
+            acc = sshaccess.clean(b, others[-1].get('ssh') if others else None, runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        listen = check_listen(b.get('listen'), acc.get('port'))
+        if any(int(x['listen']) == listen for x in others):
+            raise ApiError(f'Порт {listen} на этом сервере уже занят другим входом — выберите другой')
+        address = naming.norm_domain(str(b.get('address') or '')) or ip
+        if address != ip and not (engine.is_ip(address) or naming.valid_domain(address)):
+            raise ApiError('Адрес для клиентов: IP или домен российского сервера')
+        try:
+            pl, n, hosts, nip, dom = await asyncio.to_thread(node_ctx, p, uuid)
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        target = dom or n['address'] or nip
+        if not target:
+            raise ApiError('Не знаю адрес ноды')
+        try:
+            tport = int(b.get('target_port') or rl.target_port_of(hosts))
+        except (TypeError, ValueError):
+            raise ApiError('Порт ноды: число') from None
+        remark = str(b.get('remark') or '').strip()[:90] or f'🇷🇺 {n["name"]}'
+        x = {'pid': p['id'], 'node_uuid': uuid, 'node_name': n['name'], 'ip': ip, 'address': address, 'listen': listen,
+             'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
+             'created_by': uid_of(request), 'created_at': int(time.time())}
+        x['id'] = store.save_relay(x)
+        return J(await relay_run(x, p, ip))
+
+    async def relay_run(x: dict, p: dict, ip: str, closed: list[int] = ()) -> dict:
+        """Применить проброс на сервере и, если хостов ещё нет, создать их. Итог — в записи входа."""
+        lines: list[str] = []
+        lock = relay_locks.setdefault(ip, asyncio.Lock())
+        async with lock:
+            for o in store.relays():  # доступ по SSH — общий у всех входов одного сервера
+                if o['ip'] == ip and o['id'] != x['id'] and o.get('ssh') != x['ssh']:
+                    store.save_relay({**o, 'ssh': x['ssh']})
+            store.save_relay({**x, 'status': 'installing', 'error': ''})
+            try:
+                res = await relay_sync(ip, lines.append, closed)
+                if not x.get('hosts'):
+                    x['hosts'] = await relay_hosts(x, p, lines.append)
+            except (engine.StepError, ApiError) as e:
+                x.update(status='failed', error=str(e)[:300], log=lines[-20:])
+                store.save_relay(x)
+                return {'id': x['id'], 'ok': False, 'message': str(e), 'log': lines}
+            x.update(status='ok' if not res['bad'] else 'warn', error='', bad=res['bad'], log=lines[-20:])
+            store.save_relay(x)
+        msg = (f'Готово: клиенты подключаются к {x.get("address") or ip}:{x["listen"]}, трафик идёт на {x["target"]}:{x["target_port"]}'
+               if not res['bad'] else f'Проброс стоит, но с российского сервера не открывается {", ".join(res["bad"])} — проверьте ноду')
+        return {'id': x['id'], 'ok': not res['bad'], 'message': msg, 'log': lines}
+
+    @r.post('/api/relays/{rid}/apply')
+    async def relay_apply(request):
+        """Повторить установку (можно с новым доступом по SSH)."""
+        from . import sshaccess
+        x = relay_or_404(request.match_info['rid'], request)
+        b = await body(request)
+        if any(str(b.get(k) or '').strip() for k in ('user', 'port', 'password', 'key', 'key_text', 'sudo_password')):
+            try:
+                x['ssh'] = sshaccess.clean(b, x.get('ssh'), runner.keydir)
+            except ValueError as e:
+                raise ApiError(str(e)) from None
+        return J(await relay_run(x, store.profile(x['pid']), x['ip']))
+
+    @r.post('/api/relays/{rid}/forget-hostkey')
+    async def relay_forget(request):
+        x = relay_or_404(request.match_info['rid'], request)
+        engine.forget_host(runner.known_hosts(), x['ip'], int((x.get('ssh') or {}).get('port') or 22))
+        return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
+
+    @r.delete('/api/relays/{rid}')
+    async def relay_delete(request):
+        """Убрать вход: с сервера (остальные входы сервера остаются) и его хосты из панели.
+        force — если до сервера не достучаться, убрать хотя бы из бота и панели."""
+        x = relay_or_404(request.match_info['rid'], request)
+        force = request.query.get('force') == '1'
+        p = store.profile(x['pid'])
+        lines: list[str] = []
+        lock = relay_locks.setdefault(x['ip'], asyncio.Lock())
+        async with lock:
+            store.delete_relay(x['id'])
+            rest = [o for o in store.relays() if o['ip'] == x['ip']]
+            try:
+                if rest:
+                    await relay_sync(x['ip'], lines.append, closed=[] if any(o['listen'] == x['listen'] for o in rest) else [x['listen']])
+                else:
+                    await asyncio.to_thread(rl.remove, relay_remote(x), [x['listen']], lines.append)
+            except engine.StepError as e:
+                if not force:
+                    store.save_relay(x)  # вернуть: на сервере проброс ещё стоит
+                    return J({'ok': False, 'ssh_error': True, 'message': f'Сервер: {e}', 'detail': f'Сервер: {e}'}, status=400)
+                lines.append(f'сервер: {e} — убираю только из бота и панели')
+            if p and x.get('hosts'):
+                try:
+                    await asyncio.to_thread(rl.delete_hosts, panel_of(p), x['hosts'], lines.append)
+                except engine.StepError as e:
+                    lines.append(f'панель: {e}')
+        return J({'ok': True, 'message': 'Вход убран', 'log': lines})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/ssh')
     async def panel_node_ssh(request):
