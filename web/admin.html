@@ -341,7 +341,8 @@ function monGroupView(pid) {
   if (g.enabled) {
     const rows = g.nodes.map(n => {
       const r = row({ title: n.name || n.addr, cls: 'wrap',
-        sub: [n.addr !== n.name ? n.addr : '', n.data ? `не проходит у ${n.fail} из ${n.data}` : 'чекеры её пока не видят',
+        sub: [n.addr !== n.name ? n.addr : '', (n.hosts || []).length ? 'хосты: ' + n.hosts.join(', ') : '',
+          n.data ? (n.fail ? `не проходит у ${n.fail} из ${n.data} чекеров` : `проходит у ${n.data} из ${n.data}`) : 'нет в подписке для проверки',
           n.connected === false ? 'нет связи с панелью' : '', n.status === 'repairing' && n.step ? 'шаг: ' + MON.steps[n.step] : '',
           n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
         status: n.status === 'ok' && n.fail ? ['частично', 'warn'] : (MST[n.status] || [n.status, '']),
@@ -363,7 +364,7 @@ function monGroupView(pid) {
   const S = MONF[pid] || (MONF[pid] = { mon_sub: '', mon_mode: g.mon_mode, mon_on: new Set(g.mon_steps),
     mon_order: [...g.mon_steps, ...Object.keys(MON.steps).filter(k => !g.mon_steps.includes(k))],
     mon_script: g.mon_script, mon_port: String(g.mon_port || 8443), mon_old: g.mon_old, mon_max_buys: String(g.mon_max_buys),
-    mon_buy: g.mon_buy.map(x => ({ ...x })), mon_buy_last: g.mon_buy_last });
+    mon_buy: g.mon_buy.map(x => ({ ...x })), mon_buy_last: g.mon_buy_last, mon_skip: g.mon_skip || '' });
   const sub = h('input', { type: 'password', class: 'code', autocomplete: 'off', placeholder: g.sub_hint ? 'оставить ' + g.sub_hint + ' («-» — убрать)' : 'https://sub.example.com/…' });
   sub.addEventListener('input', () => { S.mon_sub = sub.value.trim(); });
   // шаги: включить/выключить и порядок стрелками; список перерисовывается сам, без перерисовки страницы
@@ -423,7 +424,7 @@ function monGroupView(pid) {
   const save = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
   save.onclick = UI.busy(save, async () => {
     const body = { mon_sub: S.mon_sub, mon_mode: S.mon_mode, mon_steps: S.mon_order.filter(k => S.mon_on.has(k)), mon_script: S.mon_script,
-      mon_port: S.mon_port, mon_old: S.mon_old, mon_max_buys: S.mon_max_buys, mon_buy: S.mon_buy, mon_buy_last: S.mon_buy_last };
+      mon_port: S.mon_port, mon_old: S.mon_old, mon_max_buys: S.mon_max_buys, mon_buy: S.mon_buy, mon_buy_last: S.mon_buy_last, mon_skip: S.mon_skip };
     const r = await UI.run(() => api('profiles/' + pid + '/monitor', 'POST', body));
     if (!r) return;
     delete MONF[pid];
@@ -433,6 +434,10 @@ function monGroupView(pid) {
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Подписка для проверки'),
     h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Ссылка подписки'), sub)),
     h('div', { class: 'group-f' }, 'Заведите в панели группы отдельного пользователя со всеми сквадами нод и вставьте его ссылку подписки. Бот запишет её на все чекеры с пометкой этой группы.')));
+  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Не проверять'),
+    h('div', { class: 'list' }, h('label', { class: 'field stack' }, h('label', {}, 'Группы подписки (балансировщики)'), textIn(S.mon_skip, 'АВТО-ВЫБОР, NORMAL', x => { S.mon_skip = x; }))),
+    h('div', { class: 'group-f' }, 'Через запятую, достаточно части названия. Общий балансировщик (АВТО-ВЫБОР, NORMAL) повторяет ноды, которые и так проверяются по своим хостам. '
+      + 'Ноду бот узнаёт по её хостам: адрес хоста — это нода или указывает на её IP. Хосты через CDN и балансировщики с подменным адресом (vk.com, ok.ru) не считаются.')));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Когда нода недоступна'),
     h('div', { class: 'seg-row' }, UI.chips(Object.entries(MON.modes).map(([k, t]) => ({ value: k, label: t })), S.mon_mode, x => { S.mon_mode = x; })),
     h('div', { class: 'group-f' }, '«Предлагать» — сообщение с кнопками «Починить», «Сразу новая нода», «Не трогать». «Чинить сам» — шаги ниже по порядку без вопросов.')));

@@ -32,7 +32,8 @@ STEP_LABEL = {'mask': 'Final Mask и свой порт', 'script': 'переус
 MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам'}
 OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в bcloud', 'keep': 'ничего не трогать'}
 BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации', 'none': 'не покупать — сообщить'}
-DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest',
+SKIP_DEFAULT = 'АВТО-ВЫБОР, АВТОВЫБОР, AUTO-SELECT, NORMAL'  # общий балансировщик: его ноды проверяются и так
+DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest', 'mon_skip': SKIP_DEFAULT,
             'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
             'mon_old': 'panel', 'mon_max_buys': 2}
 FAILS_TO_ALERT = 3
@@ -64,6 +65,8 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
         out['mon_steps'] = list(steps)  # включённые шаги в заданном порядке
     if raw.get('mon_buy') is not None:
         out['mon_buy'] = clean_buy(raw['mon_buy'])
+    if raw.get('mon_skip') is not None:
+        out['mon_skip'] = ', '.join(w.strip() for w in str(raw['mon_skip']).split(',') if w.strip())[:300]
     if raw.get('mon_buy_last') is not None:
         if raw['mon_buy_last'] not in BUY_LAST:
             raise ValueError('если ни одна конфигурация не подошла: cheapest или none')
@@ -267,36 +270,73 @@ class Monitor:
                     except engine.StepError as e:  # панель группы недоступна — в следующий раз
                         log.info('monitor group %s: %s', prof['id'], e)
 
-    def votes(self, prof: dict, results: dict, nodes: list[dict]) -> dict[str, dict]:
-        """Адрес ноды → {data, fail, uuid, name, connected}: сколько исправных чекеров её видят и у скольких она не проходит.
-        Хосты через CDN (cdn-…) не считаются: нода жива, если проходит хоть один прямой вход."""
-        name = ck.sub_name(prof['id'])
-        bj = svc.bot_jobs_by_ip(self.store, prof['id'])
-        out = {}
+    @staticmethod
+    def skip_group(group: str, skip: str) -> bool:
+        """Группа подписки, которую не проверяем (общий балансировщик): совпадение с любым словом из настройки."""
+        g = (group or '').lower()
+        return bool(g) and any(w.strip().lower() in g for w in (skip or '').split(',') if w.strip())
+
+    @staticmethod
+    def node_hosts(nodes: list[dict], hosts: list[dict], dns: dict[str, set[str]], bj: dict) -> dict[str, set[str]]:
+        """Адрес ноды → адреса, по которым к ней подключаются: сам адрес ноды, домен и IP из задачи бота и хосты панели,
+        чей адрес — это нода или указывает на её IP. Хосты через CDN и балансировщики с подменным адресом (vk.com)
+        ни на одну ноду не указывают — их не берём."""
+        def ips(a: str) -> set[str]:
+            return {a} if engine.is_ip(a) else set(dns.get(a) or ())
+        out, ip_of = {}, {}
         for n in nodes:
-            aliases = {n['address']}
+            al = {n['address']}
             d = bj.get(n['address'])
             if d:
-                aliases |= {d.get('ip') or '', d.get('domain') or ''} - {''}
+                al |= {d.get('ip') or '', d.get('domain') or ''} - {''}
+            out[n['address']] = al
+            for a in list(al):
+                for ip in ips(a):
+                    ip_of.setdefault(ip, n['address'])
+        for h in hosts:
+            a = h.get('address') or ''
+            if not a or h.get('isDisabled') or a.startswith(engine.CDN_PREFIX):
+                continue
+            owner = next((k for k, al in out.items() if a in al), None) or next((ip_of[ip] for ip in ips(a) if ip in ip_of), None)
+            if owner:
+                out[owner].add(a)
+        return out
+
+    def votes(self, prof: dict, results: dict, nodes: list[dict], hosts: list[dict] | None = None,
+              dns: dict[str, set[str]] | None = None) -> dict[str, dict]:
+        """Адрес ноды → {data, fail, uuid, name, connected, hosts}: сколько исправных чекеров видят её хосты и у скольких
+        не проходит ни один. Хосты через CDN не считаются: нода жива, если проходит хоть один прямой вход.
+        Группы общего балансировщика (настройка «не проверять») пропускаются."""
+        name = ck.sub_name(prof['id'])
+        skip = settings_of(prof)['mon_skip']
+        bj = svc.bot_jobs_by_ip(self.store, prof['id'])
+        addrs = self.node_hosts(nodes, hosts or [], dns or {}, bj)
+        out = {}
+        for pos, n in enumerate(nodes):
+            aliases = addrs[n['address']]
             data = fail = 0
             for res in results.values():
                 if not self.healthy(res):
                     continue
                 mine = [p for p in res if p.get('subName') == name and p.get('server') in aliases and p.get('lastCheck')
-                        and not str(p.get('server') or '').startswith(engine.CDN_PREFIX)]
+                        and not str(p.get('server') or '').startswith(engine.CDN_PREFIX)
+                        and not self.skip_group(p.get('groupName'), skip)]
                 if not mine:
                     continue
                 data += 1
                 if not any(p.get('online') for p in mine):
                     fail += 1
             out[n['address']] = {'data': data, 'fail': fail, 'uuid': n['uuid'], 'name': n.get('name') or n['address'],
-                                 'connected': bool(n.get('isConnected')), 'country': n.get('countryCode') or ''}
+                                 'connected': bool(n.get('isConnected')), 'country': n.get('countryCode') or '', 'pos': pos,
+                                 'hosts': sorted(aliases - {n['address']} - {a for a in aliases if engine.is_ip(a)})}
         return out
 
     async def check_group(self, prof: dict, results: dict) -> None:
         panel = engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''))
         nodes = await asyncio.to_thread(panel.call, 'GET', '/api/nodes')
-        votes = self.votes(prof, results, nodes)
+        hosts = await asyncio.to_thread(panel.call, 'GET', '/api/hosts')
+        dns = await asyncio.to_thread(resolve_all, {n['address'] for n in nodes} | {h.get('address') or '' for h in hosts})
+        votes = self.votes(prof, results, nodes, hosts, dns)
         cfg = settings_of(prof)
         now = time.time()
         seen = set()
@@ -304,7 +344,7 @@ class Monitor:
             key = f'{prof["id"]}:{addr}'
             seen.add(key)
             st = self.store.mon(key) or {'status': 'ok', 'fails': 0}
-            st.update(uuid=v['uuid'], name=v['name'], addr=addr, data=v['data'], fail=v['fail'],
+            st.update(uuid=v['uuid'], name=v['name'], addr=addr, data=v['data'], fail=v['fail'], pos=v['pos'], hosts=v['hosts'],
                       connected=v['connected'], country=v['country'], checked_at=int(now))
             down = v['data'] > 0 and v['fail'] * 2 > v['data']
             if v['data'] == 0:  # ни один исправный чекер ноду не видит — нет данных, ничего не решаем
@@ -651,13 +691,28 @@ class Monitor:
         groups = []
         for p in self.store.profiles():
             cfg = settings_of(p)
-            nodes = [{k: v for k, v in st.items() if k not in ('job_done',)} | {'key': key}
-                     for key, st in sorted(self.store.mon_all(f'{p["id"]}:').items())]
+            nodes = sorted(({k: v for k, v in st.items() if k not in ('job_done',)} | {'key': key}
+                            for key, st in self.store.mon_all(f'{p["id"]}:').items()), key=lambda x: (x.get('pos', 9999), x['key']))
             groups.append({'id': p['id'], 'name': p['name'], 'enabled': bool(p.get('mon_sub')),
                            **{k: v for k, v in cfg.items() if k != 'mon_sub'}, 'nodes': nodes,
                            'buys_today': len(self.buys_today(p['id']))})
         return {'checkers': checkers, 'groups': groups, 'polled_at': int(self.polled_at), 'every': int(self.every),
                 'steps': STEP_LABEL, 'modes': MODES, 'old': OLD, 'buy_last': BUY_LAST}
+
+
+def resolve_all(names: set[str]) -> dict[str, set[str]]:
+    """A-записи доменов (параллельно): к какой ноде ведёт хост. IP и пустые — пропускаем."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    todo = sorted(n for n in names if n and not engine.is_ip(n))
+
+    def one(n):
+        try:
+            return n, {a[4][0] for a in socket.getaddrinfo(n, None, socket.AF_INET)}
+        except (OSError, UnicodeError):
+            return n, set()
+    with ThreadPoolExecutor(16) as ex:
+        return dict(ex.map(one, todo))
 
 
 class _Sink:

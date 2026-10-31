@@ -174,5 +174,5 @@ def poll(ch: dict, keypath: str, known_hosts: str) -> list[dict]:
         raise StepError('чекер ответил не JSON') from None
     if not data.get('success'):
         raise StepError('чекер: ' + str(data.get('error') or 'ошибка'))
-    keep = ('subName', 'server', 'port', 'name', 'online', 'latencyMs', 'lastCheck')
+    keep = ('subName', 'groupName', 'server', 'port', 'name', 'online', 'latencyMs', 'lastCheck')
     return [{k: p.get(k) for k in keep} for p in data.get('data') or []]

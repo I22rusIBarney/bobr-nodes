@@ -53,3 +53,17 @@ def test_healthy():
     assert M.Monitor.healthy([off, off])  # мало проверок — голосует
     assert not M.Monitor.healthy([off, off, off])  # ни одна не прошла — лежит сеть самого чекера
     assert M.Monitor.healthy([off, off, on]) and not M.Monitor.healthy(None)
+
+
+def test_node_hosts_and_skip():
+    nodes = [{'address': '201.10.91.118'}, {'address': 'de.example.com'}]
+    hosts = [{'address': 'pl.example.com'}, {'address': 'pl2.example.com'}, {'address': 'cdn-pl.example.com'},
+             {'address': 'vk.com'}, {'address': 'de.example.com'}, {'address': 'off.example.com', 'isDisabled': True}]
+    dns = {'pl.example.com': {'201.10.91.118'}, 'pl2.example.com': {'201.10.91.118'}, 'cdn-pl.example.com': {'104.16.0.1'},
+           'vk.com': {'87.240.0.1'}, 'de.example.com': {'198.51.100.7'}, 'off.example.com': {'201.10.91.118'}}
+    m = M.Monitor.node_hosts(nodes, hosts, dns, {})
+    assert m['201.10.91.118'] == {'201.10.91.118', 'pl.example.com', 'pl2.example.com'}  # нода по IP — хосты по домену
+    assert m['de.example.com'] == {'de.example.com'}  # CDN, подменный адрес и выключенный хост — ни к кому
+    assert M.Monitor.skip_group('🌀 АВТО-ВЫБОР', M.SKIP_DEFAULT) and not M.Monitor.skip_group('Poland', M.SKIP_DEFAULT)
+    assert not M.Monitor.skip_group('', M.SKIP_DEFAULT) and not M.Monitor.skip_group('АВТО-ВЫБОР', '')
+    assert M.clean_settings({'mon_skip': ' NORMAL ,, авто '}, {}, [])['mon_skip'] == 'NORMAL, авто'
