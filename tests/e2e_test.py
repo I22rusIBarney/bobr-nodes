@@ -1528,7 +1528,7 @@ async def main():
     st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 700})
     ok(st == 200 and js['url'].startswith('https://') and FakeYK.calls[-1]['metadata']['tg_id'] == 1, f'пополнение администратора — на аккаунт из настроек: {js}')
     st, js = await wapi('wallet/topup', 'POST', {'amount_rub': 300}, headers=HV)
-    ok(st == 200 and FakeYK.calls[-1]['metadata']['tg_id'] == 77, 'пользователь пополняет только свой баланс')
+    ok(st == 200 and FakeYK.calls[-1]['metadata']['tg_id'] == 77, f'пользователь пополняет только свой баланс: {st} {js}')
     ok((await wapi('wallet/topup', 'POST', {'amount_rub': 'x'}))[0] == 400 and (await wapi('wallet/topup', 'POST', {'amount_rub': 500, 'method_id': '1'}))[0] == 400,
        'кривая сумма или способ — отказ')
     st, wv = await wapi('wallet', headers=HV)
