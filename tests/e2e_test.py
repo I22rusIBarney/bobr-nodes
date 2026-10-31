@@ -1238,7 +1238,7 @@ async def main():
     ok(store.mon(okey)['status'] == 'ok' and any('🟢' in m.text for name, m in sess.sent[n3:] if name == 'SendMessage'),
        'нода ожила — сообщение и обычное состояние')
     # чекер, у которого не проходит ничего, не голосует (лежит его сеть)
-    blocked |= {(n['address'], '192.0.2.52') for n in world.nodes} | {(other['address'], '192.0.2.51')}
+    blocked |= {(h['address'], '192.0.2.52') for h in world.hosts} | {(other['address'], '192.0.2.51')}
     for _ in range(3):
         await monitor.tick()
     ok(store.mon(okey)['status'] == 'ok' and store.mon(okey)['data'] == 2, 'чекер без единой удачной проверки не считается')
