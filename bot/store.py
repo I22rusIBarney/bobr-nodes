@@ -134,8 +134,9 @@ class Store:
 
     def save_relay(self, data: dict) -> int:
         body = json.dumps({k: v for k, v in data.items() if k != 'id'}, ensure_ascii=False)
-        if data.get('id'):
-            self._q('UPDATE relays SET data=? WHERE id=?', (body, data['id']))
+        if data.get('id'):  # с тем же id — и после удаления (вход возвращаем, если сервер не ответил)
+            self._q('INSERT INTO relays(id, data) VALUES(?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data',
+                    (data['id'], body))
             return data['id']
         with self.lock:
             return self.db.execute('INSERT INTO relays(data) VALUES(?)', (body,)).lastrowid
