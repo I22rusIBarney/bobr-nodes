@@ -619,14 +619,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     async def panel_nodes_load(p: dict) -> dict:
 
-        def load():
-            pl = panel_of(p)
-            profiles = {x['uuid']: x for x in pl.call('GET', '/api/config-profiles')['configProfiles']}
-            return pl.call('GET', '/api/nodes'), profiles
-        try:
-            nodes, profiles = await asyncio.to_thread(load)
+        pl = panel_of(p)
+        try:  # список нод, профили и версии — одновременно
+            nodes, profiles, versions = await asyncio.gather(
+                asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
+                asyncio.to_thread(pl.call, 'GET', '/api/config-profiles'),
+                node_versions(p))
         except engine.StepError as e:
             raise ApiError(f'Панель: {e}') from None
+        profiles = {x['uuid']: x for x in profiles['configProfiles']}
         bot = bot_jobs_by_ip(p['id'])
         busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
         out = []
@@ -640,7 +641,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                         'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
-        return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': await node_versions(p)}
+        return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': versions}
 
     async def node_versions(p: dict) -> dict:
         """Версия панели и последняя подходящая к ней версия ноды (Docker Hub) — цель обновления по умолчанию."""
@@ -686,29 +687,40 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         p = profile_or_404(request.match_info['pid'], request)
         uuid = request.match_info['uuid']
 
-        def load():
-            pl = panel_of(p)
-            n = next((x for x in pl.call('GET', '/api/nodes') if x['uuid'] == uuid), None)
-            if not n:
-                raise ApiError('Ноды нет в панели', 404)
-            pr = next((x for x in pl.call('GET', '/api/config-profiles')['configProfiles']
-                       if x['uuid'] == (n.get('configProfile') or {}).get('activeConfigProfileUuid')), {}) or {}
-            bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
-            ip = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else resolve(n['address']))
-            dom = bd.get('domain') or ('' if engine.is_ip(n['address']) else n['address'])
-            return n, pr, pl.node_hosts(n, {dom} if dom else set(), {ip} if ip else set()), bd, ip, dom
-        try:
-            n, pr, hosts, bd, ip, dom = await asyncio.to_thread(load)
+        pl = panel_of(p)
+        try:  # три запроса к панели — одновременно, а не по очереди
+            nodes, profiles, all_hosts = await asyncio.gather(
+                asyncio.to_thread(pl.call, 'GET', '/api/nodes'),
+                asyncio.to_thread(pl.call, 'GET', '/api/config-profiles'),
+                asyncio.to_thread(pl.call, 'GET', '/api/hosts'))
         except engine.StepError as e:
             raise ApiError(f'Панель: {e}') from None
-        bc = None
-        if bd.get('server_id'):
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        pr = next((x for x in profiles['configProfiles']
+                   if x['uuid'] == (n.get('configProfile') or {}).get('activeConfigProfileUuid')), {}) or {}
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+
+        def own_hosts():
+            ip = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else resolve(n['address']))
+            dom = bd.get('domain') or ('' if engine.is_ip(n['address']) else n['address'])
+            return pl.node_hosts(n, {dom} if dom else set(), {ip} if ip else set(), all_hosts), ip, dom
+
+        async def bcloud_info():
+            if not bd.get('server_id'):
+                return None
             bc = {'server_id': bd['server_id'], 'price_kop': None}
             try:
                 srv = await bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))
                 bc['price_kop'] = srv.get('change_ip_price_kop')
             except BcloudError as e:
                 bc['error'] = str(e)
+            return bc
+        try:  # поиск хостов ноды (DNS) и Bobr Cloud — тоже параллельно
+            (hosts, ip, dom), bc = await asyncio.gather(asyncio.to_thread(own_hosts), bcloud_info())
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
         return J({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
                   'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
                   'inbound_port': next((i.get('port') for i in pr.get('inbounds', [])

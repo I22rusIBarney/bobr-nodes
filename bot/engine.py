@@ -19,11 +19,10 @@ import socket
 import subprocess
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Callable
 
+import httpx
 import pexpect
 
 DEFAULT_REF = '93297a689100a666e5d49d20750c5ede3713dad2'
@@ -78,15 +77,6 @@ def strip_ansi(s: str | None) -> str:
 
 # ─────────────────────────────── HTTP ────────────────────────────────
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Перенаправление не выполняем: для API это почти всегда заглушка прокси (не прошла cookie-защита)."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
 def _not_json(raw: bytes, headers=None) -> dict:
     text = raw[:4000].decode('utf-8', 'replace')
     m = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
@@ -96,32 +86,32 @@ def _not_json(raw: bytes, headers=None) -> dict:
     return out
 
 
+# Общий клиент с keep-alive: соединение с панелью (TCP + TLS) открывается один раз и переиспользуется.
+# Без этого каждый запрос заново делал рукопожатие — при боте в США и панели в Европе это ~0,3–0,5 с на запрос.
+_CLIENT = httpx.Client(follow_redirects=False, timeout=30,
+                       limits=httpx.Limits(max_connections=64, max_keepalive_connections=32, keepalive_expiry=60))
+
+
 def http(method, url, headers=None, body=None, timeout=30):
     """(код, JSON). Если ответ не JSON (HTML-заглушка, редирект) — словарь с not_json, raw, title, location."""
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    for k, v in (headers or {}).items():
-        req.add_header(k, v)
+    hdrs = dict(headers or {})
     if data is not None:
-        req.add_header('Content-Type', 'application/json')
+        hdrs['Content-Type'] = 'application/json'
     try:
-        with _OPENER.open(req, timeout=timeout) as r:
-            raw = r.read()
-            try:
-                return r.status, (json.loads(raw) if raw else {})
-            except ValueError:
-                return r.status, _not_json(raw, r.headers)
-    except urllib.error.HTTPError as e:
-        raw = e.read()
-        try:
-            payload = json.loads(raw)
-            if not isinstance(payload, dict):
-                payload = {'value': payload}
-        except ValueError:
-            payload = _not_json(raw, e.headers)
-        return e.code, payload
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise StepError(f'{url.split("/")[2]} недоступен: {getattr(e, "reason", e)}') from e
+        r = _CLIENT.request(method, url, headers=hdrs, content=data, timeout=timeout)
+    except httpx.HTTPError as e:
+        raise StepError(f'{url.split("/")[2]} недоступен: {e}') from e
+    raw = r.content
+    if 300 <= r.status_code < 400:  # перенаправление не выполняем: для API это почти всегда заглушка прокси
+        return r.status_code, _not_json(raw, r.headers)
+    try:
+        payload = json.loads(raw) if raw else {}
+    except ValueError:
+        return r.status_code, _not_json(raw, r.headers)
+    if r.status_code >= 400 and not isinstance(payload, dict):
+        payload = {'value': payload}
+    return r.status_code, payload
 
 
 # ─────────────────────────────── Cloudflare ──────────────────────────
@@ -547,6 +537,35 @@ def active_inbounds(pnode: dict) -> list[str]:
     return [x.get('uuid') if isinstance(x, dict) else x for x in ((pnode.get('configProfile') or {}).get('activeInbounds') or [])]
 
 
+_DNS: dict[str, tuple[float, set[str]]] = {}
+_DNS_LOCK = threading.Lock()
+
+
+def _resolve_v4(host: str) -> set[str]:
+    with _DNS_LOCK:
+        hit = _DNS.get(host)
+    if hit and time.time() - hit[0] < 120:
+        return hit[1]
+    try:
+        ips = {a[4][0] for a in socket.getaddrinfo(host, None, socket.AF_INET)}
+    except (OSError, UnicodeError):
+        ips = set()
+    with _DNS_LOCK:
+        _DNS[host] = (time.time(), ips)
+    return ips
+
+
+def resolve_many(hosts) -> dict[str, set[str]]:
+    """IPv4 адреса доменов — параллельно и с кэшем на 2 минуты."""
+    out = {h: {h} for h in set(hosts) if h and is_ip(h)}
+    names = [h for h in set(hosts) if h and h not in out]
+    if names:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(16, len(names))) as ex:
+            out.update(zip(names, ex.map(_resolve_v4, names)))
+    return out
+
+
 class Panel:
     def __init__(self, url: str, token: str, cookie: str = '', extra_headers: dict | None = None):
         self.url = url.rstrip('/')
@@ -719,24 +738,21 @@ class Panel:
         self.attach(node, prof, [inbound], squads, node_port, log, tls=True, also=xin)
         return prof
 
-    def node_hosts(self, pnode: dict, domains: set[str], ips: set[str] = frozenset()) -> list[dict]:
-        """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP."""
+    def node_hosts(self, pnode: dict, domains: set[str], ips: set[str] = frozenset(),
+                   hosts: list[dict] | None = None) -> list[dict]:
+        """Хосты этой ноды: привязаны к ней в панели или их адрес — её IP / известный боту домен / домен с её IP.
+        hosts — уже загруженный /api/hosts (чтобы не ходить в панель второй раз)."""
         active = set(active_inbounds(pnode))
         names = {pnode['address']} | set(domains)
         names |= {CDN_PREFIX + d for d in names if d and not is_ip(d)}  # хост запасного XHTTP через Cloudflare
-        out = []
-        for h in self.call('GET', '/api/hosts'):
-            if (h.get('inbound') or {}).get('configProfileInboundUuid') not in active:
-                continue
-            mine = pnode['uuid'] in (h.get('nodes') or []) or h.get('address') in names
-            if not mine and h.get('address'):
-                try:
-                    mine = bool(({pnode['address']} | set(ips)) & {a[4][0] for a in socket.getaddrinfo(h['address'], None, socket.AF_INET)})
-                except (OSError, UnicodeError):
-                    mine = False
-            if mine:
-                out.append(h)
-        return out
+        mine_ips = {pnode['address']} | set(ips)
+        cand = [h for h in (self.call('GET', '/api/hosts') if hosts is None else hosts)
+                if (h.get('inbound') or {}).get('configProfileInboundUuid') in active]
+        need = {h['address'] for h in cand
+                if h.get('address') and not (pnode['uuid'] in (h.get('nodes') or []) or h.get('address') in names)}
+        found = resolve_many(need)  # все домены разом, а не по очереди
+        return [h for h in cand if pnode['uuid'] in (h.get('nodes') or []) or h.get('address') in names
+                or (h.get('address') and mine_ips & found.get(h['address'], set()))]
 
     def upgrade_node(self, pnode: dict, extras: dict, hosts: list[dict], log) -> dict:
         """Переводит ноду в вариант её профиля с дополнениями: профиль-копия с выходами и правилами,
