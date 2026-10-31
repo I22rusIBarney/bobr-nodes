@@ -76,22 +76,29 @@ PRESETS = [{'idx': 0, 'cpu': 1, 'ram': 1, 'disk': 10, 'price_month_rub': {'de': 
            {'idx': 1, 'cpu': 2, 'ram': 2, 'disk': 30, 'price_month_rub': {'de': 400, 'nl': 380}}]
 
 
+CONF = {'cpu': {'min': 1, 'max': 16, 'step': 1}, 'ram': {'min': 1, 'max': 64, 'step': 1}, 'disk': {'min': 20, 'max': 500, 'step': 10}}
+
+
 class FakeAstra:
     def __init__(s):
         s.n = 500
         s.made = {}
+        s.conf = None  # конструктор у провайдера: включается в сценарии
 
     async def catalog(s):
         return {'locations': [{'code': 'de', 'name': 'Германия', 'available': True},
                               {'code': 'nl', 'name': 'Нидерланды', 'available': True}],
-                'presets': PRESETS, 'os': ['ubuntu2204', 'debian12', 'win2022']}
+                'presets': PRESETS, 'os': ['ubuntu2204', 'debian12', 'win2022'], **({'configurator': s.conf} if s.conf else {})}
+
+    async def quote(s, *, location, cpu, ram, disk, period='1m'):
+        return {'ok': True, 'spec': {'cpu': cpu, 'ram': ram, 'disk': disk, 'port': '1gbps'}, 'price_rub': 60 * cpu + 40 * ram + disk}
 
     async def balance(s): return {'balance_rub': 9999}
 
     async def create(s, **kw):
         s.n += 1
         s.made[s.n] = kw
-        p = PRESETS[kw['idx']]
+        p = PRESETS[kw['idx']] if kw.get('idx') is not None else kw
         return {'id': s.n, 'spec': {'cpu': p['cpu'], 'ram': p['ram'], 'disk': p['disk'], 'os': kw['os']},
                 'charged_rub': 200, 'expires_in_days': 30}
 
@@ -689,6 +696,24 @@ async def main():
        and not [r for r in world.records if r['name'] == 'cdn-' + dom]
        and all(not rs for rs in world.rulesets.values()),
        f'XHTTP убран: хосты, cdn-запись и правила Cloudflare: {store.job(js["id"])["error"]}')
+    # режимы XHTTP: только напрямую — без cdn-записи и правил; только через CDN — без прямого хоста
+    for xmode, want in (('direct', {dom}), ('cdn', {'cdn-' + dom})):
+        st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST', {'xhttp': {'enabled': True, 'mode': xmode}})
+        await runner.wait_all()
+        xj = store.job(js['id'])
+        pn = next(n for n in world.nodes if n['uuid'] == plain['uuid'])
+        vx = next(x for x in world.profiles if x['uuid'] == pn['configProfile']['activeConfigProfileUuid'])
+        xin = next(i['uuid'] for i in vx['inbounds'] if i['tag'].startswith(engine.XHTTP_PREFIX))
+        got = {h['address'] for h in world.hosts if h['inbound']['configProfileInboundUuid'] == xin}
+        cdn_rec = [r for r in world.records if r['name'] == 'cdn-' + dom]
+        ok(xj['status'] == 'done' and got == want and bool(cdn_rec) == (xmode == 'cdn')
+           and ('через CDN' if xmode == 'cdn' else 'напрямую') in job_text_of(xj),
+           f'XHTTP {xmode}: хосты {got}, cdn-запись {bool(cdn_rec)}: {xj["error"]}')
+        st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/rollback', 'POST', {})
+        await runner.wait_all()
+        ok(store.job(js['id'])['status'] == 'done' and not [r for r in world.records if r['name'] == 'cdn-' + dom], f'XHTTP {xmode}: убран')
+    st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST', {'xhttp': {'enabled': True, 'mode': 'sideways'}})
+    ok(st == 400 and 'режим XHTTP' in js['detail'], 'неизвестный режим XHTTP отклонён')
     # чужая нода (не от бота): без доступа SSH дополнения не запускаются, с паролем — профиль-копия «Manual nodes Psiphon»
     man = next(x for x in world.profiles if x['name'] == 'Manual nodes')
     world.nodes.append({'uuid': '33333333-3333-3333-3333-333333333333', 'name': 'manual-1', 'address': '198.51.100.250',
@@ -981,6 +1006,104 @@ async def main():
     st, js = await wapi(f'jobs/{jid}/hide', 'POST')
     st, jl = await wapi('jobs')
     ok(jid not in [x['id'] for x in jl['jobs']], 'скрытая задача пропала из списка')
+
+    # ── конструктор: своя конфигурация вместо готового тарифа
+    async with BD.session() as s_:
+        await BD.change_balance(s_, 1, 100_000, 'admin_adjust')
+    st, cat = await wapi(f'catalog?pid={pid}')
+    ok(st == 200 and cat['configurator'] is None, 'без конструктора у провайдера — его нет и в мастере')
+    astra.conf = CONF
+    bctx._catalog = None
+    st, cat = await wapi(f'catalog?pid={pid}')
+    ok(cat['configurator'] and cat['configurator']['disk']['step'] == 10, 'конструктор: диапазоны из bcloud')
+    st, q = await wapi(f'quote?pid={pid}&location=de&cpu=3&ram=6&disk=50')
+    ok(st == 200 and q['price_kop'] > 0 and q['cpu'] == 3 and 'cost_rub' not in q, f'конструктор: цена от bcloud: {q}')
+    st, q = await wapi(f'quote?pid={pid}&location=de&cpu=3&ram=6&disk=55')
+    ok(st == 400 and 'шаг 10' in q['detail'], f'конструктор: значение вне шага отклонено: {q}')
+    st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'de', 'count': 1})
+    made0 = set(astra.made)
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'period': '1m', 'items': [{'location': 'de', 'spec': {'cpu': 3, 'ram': 6, 'disk': 50},
+                                                                              'domains': dj['domains']}]})
+    ok(st == 200, f'деплой своей конфигурации: {js}')
+    await runner.wait_all()
+    cj = store.job(js['ids'][0])
+    new = [astra.made[k] for k in set(astra.made) - made0]
+    ok(cj['status'] == 'done' and len(new) == 1 and (new[0]['cpu'], new[0]['ram'], new[0]['disk']) == (3, 6, 50) and new[0].get('idx') is None
+       and cj['data']['spec'] == '3 vCPU · 6 ГБ · 50 ГБ', f'куплен сервер своей конфигурации и нода поставлена: {cj["error"]}')
+    # из чата: «Своя конфигурация» → три числа → срок → количество → домены
+    await tap(f'd:p:{pid}')
+    await tap('d:l:de')
+    ok("'d:cu'" in buttons(), 'чат: в тарифах есть «Своя конфигурация»')
+    await tap('d:cu')
+    out = await say('3 6 55')
+    ok('шаг 10' in last(out), 'чат: значение вне шага — подсказка')
+    out = await say('2 4 40')
+    await tap('d:t:1m') if 'Срок' in last(out) else None
+    await tap('d:c:1')
+    out = await tap('d:dom:auto')
+    ok('2 vCPU · 4 ГБ · 40 ГБ (своя)' in last(out), f'чат: в заказе своя конфигурация: {last(out)[:200]}')
+    made0 = set(astra.made)
+    await tap('d:go')
+    await runner.wait_all()
+    new = [astra.made[k] for k in set(astra.made) - made0]
+    ok(len(new) == 1 and (new[0]['cpu'], new[0]['ram'], new[0]['disk']) == (2, 4, 40) and store.jobs(1)[0]['status'] == 'done',
+       f'чат: куплен сервер своей конфигурации: {store.jobs(1)[0]["error"]}')
+    astra.conf = None
+    bctx._catalog = None
+
+    # ── уже купленные серверы: куплены в самом bcloud, а не через Bobr Nodes
+    own = []
+    for loc in ('nl', 'de'):
+        x = await BS.buy_server(bctx, 1, 0, loc, 'debian12', 'Own1Passw0rdX' + loc)
+        await BS.refresh_server(bctx, x.astra_id)
+        own.append(x.id)
+    win = await BS.buy_server(bctx, 1, 0, 'nl', 'debian12', 'Own1Passw0rdW')
+    await BS.refresh_server(bctx, win.astra_id)
+    async with BD.session() as s_:  # переустановлен на Windows в кабинете bcloud
+        (await s_.get(BD.Server, win.id)).os = 'win2022'
+        await s_.commit()
+    async with BD.session() as s_:
+        bal0 = (await s_.get(BD.User, 1)).balance_kop
+    made0 = set(astra.made)
+    st, ol = await wapi(f'profiles/{pid}/servers')
+    sv = {x['id']: x for x in ol['servers']}
+    ok(st == 200 and all(sv[i]['ready'] for i in own) and all('root_password' not in x for x in ol['servers']),
+       f'список серверов из bcloud: свободные готовы, пароли наружу не отдаются: {[(x["id"], x["why"]) for x in ol["servers"]]}')
+    ok(sv[win.id]['why'] == 'нужна Ubuntu или Debian' and any(x['used'] and not x['ready'] for x in ol['servers']),
+       'серверы с нодами и с Windows отмечены как недоступные')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'items': [{'location': 'nl', 'servers': [win.id], 'domains': ['nl50.example.com']}]})
+    ok(st == 400 and 'Ubuntu или Debian' in js['detail'], 'сервер с Windows не берётся')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'items': [{'location': 'de', 'servers': [own[0]], 'domains': ['nl50.example.com']}]})
+    ok(st == 400 and 'другой локации' in js['detail'], 'сервер из другой локации не берётся')
+    st, dj = await wapi('domains/auto', 'POST', {'pid': pid, 'location': 'nl', 'count': 1})
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'items': [{'location': 'nl', 'servers': [own[0]], 'domains': dj['domains']}]})
+    ok(st == 200, f'деплой на уже купленный сервер: {js}')
+    await runner.wait_all()
+    oj = store.job(js['ids'][0])
+    async with BD.session() as s_:
+        bal1 = (await s_.get(BD.User, 1)).balance_kop
+        osrv = await s_.get(BD.Server, own[0])
+    ok(oj['status'] == 'done' and oj['data']['server_id'] == own[0] and oj['data']['ip'] == osrv.ip
+       and oj['data']['password'] == 'Own1Passw0rdXnl' and set(astra.made) == made0 and bal1 == bal0,
+       f'нода на своём сервере: без покупки, IP и пароль из bcloud: {oj["error"]}')
+    ok('Покупка' not in job_text_of(oj) and 'Сервер из bcloud' in job_text_of(oj), 'в карточке задачи нет этапа покупки')
+    st, js = await wapi('deploy', 'POST', {'pid': pid, 'items': [{'location': 'nl', 'servers': [own[0]], 'domains': ['nl51.example.com']}]})
+    ok(st == 400 and 'уже нода' in js['detail'], 'сервер с нодой повторно не берётся')
+    # из чата: «Уже купленные серверы» → выбрать → домены → установить
+    await tap(f'd:p:{pid}')
+    out = await tap('d:own')
+    ok('Уже купленные' in last(out) and f"'d:os:{own[1]}'" in buttons() and f"'d:os:{own[0]}'" not in buttons(),
+       'чат: свободные серверы списком, занятый нодой — нет')
+    await tap(f'd:os:{own[1]}')
+    ok("'d:own:go'" in buttons(), 'чат: после выбора — «Дальше»')
+    await tap('d:own:go')
+    out = await tap('d:dom:auto')
+    ok('Покупки нет' in last(out) and 'de' in last(out), f'чат: подтверждение без покупки: {last(out)[:200]}')
+    await tap('d:go')
+    await runner.wait_all()
+    cj = store.jobs(1)[0]
+    ok(cj['status'] == 'done' and cj['data']['server_id'] == own[1] and set(astra.made) == made0,
+       f'чат: нода на своём сервере без покупки: {cj["error"]}')
 
     out = await tap('m:jobs')
     ok('Задачи' in last(out), 'список задач')

@@ -20,9 +20,14 @@ STAGES = [('buy', 'Покупка в bcloud'), ('ip', 'Создание серв
 STAGE_ORDER = [s for s, _ in STAGES]
 
 
+def xhttp_label(x) -> str:
+    mode = x.get('mode') if isinstance(x, dict) else None
+    return {'direct': 'XHTTP напрямую', 'cdn': 'XHTTP через CDN'}.get(mode, 'XHTTP')
+
+
 def extras_label(d: dict) -> str:
     port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
-    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + (['XHTTP'] if d.get('xhttp') else []) + \
+    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + ([xhttp_label(d['xhttp'])] if d.get('xhttp') else []) + \
         ([f'порт {port}'] if port not in (None, '', 443, '443') else [])
     return ', '.join(parts)
 
@@ -43,7 +48,8 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
             [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') or d.get('xhttp') else [])
         return out
     skip = set(d.get('skipped_stages') or []) | (set() if extra else {'extras'})
-    return [(c, 'Дополнения: ' + extra if c == 'extras' else lbl) for c, lbl in STAGES if c not in skip]
+    names = {'extras': 'Дополнения: ' + extra, **({'ip': 'Сервер из bcloud'} if d.get('existing') else {})}
+    return [(c, names.get(c, lbl)) for c, lbl in STAGES if c not in skip]
 
 
 STATUS_ICON = {'queued': '🕓', 'buying': '⏳', 'provisioning': '⏳', 'deploying': '⏳', 'done': '✅', 'failed': '❌'}
@@ -367,7 +373,7 @@ class Runner:
                     raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в bcloud. '
                                'Повтор купит новый сервер.')
                 await self._set(jid, status='buying', stage='buy', error='')
-                srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'])
+                srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
                 d = self.store.patch_job_data(jid, server_id=srv['id'])
 
             await self._set(jid, status='provisioning', stage='ip', error='')
@@ -389,6 +395,8 @@ class Runner:
                     d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
                     break
                 if srv['status'] in ('deleted', 'failed', 'error'):
+                    if d.get('existing'):
+                        raise Fail(f'сервер в bcloud недоступен (статус {srv["status"]})')
                     raise Fail(f'bcloud не смог создать сервер (статус {srv["status"]}); деньги bcloud возвращает сам')
                 if time.monotonic() > end:
                     raise Fail('сервер слишком долго создаётся — проверьте его в bcloud и нажмите «Повторить»')

@@ -50,7 +50,16 @@ EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP'), ('xhttp', 'XHTTP
 XHTTP_PORT = 2083
 XHTTP_PREFIX = 'XHTTP-'      # тег inbound: XHTTP-<тег основного inbound>
 CDN_PREFIX = 'cdn-'
-CF_RULE = 'Bobr Nodes XHTTP'  # описание правил Cloudflare (Origin Rule и Config Rule), которыми бот управляет сам
+CF_RULE = 'Bobr Nodes XHTTP'
+XHTTP_MODES = {'both': 'напрямую и через CDN', 'direct': 'только напрямую', 'cdn': 'только через CDN'}
+
+
+def xhttp_mode(v) -> str:
+    """Режим запасного XHTTP: both (по умолчанию, как раньше), direct или cdn."""
+    v = str(v or 'both').strip().lower()
+    if v not in XHTTP_MODES:
+        raise StepError('режим XHTTP: both, direct или cdn')
+    return v  # описание правил Cloudflare (Origin Rule и Config Rule), которыми бот управляет сам
 INBOUND_TAG = 'Vision-TLS'
 YN = r'[^\n]*\[Д/Н; Enter — Н\]'
 
@@ -795,26 +804,46 @@ class Panel:
         log(f'панель: хосты ноды ({len(hosts)}) — на inbound «{vname}»')
         self.restart_node(pnode, log)
 
-    def xhttp_publish(self, prof: dict, domain: str, ip: str, remark: str, cf: 'Cloudflare | None', log) -> None:
-        """Хосты запасного XHTTP: напрямую (домен ноды:порт) и через Cloudflare CDN (cdn-домен, оранжевое облако)."""
+    def xhttp_publish(self, prof: dict, domain: str, ip: str, remark: str, cf: 'Cloudflare | None', log,
+                      mode: str = 'both') -> None:
+        """Хосты запасного XHTTP по режиму: direct — напрямую (домен ноды:порт), cdn — через Cloudflare CDN
+        (cdn-домен, оранжевое облако), both — оба. Хосты другого режима, оставшиеся с прошлого раза, убираются."""
+        mode = xhttp_mode(mode)
         x = xhttp_of(prof.get('config'))
         xin = next((i for i in prof['inbounds'] if x and i['tag'] == x['tag']), None)
         if not x or not xin:
             raise StepError(f'в профиле «{prof["name"]}» нет запасного XHTTP')
         cdn, cdn_port = CDN_PREFIX + domain, x['port']
-        if cf is None:
+        want_cdn = mode in ('cdn', 'both')
+        if want_cdn and cf is None:
+            if mode == 'cdn':
+                raise StepError('XHTTP через CDN: нужен токен Cloudflare (общий в «Подключениях» или у группы)')
             log('⚠️ нет токена Cloudflare — хост через CDN не создан, только прямой')
-        else:
+            want_cdn = False
+        if want_cdn:
             cf.upsert_a(cdn, ip, log, proxied=True)
             if cf.xhttp_rules(cdn, x['port'], log):
                 cdn_port = 443
+        targets = ([(domain, x['port'], 'XHTTP')] if mode in ('direct', 'both') else []) + \
+            ([(cdn, cdn_port, 'CDN')] if want_cdn else [])
         hosts = self.call('GET', '/api/hosts')
-        for addr, port, label in ((domain, x['port'], 'XHTTP'), *(((cdn, cdn_port, 'CDN'),) if cf else ())):
+        mine = [h for h in hosts if str(((h.get('inbound') or {}).get('configProfileInboundUuid')) or '') == xin['uuid']]
+        keep = {a for a, _, _ in targets}
+        for h in mine:  # смена режима: лишний хост этой ноды — убрать
+            if h.get('address') in {domain, cdn} - keep:
+                self.call('DELETE', f'/api/hosts/{h["uuid"]}')
+                log(f'панель: хост «{h.get("remark", "")}» удалён (XHTTP: {XHTTP_MODES[mode]})')
+        if not want_cdn and cf is not None and any(h.get('address') == cdn for h in mine):
+            try:
+                cf.delete_a(cdn, ip, log)
+                cf.xhttp_rules(cdn, x['port'], log, add=False)
+            except StepError as e:
+                log(f'⚠️ Cloudflare: {e}')
+        for addr, port, label in targets:
             body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': xin['uuid']},
                     'remark': f'{remark} {label}'[:100], 'address': addr, 'port': port, 'path': x['path'], 'sni': addr, 'host': addr,
                     'alpn': 'h2,http/1.1', 'fingerprint': 'chrome', 'securityLayer': 'TLS'}
-            have = next((h for h in hosts if h.get('address') == addr
-                         and str(((h.get('inbound') or {}).get('configProfileInboundUuid')) or '') == xin['uuid']), None)
+            have = next((h for h in mine if h.get('address') == addr), None)
             if have:
                 self.call('PATCH', '/api/hosts', {'uuid': have['uuid'], 'port': port, 'path': x['path']})
                 log(f'панель: хост «{have.get("remark", addr)}» обновлён ({addr}:{port})')
@@ -1219,7 +1248,8 @@ def install_extras(r: 'Remote', node: dict, log) -> dict:
         install_warp(r, node['warp'], log)
         extras['warp'] = {'domains': warp_rules(node['warp'].get('domains'))}
     if node.get('xhttp'):
-        extras['xhttp'] = {'port': open_xhttp_port(r, XHTTP_PORT, log)}
+        extras['xhttp'] = {'port': open_xhttp_port(r, XHTTP_PORT, log), 'mode': xhttp_mode((node['xhttp'] or {}).get('mode')
+                                                                                         if isinstance(node['xhttp'], dict) else None)}
     return extras
 
 
@@ -1314,7 +1344,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         pprof = panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, extras)
         if 'xhttp' in extras:
             panel.xhttp_publish(pprof, node['domain'], node['ip'], node.get('remark') or node['name'],
-                                Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log)
+                                Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log, extras['xhttp']['mode'])
 
     stage('check')
     for attempt in range(check_tries):
@@ -1539,6 +1569,8 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
     want_port = node.get('port')
     if node.get('xhttp') and not domain:
         raise StepError('для запасного XHTTP нужен домен ноды: сертификат на ноде выпущен на домен, а не на IP')
+    if isinstance(node.get('xhttp'), dict) and node['xhttp'].get('mode') == 'cdn' and cf is None:
+        raise StepError('XHTTP через CDN: нужен токен Cloudflare (общий в «Подключениях» или у группы)')
     need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or want_port)
     extras, r = {}, None
     if need_ssh:
@@ -1562,7 +1594,7 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
             main_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if not i['tag'].startswith(XHTTP_PREFIX)}
             remark = next((h['remark'] for h in hosts if (h.get('inbound') or {}).get('configProfileInboundUuid') in main_in
                            and h.get('address') == domain), None) or pnode['name']
-            panel.xhttp_publish(cur, domain, ipv4(), remark, cf, log)
+            panel.xhttp_publish(cur, domain, ipv4(), remark, cf, log, extras['xhttp']['mode'])
         if want_port is not None and want_port != '':
             active = set(active_inbounds(pnode))
             ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)

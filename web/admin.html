@@ -742,8 +742,8 @@ function areaIn(val, rows, on, check) {
   return ta;
 }
 const jsonOk = t => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o); } catch (e) { return false; } };
-function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false }; }
-function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains }); }
+function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false, xhMode: s.xhMode || 'both' }; }
+function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains, xhMode: E.xhMode }); }
 function extrasRows(E, have, opts) {
   have = have || []; opts = opts || {};
   const rows = [];
@@ -757,9 +757,16 @@ function extrasRows(E, have, opts) {
   rows.push(tog('warp', 'WARP', 'выход Cloudflare WARP, например для TikTok'));
   if (E.warp) rows.push(h('label', { class: 'field stack' }, h('label', {}, 'Домены через WARP'), areaIn(E.warpDomains, 3, x => { E.warpDomains = x; saveExtras(E); })));
   if (!opts.noXhttp) {
-    rows.push(tog('xhttp', 'Запасной XHTTP', 'второй вход на порту 2083 и через Cloudflare CDN'));
-    if (E.xh) rows.push(h('div', { class: 'in-note' }, 'Появятся два хоста: «… XHTTP» — напрямую на домен ноды, порт 2083, и «… CDN» — через Cloudflare. '
-      + 'Через CDN подключение идёт к адресам Cloudflare, поэтому переживает и бан IP ноды. Для 443 через CDN токену Cloudflare нужны права «Origin Rules: Edit» и «Config Rules: Edit», иначе клиенты пойдут через CDN на 2083.'));
+    rows.push(tog('xhttp', 'Запасной XHTTP', 'второй вход: напрямую на порт 2083 и/или через Cloudflare CDN'));
+    if (E.xh) {
+      rows.push(h('div', { class: 'seg-row' }, UI.segmented([{ value: 'direct', label: 'Напрямую' }, { value: 'cdn', label: 'Через CDN' }, { value: 'both', label: 'Оба' }],
+        E.xhMode, x => { E.xhMode = x; saveExtras(E); UI.nav.refresh(); })));
+      const direct = '«… XHTTP» — напрямую на домен ноды, порт 2083', cdn = '«… CDN» — через Cloudflare';
+      const cdnWhy = ' Через CDN подключение идёт к адресам Cloudflare, поэтому переживает и бан IP ноды. Для 443 через CDN токену Cloudflare нужны права «Origin Rules: Edit» и «Config Rules: Edit», иначе клиенты пойдут через CDN на 2083.';
+      rows.push(h('div', { class: 'in-note' }, E.xhMode === 'direct' ? 'Появится один хост: ' + direct + '. Записей и правил в Cloudflare бот не создаёт.'
+        : E.xhMode === 'cdn' ? 'Появится один хост: ' + cdn + '.' + cdnWhy
+        : 'Появятся два хоста: ' + direct + ', и ' + cdn + '.' + cdnWhy));
+    }
   }
   return rows;
 }
@@ -771,7 +778,7 @@ function act(text, fn, cls) {
   } });
   return r;
 }
-function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true } : undefined }; }
+function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'both' } : undefined }; }
 const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
 
 let D = null;
@@ -779,11 +786,12 @@ const PERIOD = { '1m': '1 мес', '3m': '3 мес', '6m': '6 мес', '1y': '1 
 const ACTIVE_ST = ['queued', 'buying', 'provisioning', 'deploying'];
 function fetchCat() {
   const d = D;
-  Object.assign(d, { cat: null, err: null, meta: null, metaErr: null, squads: null, zones: null, zonesErr: '', items: [], domains: {}, picked: false, order: null, orderTouched: false, sel: null });
+  Object.assign(d, { cat: null, err: null, meta: null, metaErr: null, squads: null, zones: null, zonesErr: '', items: [], newItems: null, domains: {}, picked: false, order: null, orderTouched: false, sel: null,
+    own: null, ownErr: null, ownLoading: false, ownSel: [], ownLoc: {} });
   api('catalog?pid=' + d.pid).then(c => {
     if (D !== d) return;
     d.cat = c;
-    if (c.locations[0]) d.items = [{ loc: c.locations[0].code, idx: null, count: 1 }];
+    if (c.locations[0]) { const it = [{ loc: c.locations[0].code, idx: null, count: 1 }]; if (d.src === 'own') d.newItems = it; else d.items = it; }
     UI.nav.refresh();
   }).catch(e => { if (D === d) { d.err = e.message; UI.nav.refresh(); } });
   api('profiles/' + d.pid + '/panel').then(m => { if (D !== d) return; d.meta = m; d.squads = new Set(m.default_squads); UI.nav.refresh(); })
@@ -804,15 +812,96 @@ function multiChips(options, selected, onToggle) {
     o.flag ? h('span', { class: 'f', 'aria-hidden': 'true' }, o.flag) : null, o.label)));
   return wrap;
 }
+// уже купленные серверы покупателя группы в bcloud: выбранные — по локациям, как обычные позиции мастера
+function ownItems() {
+  const by = {};
+  D.ownSel.forEach(id => { const x = (D.own || []).find(s => s.id === id); if (x) (by[x.location] = by[x.location] || []).push(id); });
+  return Object.entries(by).map(([loc, ids]) => ({ loc, servers: ids, count: ids.length }));
+}
+function loadOwn() {
+  const d = D; d.ownLoading = true; d.ownErr = null;
+  api('profiles/' + d.pid + '/servers').then(r => {
+    if (D !== d) return;
+    d.own = r.servers; d.ownBuyer = r.buyer; d.ownLoc = {};
+    r.servers.forEach(x => { d.ownLoc[x.location] = { code: x.location, name: x.loc_name || x.location, flag: x.flag || '' }; });
+    d.ownSel = d.ownSel.filter(id => r.servers.some(x => x.id === id && x.ready));
+    if (d.src === 'own') d.items = ownItems();
+    UI.nav.refresh();
+  }).catch(e => { if (D === d) { d.ownErr = e.message; UI.nav.refresh(); } }).finally(() => { d.ownLoading = false; });
+}
+// конструктор: значения из диапазона bcloud (min…max с шагом, max — даже если не попадает в шаг)
+function rangeVals(r) {
+  const out = [];
+  for (let x = r.min; x <= r.max; x += r.step) out.push(x);
+  if (out[out.length - 1] !== r.max && r.max_is_allowed !== false) out.push(r.max);
+  return out;
+}
+function snapTo(r, v) { const vals = rangeVals(r); return vals.find(x => x >= v) || vals[vals.length - 1]; }
+function defSpec(c) { return { cpu: snapTo(c.cpu, 2), ram: snapTo(c.ram, 2), disk: snapTo(c.disk, 30) }; }
+function rangeStepper(value, r, onChange) {
+  const vals = rangeVals(r);
+  let i = Math.max(0, vals.indexOf(value));
+  const num = h('b', {}, String(vals[i]));
+  const set = j => {
+    j = Math.max(0, Math.min(vals.length - 1, j)); if (j === i) return false;
+    i = j; num.textContent = String(vals[i]); minus.disabled = i <= 0; plus.disabled = i >= vals.length - 1; UI.haptic('select'); onChange(vals[i]); return true;
+  };
+  // удержание кнопки — значения бегут всё быстрее (у диска сотня шагов)
+  const hold = (btn, dir) => {
+    let t = null;
+    const stop = () => { clearTimeout(t); t = null; };
+    const tick = delay => { if (!btn.isConnected || !set(i + dir)) return stop(); t = setTimeout(() => tick(Math.max(40, delay * .8)), delay); };
+    btn.addEventListener('pointerdown', e => { e.preventDefault(); stop(); tick(380); });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, stop));
+    btn.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); set(i + dir); } });
+  };
+  const minus = h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Меньше', disabled: i <= 0 }, '−');
+  const plus = h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Больше', disabled: i >= vals.length - 1 }, '+');
+  hold(minus, -1); hold(plus, 1);
+  return h('div', { class: 'counter' }, minus, num, plus);
+}
+function quoteItem(it) {
+  clearTimeout(it.qt); it.q = null; it.qErr = '';
+  const d = D, sp = JSON.stringify(it.spec), loc = it.loc;
+  const same = () => D === d && it.idx === 'custom' && JSON.stringify(it.spec) === sp;
+  it.qt = setTimeout(() => api(`quote?pid=${d.pid}&location=${encodeURIComponent(loc)}&cpu=${it.spec.cpu}&ram=${it.spec.ram}&disk=${it.spec.disk}`)
+    .then(q => { if (same()) { it.q = q; UI.nav.refresh(); } })
+    .catch(e => { if (same()) { it.qErr = e.message; UI.nav.refresh(); } }), 400);
+}
 function deployView(pid) {
-  if (!D) { D = { pid: pid || (ST.profiles[0] && ST.profiles[0].id), period: '1m', domMode: null, manual: {}, zone: '' }; fetchCat(); }
+  if (!D) { D = { pid: pid || (ST.profiles[0] && ST.profiles[0].id), period: '1m', domMode: null, manual: {}, zone: '', src: 'new' }; fetchCat(); }
   const v = h('div', {}, ...title('Развернуть'));
   const prof = ST.profiles.find(p => p.id === D.pid) || ST.profiles[0];
   const resetNames = () => { D.domains = {}; D.picked = false; };
   if (ST.profiles.length > 1) v.append(UI.section('Группа', UI.chips(ST.profiles.map(p => ({ value: p.id, label: p.name })), D.pid, x => { D.pid = x; fetchCat(); UI.nav.refresh(); })));
-  if (D.err) { v.append(h('div', { class: 'notice bad' }, D.err)); return v; }
-  if (!D.cat) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
-  const L = code => D.cat.locations.find(l => l.code === code);
+  const own = D.src === 'own';
+  v.append(UI.section('Серверы', h('div', { style: 'padding:0 var(--gutter)' },
+    UI.segmented([{ value: 'new', label: 'Купить новые' }, { value: 'own', label: 'Уже купленные' }], D.src, x => {
+      if (x === D.src) return;
+      if (x === 'own') { D.newItems = D.items; D.items = ownItems(); }
+      else D.items = D.newItems || (D.cat && D.cat.locations[0] ? [{ loc: D.cat.locations[0].code, idx: null, count: 1 }] : []);
+      D.src = x; resetNames(); D.order = null; D.orderTouched = false; UI.nav.refresh();
+    }))));
+  if (D.err && !own) { v.append(h('div', { class: 'notice bad' }, D.err)); return v; }
+  if (!D.cat && !own) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+  const L = code => (D.cat && D.cat.locations.find(l => l.code === code)) || D.ownLoc[code];
+  if (own) {
+    if (!D.own && !D.ownErr && !D.ownLoading) loadOwn();
+    if (D.ownErr) { v.append(h('div', { class: 'notice bad' }, D.ownErr), h('div', { class: 'pad' }, h('button', { class: 'btn secondary', type: 'button', onclick: () => { loadOwn(); UI.nav.refresh(); } }, 'Повторить'))); return v; }
+    if (!D.own) { v.append(group(null, [h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])); return v; }
+    const orows = D.own.map(x => {
+      const on = D.ownSel.includes(x.id);
+      return row({ title: `${x.flag || ''} ${x.name || x.ip || '#' + x.id}`.trim(), cls: 'wrap' + (x.ready ? '' : ' is-dim'), chevron: false,
+        sub: [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ, ${x.disk} ГБ`, x.os_label].filter(Boolean).join(' · '),
+        status: x.ready ? null : [x.why, x.used ? 'ok' : 'warn'],
+        right: x.ready ? UI.toggle(on, v2 => { if (v2) D.ownSel.push(x.id); else D.ownSel.splice(D.ownSel.indexOf(x.id), 1); D.items = ownItems(); resetNames(); UI.nav.refresh(); }, x.name || x.ip) : null });
+    });
+    if (!orows.length) orows.push(row({ cls: 'wrap', title: 'Серверов нет', sub: 'В bcloud у ' + D.ownBuyer + ' пока нет серверов' }));
+    orows.push(act('Обновить список', async () => { D.own = null; loadOwn(); UI.nav.refresh(); }));
+    v.append(group('В bcloud · ' + D.ownBuyer, orows,
+      'Все серверы этого аккаунта, где бы они ни были куплены: IP и root-пароль бот берёт из bcloud. Нода ставится поверх системы — на сервере не должно быть своего сайта или Xray на портах 80 и 443.'));
+    if (!D.items.length) { v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s6)' }, 'Выберите серверы для нод.')); return v; }
+  } else {
   // локации (можно несколько)
   v.append(UI.section('Локации', multiChips(D.cat.locations.map(l => ({ value: l.code, flag: l.flag, label: l.name })), D.items.map(i => i.loc), code => {
     const i = D.items.findIndex(x => x.loc === code);
@@ -829,13 +918,30 @@ function deployView(pid) {
       r.setAttribute('aria-pressed', String(on));
       return r;
     });
+    const conf = D.cat.configurator;
+    if (conf) {
+      const on = it.idx === 'custom';
+      const cr = row({ title: 'Своя конфигурация', cls: 'offer', chevron: false,
+        sub: on ? (it.qErr ? '' : it.q ? it.q.speed || '' : 'считаю цену…') : 'конструктор: процессор, память, диск',
+        detail: on && it.q ? rubK(it.q.price_kop) + '/мес' : '', right: on ? icon('check', 'tick') : null,
+        onClick: () => { if (on) return; it.idx = 'custom'; it.spec = it.spec || defSpec(conf); quoteItem(it); UI.nav.refresh(); } });
+      cr.setAttribute('aria-pressed', String(on));
+      rows.push(cr);
+      if (on) {
+        [['cpu', 'vCPU'], ['ram', 'Память, ГБ'], ['disk', 'Диск, ГБ']].forEach(([k, t]) => rows.push(row({ title: t, chevron: false,
+          right: rangeStepper(it.spec[k], conf[k], val => { it.spec[k] = val; quoteItem(it); }) })));
+        if (it.qErr) rows.push(h('div', { class: 'in-note', style: 'color:var(--danger)' }, it.qErr));
+      }
+    }
     rows.push(row({ title: 'Сколько нод', chevron: false, right: stepper(it.count, n => { it.count = n; resetNames(); UI.nav.refresh(); }, 20) }));
     v.append(group(`${loc.flag} ${loc.name}`, rows));
   }
   if (D.cat.periods.length > 1) v.append(UI.section('Срок аренды', h('div', { style: 'padding:0 var(--gutter)' },
     UI.segmented(D.cat.periods.map(p => ({ value: p.code, label: PERIOD[p.code] + (p.pct ? ' −' + p.pct + '%' : '') })), D.period, x => { D.period = x; UI.nav.refresh(); }))));
-  const ready = D.items.every(i => i.idx !== null);
-  if (!ready) { v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s6)' }, 'Выберите конфигурацию в каждой локации.')); return v; }
+  const ready = D.items.length && D.items.every(i => i.idx !== null && (i.idx !== 'custom' || i.q));
+  if (!ready) { v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s6)' },
+    D.items.some(i => i.idx === 'custom' && !i.q && !i.qErr) ? 'Считаю цену своей конфигурации…' : 'Выберите конфигурацию в каждой локации.')); return v; }
+  }
   const total = D.items.reduce((s, i) => s + i.count, 0);
 
   // домены
@@ -969,7 +1075,7 @@ function deployView(pid) {
     if (bad.length && D.E.psi) pwarn = `${bad.map(i => L(i.loc).name).join(', ')}: Psiphon не ставят на сервер в стране, из которой обходят блокировки — его трафик заметен и сам блокируется. ` + pwarn;
   }
   prows.push(h('div', { class: 'in-note' }, pnote));
-  const exOn = [D.E.psi && 'Psiphon', D.E.warp && 'WARP', D.E.xh && 'XHTTP'].filter(Boolean);
+  const exOn = [D.E.psi && 'Psiphon', D.E.warp && 'WARP', D.E.xh && ({ direct: 'XHTTP напрямую', cdn: 'XHTTP через CDN' }[D.E.xhMode] || 'XHTTP')].filter(Boolean);
   adv.push(...UI.fold({ title: 'Дополнения', summary: exOn.length ? exOn.join(' и ') : 'нет', key: 'd-extras', body: prows }));
 
   // порядок хостов: текущий список панели, новые — блоками по локациям, их можно двигать
@@ -1082,22 +1188,34 @@ function deployView(pid) {
   if (pwarn) v.append(h('div', { class: 'notice' }, pwarn));
 
   // итог
-  const per = D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 };
-  const priceOf = it => { const o = L(it.loc).offers.find(x => x.idx === it.idx); return per.months <= 1 ? o.price_kop : Math.ceil(o.price_kop * per.months * (100 - per.pct) / 100 / 100) * 100; };
-  const sum = D.items.reduce((s, it) => s + priceOf(it) * it.count, 0), bal = D.cat.balance_kop;
+  const per = own ? null : (D.cat.periods.find(p => p.code === D.period) || { months: 1, pct: 0 });
+  const priceOf = it => { const m = it.idx === 'custom' ? it.q.price_kop : L(it.loc).offers.find(x => x.idx === it.idx).price_kop;
+    return per.months <= 1 ? m : Math.ceil(m * per.months * (100 - per.pct) / 100 / 100) * 100; };
+  const sum = own ? 0 : D.items.reduce((s, it) => s + priceOf(it) * it.count, 0), bal = own ? null : D.cat.balance_kop;
   const enough = bal === null || bal >= sum;
-  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Итого'), h('div', { class: 'list' },
-    ...D.items.map(it => row({ title: `${L(it.loc).flag} ${L(it.loc).name} × ${it.count}`, detail: rubK(priceOf(it) * it.count) })),
-    h('div', { class: 'total' }, h('span', {}, `${total} ${UI.plural(total, 'нода', 'ноды', 'нод')}, ${PERIOD[D.period]}`), h('b', {}, rubK(sum))),
+  const nodesWord = `${total} ${UI.plural(total, 'нода', 'ноды', 'нод')}`;
+  if (own) {
+    const pairs = D.items.flatMap(it => it.servers.map((id, k) => [D.own.find(x => x.id === id), (D.domains[it.loc] || [])[k]]));
+    v.append(group('Итого', [
+      ...pairs.map(([x, dom]) => row({ title: `${x.flag || ''} ${x.name || x.ip}`.trim(), sub: x.ip, detail: dom ? mid(dom, 26) : '…', mono: !!dom })),
+      h('div', { class: 'total' }, h('span', {}, nodesWord), h('b', {}, 'без покупки')),
+      row({ title: 'Серверы', detail: D.ownBuyer }),
+      row({ title: 'Traffic Control', detail: prof.traffic_control ? 'включён' : 'выключен' })]));
+  } else v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Итого'), h('div', { class: 'list' },
+    ...D.items.map(it => row({ title: `${L(it.loc).flag} ${L(it.loc).name} × ${it.count}`, sub: it.idx === 'custom' ? `своя: ${it.spec.cpu} vCPU, ${it.spec.ram} ГБ, ${it.spec.disk} ГБ` : '', detail: rubK(priceOf(it) * it.count) })),
+    h('div', { class: 'total' }, h('span', {}, `${nodesWord}, ${PERIOD[D.period]}`), h('b', {}, rubK(sum))),
     row({ title: 'Платит', detail: D.cat.buyer }),
     row({ title: 'Баланс', detail: bal === null ? '—' : rubK(bal), status: enough ? null : ['не хватает', 'bad'] }),
     row({ title: 'Система', detail: D.cat.os_label }),
     row({ title: 'Traffic Control', detail: prof.traffic_control ? 'включён' : 'выключен' }))));
-  const go = h('button', { class: 'btn', type: 'button', disabled: !enough || !D.picked }, 'Купить и установить');
+  const go = h('button', { class: 'btn', type: 'button', disabled: !enough || !D.picked }, own ? 'Установить ноды' : 'Купить и установить');
   go.onclick = UI.busy(go, async () => {
-    const ok = await UI.ask({ title: 'Купить и установить?', message: `${total} ${UI.plural(total, 'нода', 'ноды', 'нод')}, ${rubK(sum)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
+    const ok = await UI.ask(own
+      ? { title: 'Установить ноды?', message: `${nodesWord} на уже купленные серверы. Покупки нет. Нода ставится поверх системы сервера.`, buttons: [{ id: 'y', text: 'Установить' }] }
+      : { title: 'Купить и установить?', message: `${nodesWord}, ${rubK(sum)} спишется с баланса: ${D.cat.buyer}.`, buttons: [{ id: 'y', text: 'Купить' }] });
     if (!ok) return;
-    const items = D.items.map(it => ({ location: it.loc, idx: it.idx, domains: D.domains[it.loc] || [] }));
+    const items = D.items.map(it => ({ location: it.loc, domains: D.domains[it.loc] || [],
+      ...(own ? { servers: it.servers } : it.idx === 'custom' ? { spec: it.spec } : { idx: it.idx }) }));
     const r = await UI.run(() => api('deploy', 'POST', { pid: prof.id, items, period: D.period,
       squads: D.squads ? [...D.squads] : undefined, remark: D.remark, host_mode: D.hostMode, tags: D.tags,
       balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang,

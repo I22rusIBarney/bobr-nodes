@@ -434,7 +434,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             out['warp'] = {'domains': engine.warp_rules(wp.get('domains') or '')}
         xh = b.get('xhttp')
         if isinstance(xh, dict) and xh.get('enabled'):
-            out['xhttp'] = {'port': engine.XHTTP_PORT}
+            out['xhttp'] = {'port': engine.XHTTP_PORT, 'mode': engine.xhttp_mode(xh.get('mode'))}
         return out
 
     # ── ноды панели: дополнения на уже работающих нодах ──
@@ -764,7 +764,27 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except BcloudError:
             bal = None
         return J({'locations': cat['locations'], 'periods': cat['periods'], 'os_label': cat['os_label'], 'balance_kop': bal,
-                  'buyer': p.get('owner_label') or 'ваш аккаунт'})
+                  'buyer': p.get('owner_label') or 'ваш аккаунт', 'configurator': cat.get('configurator')})
+
+    @r.get('/api/quote')
+    async def custom_quote(request):
+        """Цена своей конфигурации (конструктор) для покупателя группы."""
+        q = request.query
+        p = profile_or_404(q.get('pid', 0))
+        cat = await svc.load_catalog(store, p)
+        try:
+            o = await svc.custom_offer(store, p, cat, str(q.get('location', '')),
+                                       {k: q.get(k) for k in ('cpu', 'ram', 'disk')})
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J(o)
+
+    @r.get('/api/profiles/{pid}/servers')
+    async def own_servers(request):
+        """Уже купленные серверы покупателя группы в bcloud — для установки нод без новой покупки."""
+        p = profile_or_404(request.match_info['pid'])
+        servers = [{k: v for k, v in x.items() if k != 'root_password'} for x in await svc.own_servers(store, p)]
+        return J({'servers': servers, 'buyer': p.get('owner_label') or 'ваш аккаунт'})
 
     @r.get('/api/profiles/{pid}/zones')
     async def zones(request):
@@ -822,17 +842,47 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Нужно от 1 до 50 доменов')
         checked = await svc.check_domains(store, p, all_domains, len(all_domains))
         cat = await svc.load_catalog(store, p)
-        plan, total, pos = [], 0, 0
+        plan, total, pos = [], 0, 0  # plan: (локация, idx, домены, своя конфигурация, свои серверы)
+        own, taken = None, set()
         for it in items:
             n = len(it.get('domains') or [])
             if not n:
                 continue
-            q = svc.quote(cat, str(it.get('location')), int(it.get('idx')), period, n)
-            plan.append((str(it['location']), int(it['idx']), checked[pos:pos + n]))
+            loc = str(it.get('location') or '')
+            doms = checked[pos:pos + n]
             pos += n
+            if it.get('servers') is not None:  # уже купленные серверы: покупки нет
+                if own is None:
+                    own = {x['id']: x for x in await svc.own_servers(store, p)}
+                ids = [int(x) for x in it['servers'] if str(x).isdigit()]
+                if len(ids) != n or len(set(ids)) != n:
+                    raise ApiError(f'Серверов выбрано {len(ids)}, доменов {n} — нужно поровну')
+                for sid in ids:
+                    x = own.get(sid)
+                    if not x or sid in taken:
+                        raise ApiError(f'Сервера #{sid} нет в bcloud у покупателя группы')
+                    if not x['ready']:
+                        raise ApiError(f'Сервер {x["name"] or x["ip"]}: {x["why"]}')
+                    if x['location'] != loc:
+                        raise ApiError(f'Сервер {x["name"] or x["ip"]} — в другой локации')
+                    taken.add(sid)
+                plan.append((loc, None, doms, None, [own[sid] for sid in ids]))
+                continue
+            custom = None
+            try:
+                if it.get('spec') is not None:
+                    custom = await svc.custom_offer(store, p, cat, loc, it['spec'])
+                    q = svc.quote(cat, loc, None, period, n, custom)
+                    idx = None
+                else:
+                    idx = int(it.get('idx'))
+                    q = svc.quote(cat, loc, idx, period, n)
+            except (TypeError, ValueError) as e:
+                raise ApiError(str(e) or 'не выбрана конфигурация') from None
+            plan.append((loc, idx, doms, custom, None))
             total += q['total_kop']
         q = {'total_kop': total}
-        bal = await bc_ui(store, buyer_of(store, p)).balance()
+        bal = await bc_ui(store, buyer_of(store, p)).balance() if total else 0
         if bal < q['total_kop']:
             who = p.get('owner_label') or 'вашего аккаунта'
             raise ApiError(f'Не хватает денег: на балансе {who} {bal / 100:.0f} ₽, нужно {q["total_kop"] / 100:.0f} ₽')
@@ -844,7 +894,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         hosts = [svc.host_options(loc, mode, b.get('tags'),
                                   '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
                                   str(b.get('balancer_remark') or ''), b.get('balancer_template'))
-                 for loc, _, _ in plan]
+                 for loc, *_ in plan]
         places = {}
         order = b.get('host_order')
         if isinstance(order, list) and order:
@@ -852,14 +902,17 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 meta = await asyncio.to_thread(lambda: engine.Panel(p['panel_url'], p['panel_token'], p.get('panel_cookie', '')).meta())
             except engine.StepError as e:
                 raise ApiError(f'Панель: {e} — не получилось проверить порядок хостов') from None
-            places = svc.host_places(order, {loc: doms for loc, _, doms in plan}, {x['uuid'] for x in meta['hosts']})
+            doms_of: dict[str, list[str]] = {}
+            for loc, _, doms, *_ in plan:
+                doms_of.setdefault(loc, []).extend(doms)
+            places = svc.host_places(order, doms_of, {x['uuid'] for x in meta['hosts']})
         for host in hosts:
             host.update({'final_mask': mask, 'port': port})
         ids = []
-        for (loc, idx, doms), host in zip(plan, hosts):
+        for (loc, idx, doms, custom, servers), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,
                                          squads, str(b.get('remark') or '')[:100], host,
-                                         'en' if b.get('remark_lang') == 'en' else 'ru', places, extras)
+                                         'en' if b.get('remark_lang') == 'en' else 'ru', places, extras, custom, servers)
         return J({'ids': ids})
 
     # ── мои скрипты ──

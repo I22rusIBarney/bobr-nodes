@@ -54,14 +54,84 @@ async def load_catalog(store: Store, prof: dict | None = None) -> dict:
     return cat
 
 
-def quote(cat: dict, location: str, idx: int, period: str, count: int) -> dict:
-    loc = next(x for x in cat['locations'] if x['code'] == location)
-    offer = next(o for o in loc['offers'] if o['idx'] == idx)
+def quote(cat: dict, location: str, idx: int | None, period: str, count: int, custom: dict | None = None) -> dict:
+    """Цена: готовый тариф idx или своя конфигурация custom ({cpu, ram, disk, price_kop} — цена из bcloud)."""
+    loc = next((x for x in cat['locations'] if x['code'] == location), None)
+    if loc is None:
+        raise ValueError('эта локация сейчас недоступна в bcloud')
+    offer = custom if idx is None else next((o for o in loc['offers'] if o['idx'] == idx), None)
+    if offer is None:
+        raise ValueError('этот тариф недоступен в bcloud — обновите страницу')
     per = next((x for x in cat['periods'] if x['code'] == period), None)
     if per is None:
         raise ValueError('этот срок аренды недоступен')
     one = period_price(offer['price_kop'], per['months'], per['pct'])
     return {'loc': loc, 'offer': offer, 'one_kop': one, 'total_kop': one * count}
+
+
+def check_spec(cat: dict, raw) -> dict:
+    """Своя конфигурация из конструктора: {cpu, ram, disk} в диапазонах bcloud (min, max, шаг)."""
+    conf = cat.get('configurator')
+    if not conf:
+        raise ValueError('в bcloud нет конструктора — выберите готовый тариф')
+    try:
+        spec = {k: int((raw or {})[k]) for k in ('cpu', 'ram', 'disk')}
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('конфигурация: нужны vCPU, память и диск числами') from None
+    names = {'cpu': 'vCPU', 'ram': 'память, ГБ', 'disk': 'диск, ГБ'}
+    for k, v in spec.items():
+        r = conf[k]
+        if not r['min'] <= v <= r['max'] or ((v - r['min']) % r['step'] and not (v == r['max'] and r.get('max_is_allowed', True))):
+            step = f', шаг {r["step"]}' if r['step'] > 1 else ''
+            raise ValueError(f'{names[k]}: от {r["min"]} до {r["max"]}{step}')
+    return spec
+
+
+async def custom_offer(store: Store, prof: dict, cat: dict, location: str, raw) -> dict:
+    """Своя конфигурация с ценой для покупателя группы (свежий расчёт bcloud)."""
+    spec = check_spec(cat, raw)
+    q = await bcloud_from(store, buyer_of(store, prof)).quote(location, **spec)
+    return {'idx': None, **spec, 'price_kop': int(q['price_kop']), 'speed': q.get('speed') or ''}
+
+
+OS_OK = ('ubuntu', 'debian')
+
+
+async def own_servers(store: Store, prof: dict) -> list[dict]:
+    """Серверы покупателя группы в bcloud (куплены здесь, в боте bcloud или где угодно) с отметками:
+    used — на нём уже нода из Bobr Nodes, ready — можно ставить (активен, Ubuntu/Debian, не занят).
+    В ответе есть root_password — наружу (в админку) его не отдавать."""
+    bc = bcloud_from(store, buyer_of(store, prof))
+    bc.RETRY_FOR = 8
+    used_ids, used_ips = set(), set()
+    for j in store.jobs(5000):
+        d = j['data']
+        if d.get('kind') in ('node', 'reip') or d.get('removed') or j['status'] == 'failed':  # с ошибкой — сервер свободен
+            continue
+        if d.get('server_id'):
+            used_ids.add(int(d['server_id']))
+        if d.get('ip'):
+            used_ips.add(d['ip'])
+    out = []
+    for x in await bc.servers():
+        os_ok = any(str(x.get('os') or '').lower().startswith(o) for o in OS_OK)
+        used = int(x['id']) in used_ids or (x.get('ip') or '') in used_ips
+        why = ('уже нода Bobr Nodes' if used else 'сервер ещё создаётся' if x.get('status') == 'provisioning'
+               else f'сервер {x.get("status")}' if x.get('status') != 'active' else '' if os_ok
+               else 'нужна Ubuntu или Debian')
+        out.append({**{k: x.get(k) for k in ('id', 'name', 'status', 'ip', 'location', 'loc_name', 'flag', 'cpu', 'ram', 'disk',
+                                              'os', 'expires_at', 'root_password')},
+                    'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'ready': not why, 'why': why})
+    return out
+
+
+def naming_os_label(code: str) -> str:
+    m = re.match(r'([a-z]+)(\d+)$', code.lower())
+    if not m:
+        return code
+    v = m.group(2)
+    v = f'{v[:2]}.{v[2:]}' if m.group(1) == 'ubuntu' and len(v) == 4 else v
+    return f'{m.group(1).capitalize()} {v}'
 
 
 async def auto_domains(store: Store, prof: dict, location: str, count: int, base: str | None = None,
@@ -192,12 +262,22 @@ def host_places(order: list, domains_of: dict[str, list[str]], known: set[str]) 
     return places
 
 
-async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int,
+async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat: dict, location: str, idx: int | None,
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
                       host: dict | None = None, lang: str = 'ru', places: dict | None = None,
-                      extras: dict | None = None) -> list[int]:
-    q = quote(cat, location, idx, period, len(domains))
-    loc, offer = q['loc'], q['offer']
+                      extras: dict | None = None, custom: dict | None = None, servers: list[dict] | None = None) -> list[int]:
+    """Задачи установки. custom — своя конфигурация (покупка по cpu/ram/disk); servers — уже купленные серверы
+    bcloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из bcloud."""
+    if servers:
+        if len(servers) != len(domains):
+            raise ValueError(f'серверов {len(servers)}, доменов {len(domains)}')
+        s0 = servers[0]
+        loc = next((x for x in cat.get('locations', []) if x['code'] == location), None) or \
+            {'code': location, 'name': s0.get('loc_name') or location, 'flag': s0.get('flag') or ''}
+        q = {'loc': loc, 'one_kop': 0}
+    else:
+        q = quote(cat, location, idx, period, len(domains), custom)
+    loc = q['loc']
     batch = secrets.token_hex(4)
     cc = location.upper() if re.fullmatch(r'[a-z]{2}', location) else ''
     ids = []
@@ -206,9 +286,13 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
         host = {**host, 'balancer': {**host['balancer'], 'remark': render_remark(host['balancer']['remark'], loc, '', '', 1, lang)}}
     for i, dom in enumerate(domains, 1):
         name = naming.node_name(dom)
-        data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': idx,
-                'spec': spec_text(offer), 'os': cat['os_code'], 'period': period, 'domain': dom, 'name': name,
-                'remark': render_remark(remark, loc, name, dom, i, lang), 'password': gen_password(),
+        srv = servers[i - 1] if servers else None
+        offer = srv or q['offer']
+        data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': None if srv else idx,
+                'spec': spec_text(offer), 'os': srv['os'] if srv else cat['os_code'], 'period': period, 'domain': dom, 'name': name,
+                'remark': render_remark(remark, loc, name, dom, i, lang), 'password': (srv or {}).get('root_password') or gen_password(),
+                **({'custom': {k: custom[k] for k in ('cpu', 'ram', 'disk')}} if custom and not srv else {}),
+                **({'server_id': int(srv['id']), 'existing': True, 'skipped_stages': ['buy']} if srv else {}),
                 'host': host, 'squads': squads, 'place': (places or {}).get(dom),
                 'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id'),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}

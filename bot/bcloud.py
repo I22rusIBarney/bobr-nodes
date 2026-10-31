@@ -69,9 +69,33 @@ class Bcloud:
     async def catalog(self) -> dict:
         return await self._call('GET', '/catalog', params={'tg_id': self.tg_id})
 
-    async def buy(self, location: str, os_: str, idx: int, period: str, password: str) -> dict:
-        return await self._call('POST', '/servers', json={'tg_id': self.tg_id, 'location': location, 'os': os_,
-                                                           'idx': idx, 'period': period, 'password': password})
+    async def buy(self, location: str, os_: str, idx: int | None, period: str, password: str, spec: dict | None = None) -> dict:
+        """Готовый тариф (idx) или своя конфигурация из конструктора (idx=None, spec={cpu, ram, disk})."""
+        body = {'tg_id': self.tg_id, 'location': location, 'os': os_, 'idx': idx, 'period': period, 'password': password}
+        if idx is None:
+            if not spec:
+                raise BcloudError('не указана конфигурация сервера')
+            body.update(idx=None, cpu=int(spec['cpu']), ram=int(spec['ram']), disk=int(spec['disk']))
+        return await self._call('POST', '/servers', json=body)
+
+    async def quote(self, location: str, cpu: int, ram: int, disk: int) -> dict:
+        """Цена своей конфигурации за месяц: {price_kop, speed, cpu, ram, disk}."""
+        try:
+            return await self._call('GET', '/quote', params={'tg_id': self.tg_id, 'location': location,
+                                                             'cpu': int(cpu), 'ram': int(ram), 'disk': int(disk)})
+        except BcloudError as e:
+            if str(e).startswith('bcloud 404') and str(e).endswith(': Not Found'):  # старый bcloud: конструктора в API нет
+                raise BcloudError('bcloud не считает цену своей конфигурации — обновите его: bcloud update') from None
+            raise
+
+    async def servers(self) -> list[dict]:
+        """Все серверы аккаунта в bcloud (кроме удалённых), где бы они ни были куплены: IP, root-пароль, локация."""
+        try:
+            return (await self._call('GET', '/servers', params={'tg_id': self.tg_id}))['servers']
+        except BcloudError as e:
+            if str(e).startswith('bcloud 405'):  # старый bcloud: списка серверов в служебном API ещё нет
+                raise BcloudError('bcloud не отдаёт список серверов — обновите его: bcloud update') from None
+            raise
 
     async def server(self, sid: int, sync: bool = False) -> dict:
         """sync — сначала обновить данные у провайдера (новый IP после смены в кабинете bcloud)."""
