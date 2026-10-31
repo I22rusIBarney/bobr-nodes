@@ -106,8 +106,11 @@ jobs:
           engine.forget_host(kh, '192.0.2.1')
           c = pexpect.spawn('ssh', ['-V'], encoding='utf-8'); c.expect(pexpect.EOF); print('ssh:', c.before.strip())
           r = engine.Remote({'ip': '127.0.0.1', 'ssh_port': 1, 'known_hosts': kh, 'ssh_key': path}, None)
-          rc, out = r.run('true', 20)
-          assert rc != 0 and 'Connection refused' in out, (rc, out)
+          try:
+              r.run('true', 20)
+              raise AssertionError('вход на закрытый порт прошёл')
+          except engine.StepError as e:  # отказ соединения — понятная ошибка SSH, а не зависание
+              assert 'Connection refused' in str(e), e
           print('ok: ключ, known_hosts, pexpect и ssh работают без привилегий')
           PY
           printf ':80 {\n\trespond "ok"\n}\n' > Caddyfile.smoke
