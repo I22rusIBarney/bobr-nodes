@@ -162,6 +162,10 @@ class Cloudflare:
             page += 1
         return sorted(out)
 
+    def name_servers(self, domain: str) -> list[str]:
+        """Серверы имён зоны домена в Cloudflare (вида xxx.ns.cloudflare.com)."""
+        return list(self.call('GET', f'/zones/{self.zone_for(domain)}').get('name_servers') or [])
+
     def records(self, domain: str) -> list[dict]:
         zid = self.zone_for(domain)
         return self.call('GET', f'/zones/{zid}/dns_records?' + urllib.parse.urlencode({'name': domain}))
@@ -246,24 +250,91 @@ class Cloudflare:
         return ok
 
 
+DOH = (('Cloudflare DNS', 'https://cloudflare-dns.com/dns-query'), ('Google DNS', 'https://dns.google/resolve'))
+
+
 def doh_a(domain: str) -> list[list[str]]:
     out = []
-    for url in ('https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve'):
+    for _, url in DOH:
         _, data = http('GET', url + '?' + urllib.parse.urlencode({'name': domain, 'type': 'A'}),
                        {'Accept': 'application/dns-json'}, timeout=10)
         out.append(sorted({a['data'] for a in data.get('Answer', []) if a.get('type') == 1}))
     return out
 
 
-def wait_dns(domain: str, ip: str, log, timeout=600, every=15):
-    end = time.time() + timeout
-    while time.time() < end:
+def dns_query_a(server: str, name: str, timeout: float = 3) -> list[str] | None:
+    """A-записи прямо у сервера имён (UDP, без кэша посредников). None — сервер не ответил."""
+    import struct
+    qid = secrets.randbits(16)
+    q = struct.pack('>HHHHHH', qid, 0x0000, 1, 0, 0, 0)  # без рекурсии: спрашиваем авторитетный сервер
+    q += b''.join(bytes([len(p)]) + p.encode('idna') for p in name.rstrip('.').split('.')) + b'\0' + struct.pack('>HH', 1, 1)
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.settimeout(timeout)
+            sk.sendto(q, (server, 53))
+            data, _ = sk.recvfrom(4096)
+    except OSError:
+        return None
+    if len(data) < 12 or struct.unpack('>H', data[:2])[0] != qid:
+        return None
+    an = struct.unpack('>H', data[6:8])[0]
+    i = 12
+    while data[i]:  # пропустить вопрос
+        i += data[i] + 1
+    i += 5
+    out = []
+    for _ in range(an):
+        if data[i] & 0xC0 == 0xC0:
+            i += 2
+        else:
+            while data[i]:
+                i += data[i] + 1
+            i += 1
+        rtype, _cls, _ttl, rdlen = struct.unpack('>HHIH', data[i:i + 10])
+        i += 10
+        if rtype == 1 and rdlen == 4:
+            out.append('.'.join(str(b) for b in data[i:i + 4]))
+        i += rdlen
+    return sorted(set(out))
+
+
+def wait_dns(domain: str, ip: str, log, timeout=600, every=15, cf: 'Cloudflare | None' = None):
+    """Ждём, пока имя начнёт указывать на ip. Достаточно, если ответили свои серверы имён зоны (Cloudflare обновляет
+    их за секунды — сертификат выпустится) и хотя бы один публичный DNS; общие DNS отстают из-за кэша —
+    после 2 минут ждём только свои серверы имён. Раз в минуту пишем, что отвечает каждый."""
+    start = time.time()
+    end = start + timeout
+    auth_ips: list[str] = []
+    if cf is not None:
         try:
-            if all(r == [ip] for r in doh_a(domain)):
-                log(f'DNS отвечает {ip}')
-                return
-        except Exception:
-            pass
+            for ns in cf.name_servers(domain):
+                auth_ips += sorted({a[4][0] for a in socket.getaddrinfo(ns, 53, socket.AF_INET)})[:1]
+        except (StepError, OSError) as e:
+            log(f'DNS: серверы имён зоны не узнал ({e}) — жду публичные DNS')
+    told = 0.0
+    while time.time() < end:
+        auth = [dns_query_a(s, domain) for s in auth_ips[:2]]
+        auth_ok = bool(auth) and all(a == [ip] for a in auth)
+        pub = []
+        for name, url in DOH:
+            try:
+                _, data = http('GET', url + '?' + urllib.parse.urlencode({'name': domain, 'type': 'A'}),
+                               {'Accept': 'application/dns-json'}, timeout=10)
+                pub.append((name, sorted({a['data'] for a in data.get('Answer', []) if a.get('type') == 1})))
+            except StepError as e:
+                pub.append((name, f'не ответил ({str(e)[:60]})'))
+        pub_ok = [n for n, r in pub if r == [ip]]
+        waited = time.time() - start
+        if len(pub_ok) == len(pub) or (auth_ok and (pub_ok or waited >= 120)):
+            log(f'DNS отвечает {ip}' + ('' if len(pub_ok) == len(pub) else
+                                         f' (серверы имён зоны — да; {", ".join(n for n, _ in pub if n not in pub_ok)} ещё держит старый ответ в кэше)'))
+            return
+        if time.time() - told >= 60:
+            told = time.time()
+            def show(r):
+                return 'не ответил' if r is None else ', '.join(r) if isinstance(r, list) and r else 'нет записи' if isinstance(r, list) else r
+            parts = ([f'серверы имён зоны → {"; ".join(show(a) for a in auth)}'] if auth else []) + [f'{n} → {show(r)}' for n, r in pub]
+            log(f'DNS {domain}: жду {ip} — ' + ' · '.join(parts))
         time.sleep(every)
     raise StepError(f'DNS {domain} за {timeout // 60} мин так и не стал указывать только на {ip}')
 
@@ -1359,7 +1430,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         stage('dns')
         cf = Cloudflare(prof['cf_token'])
         cf.upsert_a(node['domain'], node['ip'], log)
-        wait_dns(node['domain'], node['ip'], log)
+        wait_dns(node['domain'], node['ip'], log, cf=cf)
 
     stage('ssh')
     r = Remote(node, logfile)
@@ -1503,7 +1574,7 @@ def deploy_recipe(node: dict, prof: dict, logfile, log: Callable[[str], None], s
         stage('dns')
         cf = Cloudflare(prof['cf_token'])
         cf.upsert_a(node['domain'], node['ip'], log)
-        wait_dns(node['domain'], node['ip'], log)
+        wait_dns(node['domain'], node['ip'], log, cf=cf)
 
     stage('ssh')
     r = Remote(node, logfile)
@@ -1770,7 +1841,7 @@ def reip(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: Cal
             cf.upsert_a(d, new, log)
             changed.append(d)
         for d in changed:
-            wait_dns(d, new, log, timeout=dns_timeout)
+            wait_dns(d, new, log, timeout=dns_timeout, cf=cf)
     if not changed:
         log('доменов этой ноды в Cloudflare не нашёл — адрес ноды в панели будет новым IP')
 
