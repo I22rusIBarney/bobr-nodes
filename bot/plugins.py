@@ -227,3 +227,34 @@ def swap(current: list, old: list, new: list, protected=()) -> list:
     keep = [x for x in current if x not in drop]
     seen = set(keep)
     return keep + [x for x in new if x not in seen]
+
+
+def apply_preset(panel: engine.Panel, mem: dict, kind: str, pid: str, on: bool, fresh: list[str] | None = None) -> dict:
+    """Включить/обновить (on) или убрать пресет. mem — какие записи добавлены пресетами ({'ingress': {...},
+    'egress': {...}}), меняется на месте. fresh — скачанный список для пресета входящих. Возвращает state()."""
+    presets = INGRESS_PRESETS if kind == 'ingress' else EGRESS_PRESETS
+    cfg = state(panel)['config']
+    mine = mem.setdefault(kind, {})
+    old = mine.get(pid) or []
+    if kind == 'ingress':
+        sec = cfg['ingressFilter']
+        others = {x for k, v in mine.items() if k != pid for x in v}
+        manual = set(sec['blockedIps']) - {x for v in mine.values() for x in v}
+        new = (fresh or []) if on else []
+        sec['blockedIps'] = swap(sec['blockedIps'], old, new, protected=others | manual)
+    elif pid == 'mail':
+        sec = cfg['egressFilter']
+        new = presets[pid]['ports'] if on else []
+        sec['blockedPorts'] = sorted(set(swap(sec['blockedPorts'], old, new)))
+    else:
+        sec = cfg['egressFilter']
+        new = presets[pid]['ips'] if on else []
+        sec['blockedIps'] = swap(sec['blockedIps'], old, new)
+    if on:
+        sec['enabled'] = True  # пресет без включённого фильтра ничего не делает
+        mine[pid] = new
+    else:
+        mine.pop(pid, None)
+    if not sec.get('blockedIps') and not sec.get('blockedPorts'):
+        sec['enabled'] = False
+    return save(panel, cfg)

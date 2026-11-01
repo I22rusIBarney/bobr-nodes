@@ -337,7 +337,24 @@ function serviceRows() {
     row({ icon: 'cloud', color: 'blue', title: 'Bobr Cloud', status: conn(ok('bcloud_url') && ok('bcloud_token')), onClick: () => UI.nav.push(bcloudView) }),
     row({ icon: 'globe', color: 'amber', title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ icon: 'sparkle', color: 'violet', title: 'Gemini', status: conn(ok('gemini_key'), ['Не задан', 'quiet']), onClick: () => UI.nav.push(geminiView) }),
-    row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) })];
+    row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) }),
+    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } })];
+}
+// ───────── автообновление самого бота ─────────
+let SU = null;
+function selfUpdateView() {
+  const v = h('div', { class: 'su-page' }, ...pageHead('Обновление бота'));
+  const load = () => { SU = { loading: true }; api('selfupdate').then(r => { SU = r; }).catch(e => { SU = { error: e.message }; }).then(() => { if (document.querySelector('#root .su-page')) UI.nav.refresh(); }); };
+  if (SU === null) load();
+  if (!SU || SU.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
+  if (SU.error) { v.append(UI.failed(SU.error, load)); return v; }
+  const save = async patch => { const r = await UI.run(() => api('selfupdate', 'POST', { ...patch, tz: tzNow() })); if (r) { SU = r; UI.haptic('select'); } UI.nav.refresh(); };
+  const ver = SU.version || {};
+  v.append(group('Версия', [row({ icon: 'code', color: 'gray', title: ver.sha ? `${ver.sha} от ${ver.date}` : 'неизвестна', sub: ver.subject || 'появится после следующего обновления', mono: true, chevron: false, cls: 'wrap' })]));
+  const rows = [row({ icon: 'renew', color: 'teal', title: 'Обновлять автоматически', cls: 'wrap', sub: 'новая версия из GitHub, когда тесты прошли', chevron: false, right: UI.toggle(SU.on, on => save({ on }), 'Автообновление') })];
+  if (SU.on) rows.push(row({ title: 'Время обновления', sub: 'по вашему времени', chevron: false, right: hourStep(SU.hour, x => save({ hour: x })) }));
+  v.append(group('Автообновление', rows, `Раз в день в выбранный час (если бот занят установкой — в ближайшие ${SU.window} ч). Перезапуск занимает ~10 секунд, задачи продолжатся. После обновления бот напишет, что нового. Вручную: bnodes update.`));
+  return v;
 }
 // ноды всех групп — в фоне, для сводки на главной и карточек групп
 function warmNodes() { if (ST._stale) return; (ST.profiles || []).forEach(p => { if (needsLoad(NODES[p.id])) loadNodes(p.id, true); }); }
@@ -572,6 +589,47 @@ function torrentStatsView(pid) {
       if (await UI.ask({ title: 'Разблокировать?', message: `${x.ip} снова сможет подключаться ко всем нодам.`, buttons: [{ id: 'y', text: 'Разблокировать' }] }))
         await UI.run(() => api(`profiles/${pid}/plugins/unblock`, 'POST', { ip: x.ip }), 'Разблокирован');
     } : null })) : [row({ title: 'Срабатываний пока не было', cls: 'is-dim', chevron: false })], 'Нажмите на запись, чтобы снять бан с IP раньше срока.'));
+  return v;
+}
+// ───────── уборка: оплаченные серверы без нод и давно мёртвые ноды ─────────
+const CLEAN = {};
+function cleanupView(pid) {
+  const g = ST.profiles.find(p => p.id === pid);
+  const v = h('div', { class: 'cleanup-page' }, ...pageHead('Уборка', { sub: g ? g.name : null }));
+  const load = () => { CLEAN[pid] = null; api(`profiles/${pid}/cleanup`).then(r => { CLEAN[pid] = r; }).catch(e => { CLEAN[pid] = { error: e.message }; }).then(() => { if (document.querySelector('#root .cleanup-page')) UI.nav.refresh(); }); };
+  if (CLEAN[pid] === undefined) load();
+  const C = CLEAN[pid];
+  if (!C) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (C.error) { v.append(UI.failed(C.error, load, 'Не удалось проверить')); return v; }
+  const after = r => { if (r) { delete NODES[pid]; delete RENT[pid]; load(); } };
+  const delServer = async x => {
+    if (!await UI.ask({ title: 'Удалить сервер?', message: `${x.name || x.ip} будет удалён в Bobr Cloud вместе с нодой, хостами и A-записью. Это нельзя отменить.`, buttons: [{ id: 'y', text: 'Удалить', type: 'destructive' }] })) return null;
+    return UI.run(() => api(`profiles/${pid}/cleanup/servers/${x.id}`, 'POST', {}), 'Удалено');
+  };
+  const delNode = async x => {
+    if (!await UI.ask({ title: 'Убрать ноду из панели?', message: `«${x.name}», её хосты и A-запись. Сам сервер бот не трогает — он куплен не через бота.`, buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] })) return null;
+    return UI.run(() => api(`profiles/${pid}/nodes/${x.uuid}`, 'DELETE'), 'Убрано');
+  };
+  if (!C.servers.length && !C.dead.length) {
+    v.append(group('Всё чисто', [row({ icon: 'checkCircle', color: 'green', title: 'Убирать нечего', sub: 'все оплаченные серверы в панели, мёртвых нод нет', chevron: false })],
+      'Бот проверяет это каждые 6 часов и пишет, если что-то найдётся.'));
+    return v;
+  }
+  if (C.servers.length) v.append(group('Оплачиваются впустую', C.servers.map(x => row({ flag: x.flag || '·', title: mid(x.name || x.ip, 30), sub: `${x.why} · ${rubK(x.price_kop)}/мес`,
+    status: ['удалить', 'bad'], onClick: async () => after(await delServer(x)) })), `${rubK(C.waste_kop)} в месяц за серверы, которых нет в панели.`));
+  if (C.dead.length) v.append(group('Ноды без связи', C.dead.map(x => row({ title: x.name, mono: true, sub: `${x.address} · нет связи ${x.days} дн.`, status: ['убрать', 'warn'],
+    onClick: async () => after(x.server_id ? await delServer({ id: x.server_id, name: x.name }) : await delNode(x)) })),
+    'Ноды, купленные ботом, удаляются вместе с сервером; остальные — только из панели.'));
+  const all = h('button', { class: 'btn danger', type: 'button' }, 'Убрать всё');
+  all.onclick = UI.busy(all, async () => {
+    const n = C.servers.length + C.dead.length;
+    if (!await UI.ask({ title: `Убрать всё (${n})?`, message: 'Серверы бота удалятся в Bobr Cloud вместе с нодами, остальные ноды — из панели. Это нельзя отменить.', buttons: [{ id: 'y', text: 'Убрать всё', type: 'destructive' }] })) return;
+    let ok = 0;
+    for (const x of C.servers) if (await api(`profiles/${pid}/cleanup/servers/${x.id}`, 'POST', {}).catch(e => UI.toast(e.message))) ok++;
+    for (const x of C.dead) if (await (x.server_id ? api(`profiles/${pid}/cleanup/servers/${x.server_id}`, 'POST', {}) : api(`profiles/${pid}/nodes/${x.uuid}`, 'DELETE')).catch(e => UI.toast(e.message))) ok++;
+    UI.toast(`Убрано: ${ok} из ${n}`); after(true);
+  });
+  v.append(h('div', { class: 'cta' }, all));
   return v;
 }
 // ───────── настройки ─────────
@@ -1179,10 +1237,10 @@ function groupView(pid) {
   if (st === undefined) { PS[pid] = null; api('profiles/' + pid + '/check', 'POST').then(r => { PS[pid] = r; }).catch(e => { PS[pid] = { ok: false, message: e.message }; }).then(() => { if (document.querySelector('#root .group-page')) UI.nav.refresh(); }); }
   const acct = !isAdmin() ? 'ваш баланс Bobr Cloud' : g.owner_label ? 'клиент ' + g.owner_label : 'ваш аккаунт Bobr Cloud';
   const go = { deploy: () => { D = null; UI.nav.push(() => deployView(pid)); }, upd: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); },
-    auto: () => { delete AUTO[pid]; UI.nav.push(() => autoView(pid)); }, plug: () => { delete PLUG[pid]; delete PLUGD[pid]; UI.nav.push(() => pluginsView(pid)); }, rent: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); }, set: () => { delete PS[pid]; openProfile(pid); } };
+    auto: () => { delete AUTO[pid]; UI.nav.push(() => autoView(pid)); }, plug: () => { delete PLUG[pid]; delete PLUGD[pid]; UI.nav.push(() => pluginsView(pid)); }, clean: () => { delete CLEAN[pid]; UI.nav.push(() => cleanupView(pid)); }, rent: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); }, set: () => { delete PS[pid]; openProfile(pid); } };
   const v = h('div', { class: 'group-page' }, ...pageHead(g.name, { sub: g.panel_url.replace(/^https?:\/\//, '') + ' · ' + acct, menu: [
     { text: 'Обновление нод', icon: 'renew', color: 'teal', fn: go.upd }, { text: 'Автоматизация', icon: 'zap', color: 'amber', fn: go.auto },
-    { text: 'Аренда серверов', icon: 'calendar', color: 'green', fn: go.rent }, { text: 'Плагины нод', icon: 'shield', color: 'red', fn: go.plug }, { text: 'Настройки группы', icon: 'gear', color: 'gray', fn: go.set },
+    { text: 'Аренда серверов', icon: 'calendar', color: 'green', fn: go.rent }, { text: 'Плагины нод', icon: 'shield', color: 'red', fn: go.plug }, { text: 'Уборка', icon: 'trash', color: 'gray', fn: go.clean }, { text: 'Настройки группы', icon: 'gear', color: 'gray', fn: go.set },
     { text: 'Обновить данные', icon: 'restart', color: 'blue', fn: () => { delete NODES[pid]; delete PS[pid]; delete GJ[pid]; UI.nav.refresh(); } }] }));
   v.append(h('div', { class: 'cta', style: 'margin-bottom:var(--s4)' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'), onclick: go.deploy }, icon('plusCircle'), 'Развернуть в группе')));
   // панель: связь и действия с ней
@@ -1191,7 +1249,8 @@ function groupView(pid) {
     st && !st.ok ? h('div', { class: 'failed', style: 'margin:0 0 10px' }, h('p', { style: 'margin:0' }, h('b', {}, 'Панель не отвечает'), st.message)) : null,
     h('div', { class: 'qa four' }, [['Обновление нод', 'renew', 'teal', go.upd], ['Автоматизация', 'zap', 'amber', go.auto], ['Аренда', 'calendar', 'green', go.rent], ['Настройки', 'gear', 'gray', go.set]]
       .map(([t, ic, c, fn]) => h('button', { type: 'button', onclick: fn }, UI.tile(ic, c), t))),
-    UI.stack([row({ icon: 'shield', color: 'red', title: 'Плагины нод', sub: 'блокировка торрентов, фильтры сканеров', onClick: go.plug })])));
+    UI.stack([row({ icon: 'shield', color: 'red', title: 'Плагины нод', sub: 'блокировка торрентов, фильтры сканеров', onClick: go.plug }),
+      row({ icon: 'trash', color: 'gray', title: 'Уборка', sub: 'лишние серверы и мёртвые ноды', onClick: go.clean })])));
   v.append(UI.segmented([{ value: 'nodes', label: 'Серверы' }, { value: 'stats', label: 'Статистика' }, { value: 'access', label: 'Пользователи' }], S.tab, x => { S.tab = x; UI.nav.refresh(); }, 'tabs'));
   if (S.tab === 'stats') return groupStats(v, pid, L);
   if (S.tab === 'access') return groupAccess(v, g);

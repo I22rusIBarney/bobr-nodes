@@ -22,7 +22,7 @@ import time
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
-from . import engine, services as svc, sshaccess, upgrade as up
+from . import engine, plugins, services as svc, sshaccess, upgrade as up
 from .bcloud import BcloudError
 from .pcache import CACHE
 from .runner import bcloud_from, buyer_of
@@ -33,6 +33,11 @@ log = logging.getLogger(__name__)
 LOAD_EVERY = 15 * 60
 PANEL_EVERY = 3 * 60         # нагрузка из панели (Remnawave 2.2+ отдаёт её сама) — без SSH и чаще
 RENT_EVERY = 6 * 3600
+DEAD_DAYS = 7                 # нода без связи дольше — в отчёт об уборке
+CLEAN_GRACE = 6 * 3600       # свежую покупку не считаем лишней: установка могла ещё идти
+CLEAN_REMIND = 7 * 86400     # тот же список — напоминаем раз в неделю
+PANEL_DOWN = 5 * 60           # панель молчит дольше — пишем
+PRESET_EVERY = 24 * 3600     # списки сканеров в фильтре входящих (плагин ноды)
 HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
 HIGH_CYCLES = 3              # подряд высоких замеров до сообщения (~45 минут)
 REALERT = 12 * 3600
@@ -196,6 +201,7 @@ class Autopilot:
         self._load_at = 0.0
         self._pload_at = 0.0
         self._rent_at = 0.0
+        self._preset_at = 0.0
         self._bg: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
@@ -264,6 +270,10 @@ class Autopilot:
         if now - self._rent_at >= RENT_EVERY:
             self._rent_at = now
             self._bg_task(self.check_rent())
+            self._bg_task(self.report_cleanup())
+        if now - self._preset_at >= PRESET_EVERY:
+            self._preset_at = now
+            self._bg_task(self.refresh_presets())
 
     # ───────── автообновление ─────────
     async def drive_update(self, prof: dict, now: float) -> None:
@@ -386,12 +396,16 @@ class Autopilot:
     async def panel_load(self, now: float | None = None) -> None:
         """Нагрузка всех нод из панелей групп: один запрос на группу, история за сутки."""
         for prof in self.store.profiles():
+            t = now if now is not None else time.time()
             try:
                 nodes = await asyncio.to_thread(lambda p=prof: self.panel(p).call('GET', '/api/nodes'))
-            except (engine.StepError, OSError, ValueError):
+            except (engine.StepError, OSError, ValueError) as e:
+                await self.panel_down(prof, str(e), t)
                 continue
             CACHE.put(prof, 'nodes', nodes)  # веб-апп откроет список нод без похода в панель
-            t = now if now is not None else time.time()
+            await self.panel_up(prof, t)
+            self.track_offline(prof, nodes, t)
+            await self.plugin_guard(prof, nodes)
             for n in nodes:
                 smp = panel_sample(n) if isinstance(n, dict) and n.get('uuid') else None
                 if not smp:
@@ -399,6 +413,58 @@ class Autopilot:
                 key = f'ap:pload:{prof["id"]}:{n["uuid"]}'
                 prev = self.get(key)
                 self.put(key, {**smp, 'at': t, 'hist': load_hist(prev.get('hist'), smp, t, keep=600)})
+
+    # ───────── сторож панели ─────────
+    async def panel_down(self, prof: dict, err: str, now: float) -> None:
+        """Панель не ответила. Молчит дольше PANEL_DOWN — одно сообщение, а не на каждый опрос."""
+        key = f'ap:pdown:{prof["id"]}'
+        st = self.get(key) or {'since': now}
+        st['err'] = err[:300]
+        if not st.get('told') and now - st['since'] >= PANEL_DOWN:
+            st['told'] = True
+            mins = int((now - st['since']) // 60)
+            await self.say(prof, f'🔴 <b>Панель «{html.escape(prof.get("name", ""))}» не отвечает</b> уже {mins} мин\n\n'
+                                 f'<code>{html.escape(err[:300])}</code>\n\n'
+                                 'Пока панель недоступна, ноды работают, но бот не может их обслуживать. '
+                                 'Напишу, когда она вернётся.', self.button())
+        self.put(key, st)
+
+    async def panel_up(self, prof: dict, now: float) -> None:
+        key = f'ap:pdown:{prof["id"]}'
+        st = self.get(key)
+        if not st:
+            return
+        self.put(key, {})
+        if st.get('told'):
+            mins = max(1, int((now - st['since']) // 60))
+            await self.say(prof, f'🟢 <b>Панель «{html.escape(prof.get("name", ""))}» снова отвечает</b> — не было связи ~{mins} мин.')
+
+    # ───────── ноды без плагина ─────────
+    async def plugin_guard(self, prof: dict, nodes: list) -> None:
+        """Нода, добавленная в панель руками, остаётся без плагина группы (торренты, фильтры) — привязываем.
+        Ноды с другим плагином не трогаем: это чьё-то решение."""
+        plugin = plugins.group_plugin(nodes)
+        free = [n['uuid'] for n in plugins.enabled_nodes(nodes) if not n.get('activePluginUuid')]
+        if not plugin or not free:
+            return
+        try:
+            await asyncio.to_thread(plugins.bind, self.panel(prof), plugin, free)
+        except engine.StepError as e:
+            log.info('plugin guard %s: %s', prof['id'], e)
+            return
+        log.info('plugin guard %s: bound %d node(s)', prof['id'], len(free))
+
+    # ───────── давно недоступные ноды ─────────
+    def track_offline(self, prof: dict, nodes: list, now: float) -> None:
+        """С какого момента включённая нода без связи с панелью. Вернулась или пропала — забываем."""
+        key = f'ap:off:{prof["id"]}'
+        prev = self.get(key)
+        cur = {}
+        for n in plugins.enabled_nodes(nodes):
+            if not n.get('isConnected'):
+                cur[n['uuid']] = prev.get(n['uuid']) or now
+        if cur != prev:
+            self.put(key, cur)
 
     def load_of(self, pid: int, uuid: str, hist: bool = False) -> dict:
         """Нагрузка ноды: замер по SSH (точный процессор, диск, предупреждения) и/или из панели (чаще, без SSH).
@@ -457,6 +523,133 @@ class Autopilot:
             elif r['balance_kop'] < need:
                 out.append({**x, 'why': f'на балансе {r["balance_kop"] // 100} ₽, на продление нужно {need // 100} ₽'})
         return out
+
+    # ───────── списки сканеров в плагине нод ─────────
+    async def refresh_presets(self) -> None:
+        """Раз в сутки — свежие списки включённых пресетов входящих. Меняется список — плагин обновляется
+        и рассылается нодам; не скачался — оставляем прежний и пробуем завтра."""
+        lists: dict[str, list[str] | None] = {}
+        for prof in self.store.profiles():
+            key = f'plug:{prof["id"]}'
+            mem = self.get(key)
+            for pid, old in list((mem.get('ingress') or {}).items()):
+                if pid not in plugins.INGRESS_PRESETS:
+                    continue
+                if pid not in lists:
+                    try:
+                        lists[pid] = await asyncio.to_thread(plugins.fetch_preset, pid)
+                    except plugins.PluginError as e:
+                        log.info('preset %s: %s', pid, e)
+                        lists[pid] = None
+                fresh = lists[pid]
+                if not fresh or set(fresh) == set(old or []):
+                    continue
+                try:
+                    await asyncio.to_thread(plugins.apply_preset, self.panel(prof), mem, 'ingress', pid, True, fresh)
+                except (engine.StepError, plugins.PluginError) as e:
+                    log.info('preset %s group %s: %s', pid, prof['id'], e)
+                    continue
+                self.put(key, mem)
+                log.info('preset %s group %s: %d → %d', pid, prof['id'], len(old or []), len(fresh))
+
+    # ───────── уборка: серверы без нод и давно мёртвые ноды ─────────
+    def paid_servers(self, pid: int) -> dict[int, dict]:
+        """Серверы Bobr Cloud, купленные ботом для группы и ещё не удалённые: server_id → данные задачи.
+        Удачные и неудачные покупки — сервер оплачен в обоих случаях."""
+        now, out = time.time(), {}
+        for j in self.store.jobs(5000, include_hidden=True):
+            d = j['data']
+            if (j['profile_id'] != pid or d.get('kind') in svc.SERVICE_KINDS or not d.get('server_id') or d.get('removed')
+                    or j['status'] not in ('done', 'failed')):
+                continue
+            out[int(d['server_id'])] = {**d, '_job': j['id'], '_status': j['status'], '_age': now - (j.get('updated_at') or 0)}
+        return out
+
+    async def cleanup(self, prof: dict, now: float | None = None) -> dict:
+        """Что можно убрать: оплаченные серверы, которых нет в панели (установка не удалась, ноду удалили руками),
+        и включённые ноды без связи дольше DEAD_DAYS. Сами ничего не удаляем — только список."""
+        now = now if now is not None else time.time()
+        nodes, _ = await CACHE.get(prof, 'nodes', stale_ok=False)
+        addrs = {n.get('address') for n in nodes}
+        busy = {j['data'].get('server_id') for j in self.store.active_jobs()}
+        paid = self.paid_servers(prof['id'])
+        servers = []
+        if paid:
+            bc = bcloud_from(self.store, buyer_of(self.store, prof))
+            bc.RETRY_FOR = 8
+            for x in await bc.servers():
+                d = paid.get(int(x['id']))
+                if not d or x.get('status') == 'deleted' or d['_age'] < CLEAN_GRACE or x['id'] in busy or str(x['id']) in busy:
+                    continue
+                if ({x.get('ip'), d.get('ip'), d.get('domain')} - {None, ''}) & addrs:
+                    continue
+                servers.append({'id': int(x['id']), 'name': d.get('domain') or x.get('name') or '', 'ip': x.get('ip') or d.get('ip', ''),
+                                'flag': x.get('flag') or d.get('flag', ''), 'price_kop': int(x.get('price_kop') or 0),
+                                'why': 'установка не удалась' if d['_status'] == 'failed' else 'ноды нет в панели'})
+        off = self.get(f'ap:off:{prof["id"]}')
+        by_addr = {}
+        for sid, d in paid.items():
+            for a in (d.get('ip'), d.get('domain')):
+                if a:
+                    by_addr[a] = sid
+        dead = []
+        for n in plugins.enabled_nodes(nodes):
+            since = off.get(n['uuid'])
+            if n.get('isConnected') or not since or now - since < DEAD_DAYS * 86400:
+                continue
+            dead.append({'uuid': n['uuid'], 'name': n.get('name', ''), 'address': n.get('address', ''),
+                         'days': int((now - since) // 86400), 'server_id': by_addr.get(n.get('address'))})
+        return {'servers': servers, 'dead': dead, 'waste_kop': sum(x['price_kop'] for x in servers)}
+
+    async def delete_server(self, prof: dict, sid: int, log_line=lambda t: None) -> dict:
+        """Удалить сервер группы в Bobr Cloud, его ноду, хосты и A-запись — как при удалении в самом Bobr Cloud."""
+        d = self.paid_servers(prof['id']).get(int(sid))
+        if not d:
+            raise ValueError('Это не сервер, купленный ботом для этой группы')
+        bc = bcloud_from(self.store, d.get('buyer') or buyer_of(self.store, prof))
+        bc.RETRY_FOR = 8
+        await bc.delete(int(sid))
+        res = {'nodes': 0, 'hosts': 0, 'dns': 0}
+        if d.get('ip') or d.get('domain'):
+            from .runner import cf_token_of
+            try:
+                res = await asyncio.to_thread(engine.remove_node, {**prof, 'cf_token': cf_token_of(self.store, prof)},
+                                              d.get('ip', ''), d.get('domain', ''), log_line)
+            except engine.StepError as e:  # панель недоступна — ноду уберёт сверка с Bobr Cloud
+                log_line(f'панель: {e}')
+        self.store.patch_job_data(d['_job'], removed=True, removed_at=int(time.time()))
+        self.store.update_job(d['_job'], hidden=1)
+        CACHE.drop(prof['id'])
+        return res
+
+    async def report_cleanup(self, now: float | None = None) -> None:
+        """Нашлось что убрать — пишем сразу; тот же список — не чаще раза в неделю."""
+        now = now if now is not None else time.time()
+        for prof in self.store.profiles():
+            try:
+                c = await self.cleanup(prof, now)
+            except (engine.StepError, BcloudError) as e:
+                log.info('cleanup %s: %s', prof['id'], e)
+                continue
+            key = f'ap:clean:{prof["id"]}'
+            fp = sorted([f's{x["id"]}' for x in c['servers']] + [f'n{x["uuid"]}' for x in c['dead']])
+            st = self.get(key)
+            if not fp:
+                if st:
+                    self.put(key, {})
+                continue
+            if st.get('fp') == fp and now - st.get('at', 0) < CLEAN_REMIND:
+                continue
+            self.put(key, {'fp': fp, 'at': now})
+            lines = [f'🧹 <b>Можно убрать · {html.escape(prof.get("name", ""))}</b>']
+            if c['servers']:
+                lines.append(f'\nОплачиваются, но нод в панели нет — {c["waste_kop"] // 100} ₽/мес впустую:')
+                lines += [f'• {html.escape(x["flag"])} {html.escape(x["name"])} — {x["why"]}, {x["price_kop"] // 100} ₽/мес' for x in c['servers'][:10]]
+            if c['dead']:
+                lines.append(f'\nНоды без связи больше {DEAD_DAYS} дней:')
+                lines += [f'• {html.escape(x["name"])} — {x["days"]} дн.' for x in c['dead'][:10]]
+            lines.append('\nУдалить можно в панели управления: группа → «Уборка».')
+            await self.say(prof, '\n'.join(lines), self.button())
 
     async def check_rent(self) -> None:
         for prof in self.store.profiles():

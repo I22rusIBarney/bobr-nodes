@@ -95,6 +95,7 @@ ADMIN_ONLY = [
     (r'GET', r'/api/scripts/.+'),
     (r'.*', r'/api/(users|invites)(/.*)?'),
     (r'.*', r'/api/host'),
+    (r'.*', r'/api/selfupdate'),
 ]
 
 
@@ -1892,33 +1893,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         fresh = await asyncio.to_thread(plugins.fetch_preset, pid_) if kind == 'ingress' and on else None
 
         def run(pl):
-            cfg = plugins.state(pl)['config']
-            mine = mem[kind]
-            old = mine.get(pid_) or []
-            if kind == 'ingress':
-                sec = cfg['ingressFilter']
-                others = {x for k, v in mine.items() if k != pid_ for x in v}
-                manual = set(sec['blockedIps']) - {x for v in mine.values() for x in v}
-                new = fresh if on else []
-                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new, protected=others | manual)
-            elif pid_ == 'mail':
-                sec = cfg['egressFilter']
-                new = presets[pid_]['ports'] if on else []
-                sec['blockedPorts'] = sorted(set(plugins.swap(sec['blockedPorts'], old, new)))
-            else:
-                sec = cfg['egressFilter']
-                new = presets[pid_]['ips'] if on else []
-                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new)
-            if on:
-                sec['enabled'] = True  # пресет без включённого фильтра ничего не делает
-                mine[pid_] = new
-            else:
-                mine.pop(pid_, None)
-            if kind == 'ingress' and not sec['blockedIps']:
-                sec['enabled'] = False
-            if kind == 'egress' and not sec['blockedIps'] and not sec['blockedPorts']:
-                sec['enabled'] = False
-            st = plugins.save(pl, cfg)
+            st = plugins.apply_preset(pl, mem, kind, pid_, on, fresh)
             store.set(f'plug:{p["id"]}', json.dumps(mem))
             return st
         try:
@@ -1942,6 +1917,46 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Нужен IP-адрес, например 203.0.113.10') from None
         await plug_run(p, lambda pl: plugins.unblock(pl, ip))
         return J({'ok': True, 'message': f'{ip} разблокирован на всех нодах'})
+
+    # ── уборка: оплаченные серверы без нод и давно мёртвые ноды ──
+    @r.get('/api/profiles/{pid}/cleanup')
+    async def cleanup_get(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        try:
+            return J(await pilot().cleanup(p))
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        except BcloudError as e:
+            raise ApiError(f'Bobr Cloud: {e}') from None
+
+    @r.post('/api/profiles/{pid}/cleanup/servers/{sid}')
+    async def cleanup_server(request):
+        """Удалить сервер в Bobr Cloud вместе с его нодой, хостами и A-записью."""
+        p = profile_or_404(request.match_info['pid'], request)
+        lines: list[str] = []
+        try:
+            res = await pilot().delete_server(p, int(request.match_info['sid']), lines.append)
+        except BcloudError as e:
+            raise ApiError(f'Bobr Cloud: {e}') from None
+        logging.getLogger(__name__).info('server %s of profile %s deleted by %s', request.match_info['sid'], p['id'], uid_of(request))
+        return J({'ok': True, 'message': 'Сервер удалён' + (f', из панели убрано нод: {res["nodes"]}' if res.get('nodes') else ''), 'log': lines})
+
+    # ── автообновление самого бота (ставит таймер bnodes на сервере, здесь — включение и час) ──
+    @r.get('/api/selfupdate')
+    async def selfupdate_get(request):
+        from . import selfupdate as su
+        c = su.cfg(store)
+        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW})
+
+    @r.post('/api/selfupdate')
+    async def selfupdate_save(request):
+        from . import selfupdate as su
+        try:
+            c = su.clean(await body(request), su.cfg(store))
+        except (TypeError, ValueError) as e:
+            raise ApiError(str(e) or 'Неверные данные') from None
+        store.set(su.KEY, json.dumps(c))
+        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW})
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:
