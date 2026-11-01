@@ -85,6 +85,7 @@ async def main():
     from bot.feedback import Feedback
     feedback = Feedback(store, bot, access, f'{data_dir}/logs', autopilot.button)
     runner.feedback = autopilot.feedback = dp['feedback'] = feedback
+    autopilot.data_dir = data_dir
     dp['autopilot'] = autopilot
 
     await bot.set_my_commands([BotCommand(command='start', description='Меню'),

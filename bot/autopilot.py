@@ -249,6 +249,7 @@ class Autopilot:
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
         self.notify = Notifier(store, bot, access)
         self.feedback = None  # опросы после установки (задаётся в main)
+        self.data_dir = None  # папка данных: версия бота (задаётся в main)
 
     # ── служебное ──
     def get(self, key: str) -> dict:
@@ -319,6 +320,7 @@ class Autopilot:
         if now - self._rent_at >= RENT_EVERY:
             self._rent_at = now
             self._bg_task(self.check_rent())
+            self._bg_task(self.check_new_version())
             self._bg_task(self.report_cleanup())
         if now - self._preset_at >= PRESET_EVERY:
             self._preset_at = now
@@ -785,6 +787,27 @@ class Autopilot:
                     continue
                 self.put(key, mem)
                 log.info('preset %s group %s: %d → %d', pid, prof['id'], len(old or []), len(fresh))
+
+    # ───────── новая версия бота ─────────
+    async def check_new_version(self) -> None:
+        """Вышла версия, прошедшая тесты, — один раз сказать администраторам с кнопками «сейчас» и «ночью»."""
+        if not self.data_dir:
+            return
+        from . import selfupdate as su
+        rem = await su.check_remote(self.data_dir)
+        if rem['state'] != 'ready' or self.store.get('ap:newver') == rem['sha']:
+            return
+        self.store.set('ap:newver', rem['sha'])
+        c = su.cfg(self.store)
+        lines = [f'🆕 <b>Вышла версия {html.escape(rem["version"] or rem["sha"])}</b>' + (f' (у вас {html.escape(rem["current"])})' if rem['current'] else '')]
+        for r in rem['changes'][:3]:
+            lines.append(f'\n<b>{html.escape(r["version"])} — {html.escape(r["title"])}</b>')
+            lines += [f'{su.KIND_MARK.get(i.get("kind"), "•")} {html.escape(i["text"])}' for i in r.get('items', [])[:5]]
+        lines.append('\n' + (f'Обновлюсь сам ночью в {c["hour"]:02d}:00.' if c['on'] else 'Автообновление выключено.'))
+        rows = [[InlineKeyboardButton(text='⬆️ Обновить сейчас', callback_data='upd:now')]]
+        if not c['on']:
+            rows[0].append(InlineKeyboardButton(text=f'🌙 Ночью в {c["hour"]:02d}:00', callback_data='upd:night'))
+        await self.notify.emit('system.update_available', '\n'.join(lines), markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
     # ───────── уборка: серверы без нод и давно мёртвые ноды ─────────
     def paid_servers(self, pid: int) -> dict[int, dict]:

@@ -98,8 +98,18 @@ RandomizedDelaySec=120
 [Install]
 WantedBy=timers.target
 EOF2
+    # «Обновить сейчас» в панели: бот кладёт data/update-now — systemd сразу запускает обновление
+    cat > /etc/systemd/system/bnodes-update-now.path <<EOF2
+[Unit]
+Description=Bobr Nodes: обновление по кнопке из панели
+[Path]
+PathExists=${dir}/data/update-now
+Unit=bnodes-auto.service
+[Install]
+WantedBy=multi-user.target
+EOF2
     systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl enable --now bnodes-auto.timer >/dev/null 2>&1 || true
+    systemctl enable --now bnodes-auto.timer bnodes-update-now.path >/dev/null 2>&1 || true
   fi
 }
 
@@ -317,15 +327,16 @@ case "${1:-install}" in
     after="$(git rev-parse --short HEAD)"
     [[ "$before" == "$after" ]] && ok "Уже последняя версия ($after)" || ok "Код обновлён: $before → $after"
     exec ./install.sh _rebuild "$before" ;;
-  _auto)  # таймер раз в час: новая версия + готовый образ + бот говорит «пора» → обновиться
+  _auto)  # таймер раз в час или кнопка «Обновить сейчас»: новая версия + готовый образ + бот говорит «пора» → обновиться
     [[ -d .git ]] || exit 0
+    now=""; [[ -f data/update-now ]] && { now="--now"; rm -f data/update-now; }   # убрать сразу: иначе path-юнит сработает снова
     git fetch -q origin main 2>/dev/null || exit 0
     before="$(git rev-parse HEAD)"; after="$(git rev-parse origin/main)"
     [[ "$before" == "$after" ]] && exit 0
     git merge-base --is-ancestor HEAD origin/main || exit 0   # локальные правки — только вручную
     repo="$(gh_repo)"; [[ -n "$repo" ]] || exit 0
     docker pull -q "ghcr.io/${repo,,}:sha-$after" >/dev/null 2>&1 || exit 0   # тесты ещё идут или не прошли
-    compose exec -T nodes python -m bot.selfupdate check >/dev/null 2>&1 || exit 0
+    compose exec -T nodes python -m bot.selfupdate check $now >/dev/null 2>&1 || exit 0
     { printf '%s %s\n' "${before:0:7}" "${after:0:7}"; git log --no-merges --format='%s' "$before..$after" | head -12; } > data/update-note.txt
     git merge -q --ff-only origin/main || { rm -f data/update-note.txt; exit 1; }
     exec ./install.sh _rebuild "${before:0:7}" ;;

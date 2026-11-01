@@ -643,6 +643,33 @@ async def report_comment_text(m: Message, state: FSMContext, feedback=None, uid:
     await m.answer('📨 ' + await feedback.comment(uid or m.from_user.id, int(rid), m.text or ''))
 
 
+# ───────────────────────── новая версия бота ─────────────────────────
+
+@router.callback_query(F.data.in_({'upd:now', 'upd:night'}))
+async def update_button(c: CallbackQuery, store: Store, role: str = 'admin', autopilot=None):
+    import os
+
+    from . import selfupdate as su
+    if role != 'admin':
+        return await c.answer('Это может только администратор', show_alert=True)
+    data_dir = (autopilot.data_dir if autopilot is not None else None) or os.environ.get('DATA_DIR', 'data')
+    rem = await su.check_remote(data_dir, force=True)
+    if rem['state'] == 'latest':
+        msg = 'Уже стоит последняя версия'
+    elif rem['state'] != 'ready':
+        msg = 'Новая версия сейчас недоступна — попробуйте позже'
+    elif c.data == 'upd:now':
+        su.request_now(store, data_dir, rem['sha'])
+        msg = 'Обновляюсь — перезапуск через минуту, потом напишу, что нового'
+    else:
+        msg = f'Обновлюсь ночью в {su.request_night(store, rem["sha"])["hour"]:02d}:00'
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(msg, show_alert=True)
+
+
 # ───────────────────────── автомасштабирование ─────────────────────────
 
 @router.callback_query(F.data.regexp(r'^ap:s:[0-9a-f]{8}$'))

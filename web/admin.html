@@ -683,6 +683,52 @@ function changelogView() {
     r.items.map(x => { const [ic, col, t] = KIND[x.kind] || KIND.new; return row({ icon: ic, color: col, title: x.text, sub: t, cls: 'wrap', chevron: false }); }), fmt(r.date))));
   return v;
 }
+// ───────── проверка новой версии: сейчас или ночью ─────────
+let SUC = null;  // ответ проверки (GitHub)
+function suCheck(force) {
+  SUC = { ...(SUC || {}), loading: true };
+  api('selfupdate/check' + (force ? '?force=1' : '')).then(r => { SUC = r; }).catch(e => { SUC = { state: 'unknown', error: e.message }; })
+    .then(() => { if (document.querySelector('#root .su-page')) UI.nav.refresh(); });
+}
+function updateBox() {
+  const req = SU.request || {}, ver = SU.version || {};
+  // нажали «Обновить сейчас»: ждём, пока бот перезапустится с новой сборкой
+  if (req.mode === 'now' && req.sha && ver.sha && !req.sha.startsWith(ver.sha) && Date.now() / 1000 - req.at < 20 * 60) {
+    poll(() => { if (!document.querySelector('#root .su-page')) return; api('selfupdate').then(r => {
+      const was = SU.version.sha; SU = r;
+      if (r.version.sha !== was) { UI.toast('Обновлено до версии ' + r.version.number); setTimeout(() => location.reload(), 1200); } else UI.nav.refresh();
+    }).catch(() => UI.nav.refresh()); }, 4000);  // перезапуск: пару запросов не ответит — это нормально
+    return group('Обновление', [row({ icon: 'restart', color: 'blue', title: SU.pending ? 'Ждёт окончания задач' : 'Идёт обновление…', cls: 'wrap', chevron: false,
+      sub: SU.pending ? 'бот обновится, как только закончатся установки' : 'бот перезапустится примерно через минуту — страница обновится сама', status: ['идёт', 'run'] })]);
+  }
+  if (SUC === null) suCheck(false);
+  const C = SUC || {};
+  const when = C.checked_at ? new Date(C.checked_at * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  const again = h('button', { class: 'btn secondary small', type: 'button', disabled: !!C.loading, onclick: () => suCheck(true) }, C.loading ? 'Проверяю…' : 'Проверить');
+  if (!C.state || (C.loading && !C.checked_at)) return group('Обновления', [row({ icon: 'search', color: 'gray', title: 'Проверяю новую версию…', chevron: false })]);
+  if (C.state === 'latest') return group('Обновления', [row({ icon: 'checkCircle', color: 'green', title: 'У вас последняя версия', sub: when ? 'проверено в ' + when : null, chevron: false, right: again })]);
+  if (C.state === 'unknown') return group('Обновления', [row({ icon: 'alert', color: 'amber', title: 'Не удалось проверить', sub: C.error || 'GitHub не ответил', cls: 'wrap', chevron: false, right: again })]);
+  const name = C.version && C.version !== C.current ? `Версия ${C.version}` : `Сборка ${C.sha}`;
+  if (C.state === 'testing') {
+    poll(() => { if (document.querySelector('#root .su-page')) suCheck(true); }, 30000);
+    return group('Обновления', [row({ icon: 'clock', color: 'blue', title: `${name} проходит тесты`, sub: 'кнопка обновления появится через пару минут', cls: 'wrap', chevron: false, status: ['тесты', 'run'] })]);
+  }
+  if (C.state === 'failed') return group('Обновления', [row({ icon: 'alert', color: 'red', title: `${name} не прошла тесты`, sub: 'обновление недоступно — дождитесь исправления', cls: 'wrap', chevron: false, right: again })]);
+  // готова: что нового и две кнопки
+  const items = [row({ icon: 'sparkle', color: 'violet', title: `Доступна ${name.toLowerCase()}`, sub: `у вас ${C.current || ver.number}` + (when ? ' · проверено в ' + when : ''), cls: 'wrap', chevron: false, status: ['новая', 'ok'] })];
+  (C.changes || []).slice(0, 3).forEach(r => (r.items || []).slice(0, 4).forEach(x => { const [ic, col, t] = KIND[x.kind] || KIND.new;
+    items.push(row({ icon: ic, color: col, title: x.text, sub: `${r.version} · ${t}`, cls: 'wrap', chevron: false })); }));
+  if (!(C.changes || []).length) items.push(row({ title: 'Небольшие исправления', sub: 'без новых возможностей', cls: 'is-dim', chevron: false }));
+  const now = h('button', { class: 'btn', type: 'button' }, 'Обновить сейчас');
+  now.onclick = UI.busy(now, async () => {
+    if (!await UI.ask({ title: 'Обновить сейчас?', message: 'Бот перезапустится примерно на 10 секунд. Если идут установки, обновление подождёт их окончания.', buttons: [{ id: 'y', text: 'Обновить' }] })) return;
+    const r = await UI.run(() => api('selfupdate/now', 'POST', {})); if (r) { UI.toast(r.message); SU = null; UI.nav.refresh(); }
+  });
+  const night = SU.on ? null : h('button', { class: 'btn secondary', type: 'button' }, `Ночью в ${hh(SU.hour)}`);
+  if (night) night.onclick = UI.busy(night, async () => { const r = await UI.run(() => api('selfupdate/night', 'POST', {})); if (r) { UI.toast(r.message); SU = null; UI.nav.refresh(); } });
+  const sect = group('Обновления', items, SU.on ? `Иначе обновлюсь сам ночью в ${hh(SU.hour)}.` : SU.once ? `Запланировано на ${hh(SU.hour)} — или обновите сейчас.` : null);
+  return h('div', {}, sect, h('div', { class: 'cta', style: 'display:grid;gap:8px;margin-top:calc(-1 * var(--s3))' }, now, SU.once ? null : night));
+}
 // ───────── автообновление самого бота ─────────
 let SU = null;
 function selfUpdateView() {
@@ -696,6 +742,7 @@ function selfUpdateView() {
   v.append(group('Версия', [row({ icon: 'code', color: 'gray', title: ver.number ? `Версия ${ver.number}` + (top ? ` — ${top.title}` : '') : 'неизвестна', cls: 'wrap',
     sub: ver.sha ? `сборка ${ver.sha} от ${ver.date}` : 'сборка появится после следующего обновления',
     onClick: (SU.changelog || []).length ? () => UI.nav.push(changelogView) : null })], 'Нажмите, чтобы посмотреть, что нового в каждой версии.'));
+  v.append(updateBox());
   const rows = [row({ icon: 'renew', color: 'teal', title: 'Обновлять автоматически', cls: 'wrap', sub: 'новая версия из GitHub, когда тесты прошли', chevron: false, right: UI.toggle(SU.on, on => save({ on }), 'Автообновление') })];
   if (SU.on) rows.push(row({ title: 'Время обновления', sub: 'по вашему времени', chevron: false, right: hourStep(SU.hour, x => save({ hour: x })) }));
   v.append(group('Автообновление', rows, `Раз в день в выбранный час (если бот занят установкой — в ближайшие ${SU.window} ч). Перезапуск занимает ~10 секунд, задачи продолжатся. После обновления бот напишет, что нового. Вручную: bnodes update.`));
