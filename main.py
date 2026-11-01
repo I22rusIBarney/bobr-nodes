@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
-from bot import selfupdate
+from bot import migrate, selfupdate
 from bot.access import Access
 from bot.autopilot import Autopilot
 from bot.hostload import HostLoad
@@ -48,6 +48,13 @@ async def main():
     public_url = os.environ.get('PUBLIC_URL', '').rstrip('/')
     data_dir = os.environ.get('DATA_DIR', 'data')
     os.makedirs(data_dir, mode=0o700, exist_ok=True)
+
+    gone = migrate.moved(data_dir)
+    if gone:  # бот переехал на другой сервер: здесь только данные для отката, сам он не запускается
+        logging.warning('бот переехал на %s — на этом сервере не запускаюсь (откат: удалите %s/%s и bnodes restart)',
+                        gone.get('to'), data_dir, migrate.MOVED)
+        while True:
+            await asyncio.sleep(3600)
 
     store = Store(f'{data_dir}/bot.db')
     for env_key, key in SEED.items():
@@ -92,8 +99,9 @@ async def main():
     mon_task = asyncio.create_task(monitor.run())
     pilot_task = asyncio.create_task(autopilot.run())
     host_task = asyncio.create_task(hostload.run())  # автообновление, нагрузка, аренда, утренняя сводка  # доступность нод из России: чекеры, сообщения, починка
+    mover = migrate.Migration(store, runner, data_dir)
     app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir, monitor=monitor,
-                    access=access, autopilot=autopilot, hostload=hostload)
+                    access=access, autopilot=autopilot, hostload=hostload, mover=mover)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
@@ -103,6 +111,15 @@ async def main():
     note = selfupdate.whats_new(store)
     if note:
         await autopilot.notify.emit('system.update', note)
+    arrived = migrate.arrived_note(data_dir)
+    if arrived:
+        await autopilot.notify.emit('system.update', arrived)
+
+    async def stop_for_move():  # переезд: перестать принимать сообщения и проверять ноды, пока копируется база
+        for t in (watch_task, sync_task, mon_task, pilot_task, host_task):
+            t.cancel()
+        await dp.stop_polling()
+    migrate.HOOKS.update(stop=stop_for_move, exit=os._exit)
 
     resumed = await runner.resume_all()
     if resumed:

@@ -96,6 +96,7 @@ ADMIN_ONLY = [
     (r'.*', r'/api/(users|invites)(/.*)?'),
     (r'.*', r'/api/host'),
     (r'POST', r'/api/selfupdate'),
+    (r'.*', r'/api/migrate(/.*)?'),
 ]
 
 
@@ -118,7 +119,7 @@ def client_ip(request) -> str:
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
-              access: Access | None = None, autopilot=None, hostload=None) -> web.Application:
+              access: Access | None = None, autopilot=None, hostload=None, mover=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     NT = notify.Notifier(store, None, access, admins)  # веб: только лента и настройки, без отправки
@@ -2004,6 +2005,73 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         done = bool((await body(request)).get('done', True))
         store.set(f'tour_done:{uid_of(request)}', '1' if done else '')
         return J({'ok': True, 'tour_done': done})
+
+    # ── переезд бота на новый VPS (только администратор) ──
+    def mover_or_404():
+        if mover is None:
+            raise ApiError('Переезд недоступен', 404)
+        return mover
+
+    def move_target(b: dict) -> dict:
+        from . import sshaccess
+        ip = str(b.get('ip') or '').strip()
+        if not engine.is_ip(ip) or ':' in ip:
+            raise ApiError('IP нового сервера: IPv4, например 203.0.113.10')
+        try:
+            acc = sshaccess.clean({'user': 'root', 'port': b.get('port') or 22, 'password': b.get('password') or '',
+                                   'key': 'own' if str(b.get('key_text') or '').strip() else '', 'key_text': b.get('key_text') or ''},
+                                  None, runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return {'ip': ip, 'port': acc['port'], 'password': acc['password'], 'key_file': acc['key_file']}
+
+    @r.get('/api/migrate')
+    async def migrate_get(request):
+        return J(mover_or_404().view())
+
+    @r.post('/api/migrate/check')
+    async def migrate_check(request):
+        m = mover_or_404()
+        if m.running():
+            raise ApiError('Переезд уже идёт')
+        t = move_target(await body(request))
+        from .migrate import MigrateError
+        try:
+            await asyncio.to_thread(m.check, t)
+        except (engine.StepError, MigrateError) as e:
+            m.put(status='idle', error=str(e))
+            raise ApiError(f'Сервер: {e}') from None
+        return J(m.view())
+
+    @r.post('/api/migrate/start')
+    async def migrate_start(request):
+        """Переезд целиком. Пароль сервера — только в памяти процесса, в базу не попадает."""
+        m = mover_or_404()
+        b = await body(request)
+        t = move_target(b)
+        bc = str(b.get('bcloud_url') or '').strip().rstrip('/')
+        from .migrate import MigrateError, internal_bcloud
+        if internal_bcloud(store.get('bcloud_url')):
+            if not re.fullmatch(r'https://[a-z0-9.-]+\.[a-z]{2,}(/.*)?', bc):
+                raise ApiError('Сейчас бот ходит в Bobr Cloud внутри этого сервера. Укажите публичный адрес Bobr Cloud, '
+                               'например https://cloud.example.com — с нового сервера бот будет ходить туда')
+            from .bcloud import Bcloud
+            try:
+                b2 = Bcloud(bc, store.get('bcloud_token'), int(store.get('bcloud_tg_id') or 0))
+                b2.RETRY_FOR = 5
+                await b2.balance()
+            except BcloudError as e:
+                raise ApiError(f'Bobr Cloud по адресу {bc} не ответил: {e}') from None
+        else:
+            bc = ''
+        if store.active_jobs():
+            raise ApiError('Идут задачи бота — дождитесь, пока они закончатся')
+        try:
+            m.start(t, bool(b.get('dns', True)), bc or None)
+        except MigrateError as e:
+            raise ApiError(str(e)) from None
+        logging.getLogger(__name__).warning('migration to %s started by %s', t['ip'], uid_of(request))
+        return J(m.view())
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:

@@ -610,3 +610,6 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .tour-btns { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
 .tour-btns.one { grid-template-columns: 1fr; }
 @media (prefers-reduced-motion: reduce) { .tour-hole.show { animation: none; } }
+
+/* журнал переезда */
+pre.log { margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--hint); max-height: 320px; overflow: auto; }
