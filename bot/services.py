@@ -154,16 +154,20 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
             used_ids.add(int(d['server_id']))
         if d.get('ip'):
             used_ips.add(d['ip'])
+    relay_ids = {int(r['server_id']) for r in store.relays() if r.get('server_id')}
+    relay_ips = {r['ip'] for r in store.relays() if r.get('ip')}
     out = []
     for x in await bc.servers():
         os_ok = any(str(x.get('os') or '').lower().startswith(o) for o in OS_OK)
-        used = int(x['id']) in used_ids or (x.get('ip') or '') in used_ips
-        why = ('уже нода Bobr Nodes' if used else 'сервер ещё создаётся' if x.get('status') == 'provisioning'
+        relay = int(x['id']) in relay_ids or (x.get('ip') or '') in relay_ips  # вход (мост) — под ноду не предлагать
+        used = int(x['id']) in used_ids or (x.get('ip') or '') in used_ips or relay
+        why = ('вход (мост) для ноды' if relay and not (int(x['id']) in used_ids or (x.get('ip') or '') in used_ips)
+               else 'уже нода Bobr Nodes' if used else 'сервер ещё создаётся' if x.get('status') == 'provisioning'
                else f'сервер {x.get("status")}' if x.get('status') != 'active' else '' if os_ok
                else 'нужна Ubuntu или Debian')
         out.append({**{k: x.get(k) for k in ('id', 'name', 'status', 'ip', 'location', 'loc_name', 'flag', 'cpu', 'ram', 'disk',
                                               'os', 'expires_at', 'root_password')},
-                    'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'ready': not why, 'why': why})
+                    'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'relay': relay, 'ready': not why, 'why': why})
     return out
 
 

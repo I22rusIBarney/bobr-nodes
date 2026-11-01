@@ -807,6 +807,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def relay_view(x: dict) -> dict:
         from . import sshaccess
         return {'id': x['id'], 'ip': x['ip'], 'address': x.get('address') or x['ip'], 'listen': x['listen'],
+                'source': x.get('source', 'ssh'), 'server_id': x.get('server_id'), 'bought': bool(x.get('bought')),
+                'flag': x.get('flag', ''), 'spec': x.get('spec', ''), 'price_kop': x.get('price_kop'),
                 'target': x['target'], 'target_port': x['target_port'], 'remark': x.get('remark', ''),
                 'status': x.get('status', 'new'), 'error': x.get('error', ''), 'bad': x.get('bad') or [],
                 'hosts': len(x.get('hosts') or []), 'ssh': sshaccess.view(x.get('ssh')),
@@ -862,26 +864,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/relays')
     async def relay_create(request):
-        """Новый вход через Россию: HAProxy на российском сервере пробрасывает порт на ноду, в панели — копии её хостов."""
+        """Новый вход (мост): HAProxy на другом сервере пробрасывает порт на ноду, в панели — копии её хостов.
+        Сервер: свой по SSH (source=ssh), уже купленный в Bobr Cloud (source=server, server_id) или новый —
+        бот купит его сам (source=buy, location, idx) и поставит проброс, когда сервер создастся."""
         from . import sshaccess
         p = profile_or_404(request.match_info['pid'], request)
         uuid, b = request.match_info['uuid'], await body(request)
-        ip = str(b.get('ip') or '').strip()
-        if not engine.is_ip(ip) or ':' in ip:
-            raise ApiError('IP сервера в России: адрес IPv4, например 203.0.113.10')
-        others = [x for x in store.relays() if x['ip'] == ip]
-        if any(not can(request, store.profile(x['pid'])) for x in others):
-            raise ApiError('Этот сервер уже используют для входа в другой группе')
-        try:
-            acc = sshaccess.clean(b, others[-1].get('ssh') if others else None, runner.keydir)
-        except ValueError as e:
-            raise ApiError(str(e)) from None
-        listen = check_listen(b.get('listen'), acc.get('port'))
-        if any(int(x['listen']) == listen for x in others):
-            raise ApiError(f'Порт {listen} на этом сервере уже занят другим входом — выберите другой')
-        address = naming.norm_domain(str(b.get('address') or '')) or ip
-        if address != ip and not (engine.is_ip(address) or naming.valid_domain(address)):
-            raise ApiError('Адрес для клиентов: IP или домен российского сервера')
+        source = b.get('source') or 'ssh'
+        if source not in ('ssh', 'server', 'buy'):
+            raise ApiError('Откуда сервер: свой, купленный или новый')
         try:
             pl, n, hosts, nip, dom = await asyncio.to_thread(node_ctx, p, uuid)
         except engine.StepError as e:
@@ -893,12 +884,117 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             tport = int(b.get('target_port') or rl.target_port_of(hosts))
         except (TypeError, ValueError):
             raise ApiError('Порт ноды: число') from None
-        remark = str(b.get('remark') or '').strip()[:90] or f'🇷🇺 {n["name"]}'
+        extra: dict = {'source': source}
+        if source == 'ssh':
+            ip = str(b.get('ip') or '').strip()
+            if not engine.is_ip(ip) or ':' in ip:
+                raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
+        elif source == 'server':
+            try:
+                sid = int(b.get('server_id'))
+            except (TypeError, ValueError):
+                raise ApiError('Выберите сервер') from None
+            srv = next((x for x in await svc.own_servers(store, p) if int(x['id']) == sid), None)
+            if not srv:
+                raise ApiError('Этого сервера нет у покупателя группы в Bobr Cloud')
+            if srv['used'] and not srv.get('relay'):
+                raise ApiError('На этом сервере стоит нода — под мост возьмите свободный')
+            if srv.get('status') != 'active' or not srv.get('ip'):
+                raise ApiError('Сервер ещё не готов в Bobr Cloud — подождите, пока он станет активным')
+            ip = srv['ip']
+            extra.update(server_id=sid, loc=srv.get('location') or '', flag=srv.get('flag') or '')
+            if srv.get('root_password') and not any(str(b.get(k) or '').strip() for k in ('password', 'key_text')):
+                b = {**b, 'user': 'root', 'port': 22, 'password': srv['root_password'], 'key': b.get('key') or ''}
+        else:
+            cat = await svc.load_catalog(store, p)
+            loc = str(b.get('location') or '')
+            L = next((x for x in cat['locations'] if x['code'] == loc), None)
+            if not L:
+                raise ApiError('Этой локации сейчас нет в Bobr Cloud')
+            o = next((x for x in L['offers'] if x['idx'] == b.get('idx')), None)
+            if not o:
+                raise ApiError('Выберите тариф')
+            ip = ''
+            pw = secrets.token_urlsafe(18)
+            b = {**b, 'user': 'root', 'port': 22, 'password': pw, 'key': ''}
+            extra.update(loc=loc, flag=L['flag'], bought=True, price_kop=o['price_kop'], spec=svc.spec_text(o),
+                         buy={'location': loc, 'os': cat['os_code'], 'idx': o['idx']})
+        others = [x for x in store.relays() if ip and x['ip'] == ip]
+        if any(not can(request, store.profile(x['pid'])) for x in others):
+            raise ApiError('Этот сервер уже используют для входа в другой группе')
+        try:
+            acc = sshaccess.clean(b, others[-1].get('ssh') if others else None, runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        listen = check_listen(b.get('listen'), acc.get('port'))
+        if any(int(x['listen']) == listen for x in others):
+            raise ApiError(f'Порт {listen} на этом сервере уже занят другим входом — выберите другой')
+        address = naming.norm_domain(str(b.get('address') or '')) or ip
+        if address and address != ip and not (engine.is_ip(address) or naming.valid_domain(address)):
+            raise ApiError('Адрес для клиентов: IP или домен сервера входа')
+        remark = str(b.get('remark') or '').strip()[:90] or (f'🇷🇺 {n["name"]}' if source == 'ssh' else f'{n["name"]} ⇄')
         x = {'pid': p['id'], 'node_uuid': uuid, 'node_name': n['name'], 'ip': ip, 'address': address, 'listen': listen,
              'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
-             'created_by': uid_of(request), 'created_at': int(time.time())}
+             'created_by': uid_of(request), 'created_at': int(time.time()), **extra}
+        if source != 'buy':
+            x['id'] = store.save_relay(x)
+            return J(await relay_run(x, p, ip))
+        # новый сервер: покупка сейчас (деньги и ошибки Bobr Cloud — сразу в ответе), проброс — когда сервер создастся
+        bc = bcloud_from(store, buyer_of(store, p))
+        try:
+            srv = await bc.buy(x['buy']['location'], x['buy']['os'], x['buy']['idx'], '1m', acc['password'])
+        except BcloudError as e:
+            raise ApiError(f'Bobr Cloud: {e}') from None
+        x.update(server_id=int(srv['id']), status='buying', buying_since=int(time.time()))
         x['id'] = store.save_relay(x)
-        return J(await relay_run(x, p, ip))
+        relay_bg(x['id'])
+        return J({'id': x['id'], 'ok': True, 'pending': True,
+                  'message': f'Купил сервер {x["flag"]} {x["spec"]} за {x["price_kop"] // 100} ₽/мес — поставлю проброс, '
+                             'когда Bobr Cloud его создаст (обычно 1–3 минуты)'})
+
+    relay_tasks: dict[int, asyncio.Task] = {}
+
+    def relay_bg(rid: int) -> None:
+        if rid not in relay_tasks or relay_tasks[rid].done():
+            relay_tasks[rid] = asyncio.get_running_loop().create_task(relay_wait_server(rid))
+
+    async def relay_wait_server(rid: int) -> None:
+        """Купленный под мост сервер: дождаться IP в Bobr Cloud (до 20 минут), потом поставить проброс."""
+        end = time.time() + 20 * 60
+        while True:
+            x = store.relay(rid)
+            if not x or x.get('status') != 'buying':
+                return
+            p = store.profile(x['pid'])
+            if not p:
+                return
+            try:
+                srv = await bcloud_from(store, buyer_of(store, p)).server(int(x['server_id']))
+            except BcloudError as e:
+                srv = {'status': 'unknown', 'error': str(e)}
+            if srv.get('status') == 'active' and srv.get('ip'):
+                engine.forget_host(runner.known_hosts(), srv['ip'])
+                ssh = {**x['ssh'], 'password': srv.get('root_password') or x['ssh'].get('password', '')}
+                x.update(ip=srv['ip'], address=x.get('address') or srv['ip'], ssh=ssh, status='new')
+                store.save_relay(x)
+                await asyncio.sleep(20)  # SSH на свежем сервере поднимается не сразу
+                try:
+                    await relay_run(x, p, x['ip'])
+                except Exception as e:  # noqa: BLE001
+                    store.save_relay({**store.relay(rid), 'status': 'failed', 'error': str(e)[:300]})
+                return
+            if srv.get('status') in ('deleted', 'failed', 'error') or time.time() > end:
+                why = (f'Bobr Cloud не создал сервер (статус {srv.get("status")})' if time.time() <= end
+                       else 'сервер слишком долго создаётся — проверьте его в Bobr Cloud')
+                store.save_relay({**x, 'status': 'failed', 'error': why})
+                return
+            await asyncio.sleep(15)
+
+    async def relay_resume(_app) -> None:
+        for x in store.relays():  # бот перезапустился, пока создавался сервер под мост — ждём дальше
+            if x.get('status') == 'buying':
+                relay_bg(x['id'])
+    app.on_startup.append(relay_resume)
 
     async def relay_run(x: dict, p: dict, ip: str, closed: list[int] = ()) -> dict:
         """Применить проброс на сервере и, если хостов ещё нет, создать их. Итог — в записи входа."""
@@ -950,6 +1046,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         force = request.query.get('force') == '1'
         p = store.profile(x['pid'])
         lines: list[str] = []
+        drop_server = request.query.get('server') == '1' and x.get('server_id') and p
+        if not x.get('ip'):  # сервер под мост ещё создаётся — проброса нигде нет
+            store.delete_relay(x['id'])
+            if drop_server:
+                try:
+                    await bcloud_from(store, buyer_of(store, p)).delete(int(x['server_id']))
+                    lines.append('сервер удалён в Bobr Cloud')
+                except BcloudError as e:
+                    lines.append(f'Bobr Cloud: {e}')
+            return J({'ok': True, 'message': 'Вход убран', 'log': lines})
         lock = relay_locks.setdefault(x['ip'], asyncio.Lock())
         async with lock:
             store.delete_relay(x['id'])
@@ -969,7 +1075,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     await asyncio.to_thread(rl.delete_hosts, panel_of(p), x['hosts'], lines.append)
                 except engine.StepError as e:
                     lines.append(f'панель: {e}')
-        return J({'ok': True, 'message': 'Вход убран', 'log': lines})
+            if drop_server and not rest:  # на сервере больше нет входов — удалить и его, чтобы не платить
+                try:
+                    await bcloud_from(store, buyer_of(store, p)).delete(int(x['server_id']))
+                    lines.append('сервер удалён в Bobr Cloud')
+                except BcloudError as e:
+                    lines.append(f'Bobr Cloud: {e} — удалите сервер сами')
+        return J({'ok': True, 'message': 'Вход убран' + (' и сервер удалён' if any('удалён' in t for t in lines) else ''), 'log': lines})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/ssh')
     async def panel_node_ssh(request):

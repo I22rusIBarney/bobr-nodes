@@ -916,6 +916,7 @@ class Autopilot:
         nodes, _ = await CACHE.get(prof, 'nodes', stale_ok=False)
         addrs = {n.get('address') for n in nodes}
         busy = {j['data'].get('server_id') for j in self.store.active_jobs()}
+        busy |= {r['server_id'] for r in self.store.relays() if r.get('server_id')}  # сервер стал мостом — он нужен
         paid = self.paid_servers(prof['id'])
         servers = []
         if paid:
