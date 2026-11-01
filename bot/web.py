@@ -809,6 +809,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return {'id': x['id'], 'ip': x['ip'], 'address': x.get('address') or x['ip'], 'listen': x['listen'],
                 'source': x.get('source', 'ssh'), 'server_id': x.get('server_id'), 'bought': bool(x.get('bought')),
                 'stage': x.get('stage', ''), 'stages': relay_stages(x), 'mode': x.get('mode', 'haproxy'), 'sni': x.get('sni', ''),
+                'hop': x.get('hop') or 'vless', 'hop_port': ((x.get('made') or {}).get('ss') or {}).get('port'),
                 'domain': x.get('domain', ''),
                 'flag': x.get('flag', ''), 'spec': x.get('spec', ''), 'price_kop': x.get('price_kop'),
                 'target': x['target'], 'target_port': x['target_port'], 'remark': x.get('remark', ''),
@@ -1373,6 +1374,43 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.save_relay(x)
         relay_start(x, p)
         return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Переделываю мост — ход на его странице'})
+
+    @r.post('/api/relays/{rid}/hop')
+    async def relay_hop(request):
+        """Как вход ходит на выход: VLESS через inbound клиентов выхода или отдельный Shadowsocks (как в eGames).
+        Меняется только панель — сервер входа не переустанавливается."""
+        x = relay_or_404(request.match_info['rid'], request)
+        b = await body(request)
+        hop = b.get('hop')
+        if hop not in ('ss', 'vless'):
+            raise ApiError('Связь: ss или vless')
+        if x.get('mode') not in ('xray', 'vision') or not x.get('made') or x.get('status') != 'ok':
+            raise ApiError('Связь с выходом меняется у готового моста с роутингом')
+        if (x.get('hop') or 'vless') == hop:
+            raise ApiError('Мост уже так связан с выходом')
+        p = store.profile(x['pid'])
+        lines: list[str] = []
+
+        def run():
+            pl, n, hosts, _nip, _dom = node_ctx(p, x['node_uuid'])
+            base = xb.vision_base(relay_remote(x), x['domain']) if x['mode'] == 'vision' else None
+            with engine.PANEL_LOCK:
+                if hop == 'vless' and (x['made'] or {}).get('ss'):
+                    xb.remove_ss_exit(pl, x['made']['ss'], lines.append)
+                return xb.setup_panel(pl, {**x, 'hop': hop, **({'base_cfg': base} if base else {})}, n, hosts, lines.append)
+        try:
+            made = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            raise ApiError(f'Не получилось: {e}') from None
+        made.pop('reality', None)
+        made.pop('sni', None)
+        stamp = time.strftime('%H:%M:%S ')
+        x.update(hop=hop, made=made, hosts=made['hosts'], log=(x.get('log') or [])[-20:] + [stamp + t for t in lines])
+        store.save_relay(x)
+        PC.drop(p['id'])
+        return J({'ok': True, 'log': lines, 'message': 'Готово: вход ходит на выход по ' +
+                  ('Shadowsocks, российские сайты — напрямую' if hop == 'ss' else 'VLESS через inbound клиентов выхода') +
+                  '. Подписку клиентам обновлять не нужно.'})
 
     @r.post('/api/relays/{rid}/forget-hostkey')
     async def relay_forget(request):

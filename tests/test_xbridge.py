@@ -245,3 +245,66 @@ def test_bridge_ip_excluded_from_torrent_blocker():
     assert ('PATCH', '/api/node-plugins') not in pl.calls[n:]          # уже в исключениях — не трогаем
     xb.teardown_panel(pl, made, user_in_use=False, log=log.append)
     assert pl.plugin['torrentBlocker']['ignoreLists'] == {'ip': ['1.1.1.1'], 'userId': []}
+
+
+def test_ss_hop_like_egames():
+    """Связь вход → выход по Shadowsocks: отдельный inbound на выходе (только на этой ноде), свой сквад,
+    на входе — outbound shadowsocks, Россия напрямую, остальное — на выход."""
+    pl, log = FakePanel(), []
+    pnode = {**EXIT_NODE, 'configProfile': {'activeConfigProfileUuid': 'prof-exit', 'activeInbounds': [{'uuid': EXIT_INB}]}}
+    pl.nodes.append(pnode)
+    orig = pl.call
+    patched = []
+
+    def call(method, path, body=None):
+        if (method, path) == ('PATCH', '/api/config-profiles'):
+            prof = next(p for p in pl.profiles if p['uuid'] == body['uuid'])
+            prof['config'] = body['config']
+            prof['inbounds'] = [{'uuid': 'inb-' + i['tag'], 'tag': i['tag'], 'port': i.get('port')} for i in body['config']['inbounds']]
+            return prof
+        if (method, path) == ('PATCH', '/api/nodes'):
+            patched.append(body)
+            pnode['configProfile'] = {**body['configProfile'], 'activeInbounds': [{'uuid': u} for u in body['configProfile']['activeInbounds']]}
+            return {}
+        if (method, path) == ('POST', '/api/internal-squads'):
+            sq = {'uuid': 'sq-ss', 'name': body['name'], 'inbounds': [{'uuid': u} for u in body['inbounds']]}
+            pl.squads.append(sq)
+            return sq
+        if (method, path) == ('POST', '/api/users'):
+            u = orig(method, path, body)
+            u['ssPassword'] = 'ss-pass-1'
+            return u
+        return orig(method, path, body)
+    pl.call = call
+    made = xb.setup_panel(pl, {**RELAY, 'hop': 'ss'}, pnode, EXIT_HOSTS, log.append)
+    tag = xb.ss_tag(EXIT_NODE['uuid'])
+    exit_cfg = next(p for p in pl.profiles if p['uuid'] == 'prof-exit')['config']
+    ss_in = next(i for i in exit_cfg['inbounds'] if i['tag'] == tag)
+    assert ss_in['protocol'] == 'shadowsocks' and ss_in['port'] == 9999
+    assert patched[-1]['configProfile']['activeInbounds'] == [EXIT_INB, 'inb-' + tag]   # клиенты выхода остаются
+    assert next(s for s in pl.squads if s['uuid'] == 'sq-ss')['inbounds'] == [{'uuid': 'inb-' + tag}]
+    assert 'sq-ss' in {s['uuid'] for s in pl.users['bridge_exitnodeuuid']['activeInternalSquads']}
+    bridge = next(p for p in pl.profiles if p['uuid'] == 'prof-bridge')['config']
+    out = bridge['outbounds'][0]
+    assert out['protocol'] == 'shadowsocks' and out['settings']['servers'][0] == {
+        'address': 'swe.example.com', 'port': 9999, 'method': xb.SS_METHOD, 'password': 'ss-pass-1', 'level': 0}
+    rules = bridge['routing']['rules']
+    i_ru = next(i for i, r in enumerate(rules) if r.get('ip') == ['geoip:ru'])
+    i_all = next(i for i, r in enumerate(rules) if r.get('outboundTag') == xb.OUT_TAG)
+    assert rules[0]['outboundTag'] == 'BLOCK' and i_ru < i_all
+    assert made['ss']['port'] == 9999
+    # повтор — ничего не дублируется
+    pl.profiles = [p for p in pl.profiles if p['uuid'] != 'prof-bridge']
+    xb.setup_panel(pl, {**RELAY, 'hop': 'ss', 'reality': made['reality']}, pnode, EXIT_HOSTS, log.append)
+    exit_cfg = next(p for p in pl.profiles if p['uuid'] == 'prof-exit')['config']
+    assert sum(1 for i in exit_cfg['inbounds'] if i['tag'] == tag) == 1 and len(patched) == 1
+    assert sum(1 for s in pl.squads if s['name'] == xb.ss_squad_name(EXIT_NODE['uuid'])) == 1
+
+
+def test_bridge_rules_replace_previous():
+    rules = [{'outboundTag': 'BLOCK', 'protocol': ['bittorrent']}, *xb.RU_RULES,
+             {'type': 'field', 'inboundTag': ['T'], 'outboundTag': xb.OUT_TAG}, {'outboundTag': 'DIRECT', 'domain': ['x.com']}]
+    out = xb.bridge_rules(rules, 'T', {'BLOCK'}, False)
+    assert [r.get('outboundTag') for r in out] == ['BLOCK', xb.OUT_TAG, 'DIRECT']
+    out = xb.bridge_rules(out, 'T', {'BLOCK'}, True)
+    assert sum(1 for r in out if r.get('ip') == ['geoip:ru']) == 1
