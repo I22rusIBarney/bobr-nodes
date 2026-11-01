@@ -19,6 +19,8 @@ class Bot:
 
 
 class Access:
+    admins = {1}
+
     def recipients(self, prof):
         return [1]
 
