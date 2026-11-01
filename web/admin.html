@@ -406,6 +406,15 @@ function serviceRows() {
     row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } }),
     row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } })];
 }
+// ───────── история версий ─────────
+const KIND = { new: ['sparkle', 'violet', 'Новое'], better: ['zap', 'amber', 'Лучше'], fix: ['check', 'green', 'Исправлено'] };
+function changelogView() {
+  const v = h('div', {}, ...pageHead('Что нового'));
+  const fmt = d => new Date(d + 'T12:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+  (SU && SU.changelog || []).forEach((r, i) => v.append(group([`${r.version} · ${r.title}`, i === 0 ? h('span', { class: 'badge ok', style: 'margin-left:8px' }, 'сейчас') : null],
+    r.items.map(x => { const [ic, col, t] = KIND[x.kind] || KIND.new; return row({ icon: ic, color: col, title: x.text, sub: t, cls: 'wrap', chevron: false }); }), fmt(r.date))));
+  return v;
+}
 // ───────── автообновление самого бота ─────────
 let SU = null;
 function selfUpdateView() {
@@ -415,8 +424,10 @@ function selfUpdateView() {
   if (!SU || SU.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   if (SU.error) { v.append(UI.failed(SU.error, load)); return v; }
   const save = async patch => { const r = await UI.run(() => api('selfupdate', 'POST', { ...patch, tz: tzNow() })); if (r) { SU = r; UI.haptic('select'); } UI.nav.refresh(); };
-  const ver = SU.version || {};
-  v.append(group('Версия', [row({ icon: 'code', color: 'gray', title: ver.sha ? `${ver.sha} от ${ver.date}` : 'неизвестна', sub: ver.subject || 'появится после следующего обновления', mono: true, chevron: false, cls: 'wrap' })]));
+  const ver = SU.version || {}, top = (SU.changelog || [])[0];
+  v.append(group('Версия', [row({ icon: 'code', color: 'gray', title: ver.number ? `Версия ${ver.number}` + (top ? ` — ${top.title}` : '') : 'неизвестна', cls: 'wrap',
+    sub: ver.sha ? `сборка ${ver.sha} от ${ver.date}` : 'сборка появится после следующего обновления',
+    onClick: (SU.changelog || []).length ? () => UI.nav.push(changelogView) : null })], 'Нажмите, чтобы посмотреть, что нового в каждой версии.'));
   const rows = [row({ icon: 'renew', color: 'teal', title: 'Обновлять автоматически', cls: 'wrap', sub: 'новая версия из GitHub, когда тесты прошли', chevron: false, right: UI.toggle(SU.on, on => save({ on }), 'Автообновление') })];
   if (SU.on) rows.push(row({ title: 'Время обновления', sub: 'по вашему времени', chevron: false, right: hourStep(SU.hour, x => save({ hour: x })) }));
   v.append(group('Автообновление', rows, `Раз в день в выбранный час (если бот занят установкой — в ближайшие ${SU.window} ч). Перезапуск занимает ~10 секунд, задачи продолжатся. После обновления бот напишет, что нового. Вручную: bnodes update.`));
@@ -1709,6 +1720,11 @@ function hourStep(value, on) {  // час 0…23, по кругу
   return h('div', { class: 'counter' }, h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Раньше', onclick: () => set(-1) }, '−'),
     h('b', { style: 'min-width:56px' }, hh(value)), h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Позже', onclick: () => set(1) }, '+'));
 }
+function numStep(value, lo, hi, step, on, fmt) {  // число с − / +, в пределах lo…hi
+  const set = d => { const x = Math.min(hi, Math.max(lo, value + d)); if (x !== value) { UI.haptic('select'); on(x); } };
+  return h('div', { class: 'counter' }, h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Меньше', disabled: value <= lo, onclick: () => set(-step) }, '−'),
+    h('b', { style: 'min-width:64px' }, fmt ? fmt(value) : String(value)), h('button', { class: 'btn secondary small', type: 'button', 'aria-label': 'Больше', disabled: value >= hi, onclick: () => set(step) }, '+'));
+}
 function autoView(pid) {
   const g = ST.profiles.find(p => p.id === pid);
   const v = h('div', {}, ...pageHead('Автоматизация', { sub: g ? g.name : null }));
@@ -1736,6 +1752,18 @@ function autoView(pid) {
   v.append(group('Аренда серверов', [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Автопродление в Bobr Cloud'),
     UI.segmented([{ value: null, label: 'Не трогать' }, { value: true, label: 'Включать всем' }], A.renew === true ? true : null, x => save({ renew: x }), 'fill'))],
     'Раз в 6 часов бот проверяет аренду и пишет, если сервер кончится через 3 дня и сам не продлится.'));
+  // деньги: прогноз баланса
+  v.append(group('Прогноз баланса', [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Предупредить, если денег хватит меньше чем на'),
+    UI.segmented([{ value: 0, label: 'выкл.' }, { value: 3, label: '3 дня' }, { value: 7, label: 'неделю' }, { value: 14, label: '2 недели' }], A.bal_days, x => save({ bal_days: x }), 'fill'))],
+    'Бот считает продления всех серверов этого аккаунта Bobr Cloud по датам и пишет раз в день, пока не пополните.'));
+  // автомасштабирование
+  const sc = [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Когда нода перегружена'),
+    UI.segmented([{ value: 'off', label: 'Только сообщить' }, { value: 'ask', label: 'Спросить' }, { value: 'auto', label: 'Докупить сам' }], A.scale, x => save({ scale: x }), 'fill'))];
+  if (A.scale !== 'off') sc.push(
+    row({ title: 'Лимит докупленных нод', sub: 'сколько нод бот держит купленными сам', chevron: false, cls: 'wrap', right: numStep(A.scale_max, 1, 20, 1, x => save({ scale_max: x })) }),
+    row({ title: 'Не тратить ниже', sub: 'останется на балансе после покупки', chevron: false, cls: 'wrap', right: numStep(A.scale_floor, 0, 100000, 100, x => save({ scale_floor: x }), x => x + ' ₽') }));
+  v.append(group('Автомасштабирование', sc, A.scale === 'off' ? 'Перегруженной ноде бот может докупить соседа в той же локации и с тем же тарифом — нагрузка разделится.'
+    : 'Докупает только для нод, купленных ботом, не чаще раза в сутки на ноду. Нужно «Следить за нагрузкой». ' + (A.scale === 'ask' ? 'В сообщении о перегрузе будет кнопка «Докупить ноду».' : 'О каждой покупке бот напишет.')));
   v.append(group('Дополнительно', [
     row({ icon: 'calendar', color: 'green', title: 'Аренда серверов', sub: 'сроки и ручное продление', onClick: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); } }),
     row({ icon: 'layers', color: 'violet', title: 'Обновление нод вручную', sub: 'выбранные или все, другая версия', onClick: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); } }),
@@ -1751,6 +1779,11 @@ function rentView(pid) {
   if (!R) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
   if (R.error) { v.append(UI.failed(R.error, reload, 'Аренда не загрузилась')); return v; }
   const date = s => s ? new Date(s).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : '—';
+  const F = R.forecast;
+  if (F && F.monthly_kop) v.append(group('Прогноз', [row({ icon: 'wallet', color: F.days == null ? 'green' : F.days <= 7 ? 'red' : 'amber', chevron: false, cls: 'wrap',
+    title: F.days == null ? 'Денег хватит больше чем на 4 месяца' : `Денег хватит на ~${F.days} дн.`,
+    sub: `${rubK(F.monthly_kop)} в месяц на продления` + (F.days != null ? ` · первым не продлится ${F.server}, не хватит ${rubK(F.need_kop)}` : ''),
+    status: F.days != null && F.days <= 7 ? ['пополните', 'bad'] : null })], 'Только серверы этой группы; предупреждение в Telegram считает весь аккаунт.'));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Серверы', h('span', { class: 'n' }, R.servers.length || '')), UI.stack(R.servers.length ? R.servers.map(x => row({ flag: x.flag || '·', title: mid(x.domain || x.name, 30),
     sub: `до ${date(x.expires_at)}` + (x.days_left != null ? `, осталось ${Math.max(0, Math.floor(x.days_left))} дн.` : '') + ' · ' + rubK(x.price_kop) + '/мес',
     tags: [x.risk ? [x.risk, 'bad'] : x.auto_renew === false ? ['автопродление выкл.', ''] : x.auto_renew ? ['автопродление', 'ok'] : null].filter(Boolean),

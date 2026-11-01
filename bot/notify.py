@@ -39,6 +39,8 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'task.removed':     ('tasks', 'Сервер удалён в Bobr Cloud', TG, False, False),
     'money.rent':       ('money', 'Скоро конец аренды', TG, True, False),
     'money.cleanup':    ('money', 'Можно убрать лишнее', TG, False, False),
+    'money.balance':    ('money', 'Прогноз: деньги скоро кончатся', TG, False, False),
+    'money.scale':      ('money', 'Автомасштабирование: докупка нод', TG, False, False),
     'security.login':   ('security', 'Вход по SSH на сервер бота', TG, True, True),
     'security.brute':   ('security', 'Подбор паролей к серверу бота', TG, False, True),
     'system.host':      ('system', 'Серверу бота не хватает ресурсов', TG, False, True),

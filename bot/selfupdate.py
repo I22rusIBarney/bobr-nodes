@@ -56,13 +56,58 @@ def due(c: dict, busy: bool, now: float | None = None) -> tuple[bool, str]:
     return True, t.strftime('%Y-%m-%d')
 
 
+CHANGELOG = os.path.join(os.path.dirname(__file__), 'changelog.json')
+
+
+def changelog() -> list[dict]:
+    """История версий, новые сверху. Каждый выпуск: version, date, title, items [{kind: new|better|fix, text}]."""
+    try:
+        return json.load(open(CHANGELOG, encoding='utf-8'))
+    except (OSError, ValueError):
+        return []
+
+
+def vkey(v: str) -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in str(v).split('.'))
+    except ValueError:
+        return (0,)
+
+
+def current() -> str:
+    log = changelog()
+    return log[0]['version'] if log else ''
+
+
 def version(data_dir: str) -> dict:
-    """Текущая версия: её записывает bnodes при каждом запуске (коммит, дата, описание)."""
+    """Текущая версия: номер — из истории изменений, коммит и дата сборки — из файла, который пишет bnodes."""
+    out = {'number': current()}
     try:
         sha, date, subject = open(os.path.join(data_dir, 'version.txt'), encoding='utf-8').read().rstrip('\n').split('\t', 2)
-        return {'sha': sha[:7], 'date': date, 'subject': subject}
+        out.update(sha=sha[:7], date=date, subject=subject)
     except (OSError, ValueError):
-        return {}
+        pass
+    return out
+
+
+KIND_MARK = {'new': '✨', 'better': '⚡️', 'fix': '🛠'}
+
+
+def whats_new(store) -> str | None:
+    """После обновления: что добавилось с прошлой виденной версии. Первый запуск с версиями — только текущая."""
+    import html
+    log, seen = changelog(), store.get('seen_version')
+    if not log or seen == log[0]['version']:
+        return None
+    store.set('seen_version', log[0]['version'])
+    fresh = [x for x in log if not seen or vkey(x['version']) > vkey(seen)][:5] if seen else log[:1]
+    if not fresh:
+        return None
+    lines = [f'🔄 <b>Бот обновился до версии {html.escape(log[0]["version"])}</b>' + (f' (была {html.escape(seen)})' if seen else '')]
+    for r in fresh:
+        lines.append(f'\n<b>{html.escape(r["version"])} — {html.escape(r["title"])}</b>')
+        lines += [f'{KIND_MARK.get(i.get("kind"), "•")} {html.escape(i["text"])}' for i in r.get('items', [])[:8]]
+    return '\n'.join(lines)
 
 
 def take_note(data_dir: str) -> str | None:
