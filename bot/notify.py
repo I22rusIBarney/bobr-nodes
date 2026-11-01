@@ -47,6 +47,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'system.host':      ('system', 'Серверу бота не хватает ресурсов', TG, False, True),
     'system.update':    ('system', 'Бот обновился', TG, False, True),
     'system.update_available': ('system', 'Вышла новая версия бота', TG, False, True),
+    'system.backup':    ('system', 'Резервная копия базы (файл)', TG, False, True),
     'report.new':       ('system', 'Ошибки и отзывы пользователей', TG, False, True),
     'report.reply':     ('tasks', 'Ответ на ваш отчёт о проблеме', TG, False, False),
     'survey.ask':       ('tasks', 'Опрос: всё ли работает после установки', TG, False, False),
@@ -126,9 +127,10 @@ class Notifier:
         return sorted(self.admins)
 
     async def emit(self, type_: str, text: str, prof: dict | None = None, markup=None, to: list[int] | None = None,
-                   tg: bool = True, now: float | None = None) -> list[int]:
+                   tg: bool = True, now: float | None = None, document=None, silent: bool = False) -> list[int]:
         """Записать событие в ленту и отправить в Telegram тем, у кого это включено. tg=False — только лента
-        (например, нода заглушена в мониторинге). Возвращает, кому ушло сообщение."""
+        (например, нода заглушена в мониторинге). document — путь к файлу: уйдёт файлом с текстом в подписи.
+        silent — без звука, зато и в тихие часы (резервная копия ночью). Возвращает, кому ушло сообщение."""
         if type_ not in TYPES:
             raise KeyError(type_)
         rcpt = list(dict.fromkeys(to if to is not None else self.recipients(prof, type_)))
@@ -144,14 +146,24 @@ class Notifier:
         crit = TYPES[type_][3]
         for uid in feed:
             p = prefs[uid]
-            if p['types'][type_] != TG or (not crit and self.quiet_now(p, now)):
+            if p['types'][type_] != TG or (not crit and not silent and self.quiet_now(p, now)):
                 continue
             try:
-                await self.bot.send_message(uid, text, parse_mode='HTML', reply_markup=markup, disable_web_page_preview=True)
+                if document is not None:
+                    await self.bot.send_document(uid, self.file(document), caption=text[:1024], parse_mode='HTML',
+                                                 reply_markup=markup, disable_notification=silent)
+                else:
+                    await self.bot.send_message(uid, text, parse_mode='HTML', reply_markup=markup,
+                                                disable_web_page_preview=True, disable_notification=silent)
                 sent.append(uid)
             except Exception as e:  # noqa: BLE001 — получатель мог не запускать бота или заблокировать его
                 log.info('notify %s %s: %s', type_, uid, e)
         return sent
+
+    @staticmethod
+    def file(path):
+        from aiogram.types import FSInputFile
+        return FSInputFile(str(path))
 
     # ───────── лента ─────────
     def feed(self, uid: int, cat: str = '', before: int | None = None, limit: int = 50) -> dict:

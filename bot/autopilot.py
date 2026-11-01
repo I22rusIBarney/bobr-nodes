@@ -46,6 +46,8 @@ HIGH_CYCLES = 3              # подряд высоких замеров до �
 REALERT = 12 * 3600
 RENT_DAYS = 3
 SCALE_COOLDOWN = 24 * 3600   # одна докупка на перегруженную ноду в сутки
+FILL_WARN, FILL_OK = 0.9, 0.75  # онлайн от 90% предела — «заполняется»; ниже 75% — «снова свободно»
+FILL_CYCLES = 5              # подряд замеров из панели (~15 минут), чтобы не дёргаться от пиков
 WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
 MARK = 'BNODES_LOAD'
 
@@ -64,7 +66,9 @@ def auto_cfg(prof: dict) -> dict:
             # автомасштабирование: off | ask | auto, сколько нод бот может держать докупленными сам,
             # и сколько рублей должно остаться на балансе после покупки
             'scale': a.get('scale') if a.get('scale') in ('off', 'ask', 'auto') else 'off',
-            'scale_max': int(a.get('scale_max', 2)), 'scale_floor': int(a.get('scale_floor', 500))}
+            'scale_max': int(a.get('scale_max', 2)), 'scale_floor': int(a.get('scale_floor', 500)),
+            # заполнение по онлайну: сколько пользователей одновременно нода тянет (0 — не следить)
+            'online_max': int(a.get('online_max', 0))}
 
 
 def clean_auto(raw: dict, cur: dict) -> dict:
@@ -88,7 +92,8 @@ def clean_auto(raw: dict, cur: dict) -> dict:
     if 'renew' in raw:
         a['renew'] = None if raw['renew'] is None else bool(raw['renew'])
     for k, lo, hi, what in (('bal_days', 0, 60, 'Предупреждать за: 0–60 дней'), ('scale_max', 1, 20, 'Лимит нод: от 1 до 20'),
-                            ('scale_floor', 0, 1_000_000, 'Порог баланса: от 0 ₽')):
+                            ('scale_floor', 0, 1_000_000, 'Порог баланса: от 0 ₽'),
+                            ('online_max', 0, 100_000, 'Онлайн на ноду: от 0 до 100 000')):
         if k in raw:
             v = raw[k]
             if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
@@ -165,7 +170,10 @@ HIST_KEEP = 24 * 3600
 def load_hist(prev: list | None, s: dict, now: float, keep: int = 200) -> list[dict]:
     """История замеров ноды за сутки для графика: процессор, память, трафик."""
     pts = [x for x in (prev or []) if isinstance(x, dict) and x.get('t', 0) > now - HIST_KEEP]
-    pts.append({'t': int(now), **{k: s.get(k) for k in ('cpu', 'mem', 'rx', 'tx')}})
+    pt = {'t': int(now), **{k: s.get(k) for k in ('cpu', 'mem', 'rx', 'tx')}}
+    if s.get('online') is not None:
+        pt['online'] = s['online']
+    pts.append(pt)
     return pts[-keep:]
 
 
@@ -174,9 +182,11 @@ def panel_sample(n: dict) -> dict | None:
     Процессор — средняя загрузка за минуту на ядро, в процентах (точнее панель не отдаёт). Нет данных — None."""
     sysd = n.get('system') if isinstance(n.get('system'), dict) else {}
     info, st = sysd.get('info') or {}, sysd.get('stats') or {}
-    if not st:
-        return None
     out: dict = {}
+    if isinstance(n.get('usersOnline'), int):
+        out['online'] = n['usersOnline']
+    if not st:
+        return out or None
     la, cpus = st.get('loadAvg') or [], info.get('cpus') or 0
     if la and isinstance(la[0], (int, float)) and cpus:
         out['cpu'] = min(100, round(100 * la[0] / cpus))
@@ -251,6 +261,7 @@ class Autopilot:
         self.feedback = None  # опросы после установки (задаётся в main)
         self.data_dir = None  # папка данных: версия бота (задаётся в main)
         self.billing = None   # подписка пользователей (задаётся в main)
+        self.backup = None    # ежедневная резервная копия (задаётся в main)
         self._bill_at = 0.0
 
     # ── служебное ──
@@ -320,6 +331,11 @@ class Autopilot:
                     await self.billing.tick(now)
                 except Exception:  # noqa: BLE001
                     log.exception('billing')
+            if self.backup is not None:
+                try:
+                    await self.backup.tick(now)
+                except Exception:  # noqa: BLE001
+                    log.exception('backup')
             if self.feedback is not None:
                 try:
                     await self.feedback.surveys(now)
@@ -497,7 +513,7 @@ class Autopilot:
         return {'cat': cat, 'loc': loc, 'L': L, 'idx': idx, 'custom': custom, 'price': price,
                 'label': f'{L["flag"]} {L["name"]}, {svc.spec_text(q["offer"])}'}
 
-    async def do_scale(self, prof: dict, n: dict, bd: dict, plan: dict) -> str:
+    async def do_scale(self, prof: dict, n: dict, bd: dict, plan: dict, by: int = 0, who: str = '') -> str:
         """Купить и поставить ноду по плану: как перегруженная — те же сквады, хосты и дополнения."""
         doms = await svc.auto_domains(self.store, prof, plan['loc'], 1)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
@@ -506,6 +522,9 @@ class Autopilot:
                                     plan['idx'], '1m', doms, squads=bd.get('squads'), host=bd.get('host'), extras=extras,
                                     custom=plan['custom'], note={'autoscale': True, 'scale_for': n['uuid']})
         self.store.set(f'ap:scaled:{prof["id"]}:{n["uuid"]}', str(time.time()))
+        from . import audit
+        audit.log(self.store, by, 'scale', 'Докупил ноду (кнопка в сообщении о нагрузке)' if by else 'Автомасштабирование: докупил ноду',
+                  prof['id'], f'{doms[0]} — {plan["label"]}, {plan["price"] // 100} ₽/мес, рядом с {n["name"]}', who=who)
         text = (f'➕ <b>Докупаю ноду</b> · {html.escape(prof["name"])}\n<code>{html.escape(doms[0])}</code> — '
                 f'{html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес, рядом с перегруженной '
                 f'<b>{html.escape(n["name"])}</b>. Задача #{ids[0]}.')
@@ -538,7 +557,7 @@ class Autopilot:
         return (f'\n\n⚖️ Могу докупить ещё одну: {html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес.',
                 InlineKeyboardMarkup(inline_keyboard=rows))
 
-    async def scale_confirm(self, tok: str) -> str:
+    async def scale_confirm(self, tok: str, by: int = 0, who: str = '') -> str:
         """Кнопка «Докупить ноду»: проверить всё заново (баланс, лимит могли измениться) и купить."""
         ask = self.get(f'ap:scaleask:{tok}')
         if not ask or time.time() - ask.get('at', 0) > 24 * 3600:
@@ -553,7 +572,7 @@ class Autopilot:
             plan = await self.plan_scale(prof, n, bd)
             if isinstance(plan, str):
                 return 'Не докупаю: ' + plan
-            return f'Покупаю {await self.do_scale(prof, n, bd, plan)} — прогресс в «Задачах»'
+            return f'Покупаю {await self.do_scale(prof, n, bd, plan, by, who)} — прогресс в «Задачах»'
         except (BcloudError, ValueError, engine.StepError) as e:
             return f'Не получилось: {e}'
 
@@ -584,6 +603,60 @@ class Autopilot:
                 key = f'ap:pload:{prof["id"]}:{n["uuid"]}'
                 prev = self.get(key)
                 self.put(key, {**smp, 'at': t, 'hist': load_hist(prev.get('hist'), smp, t, keep=600)})
+                if smp.get('online') is not None and not n.get('isDisabled'):
+                    try:
+                        await self.node_fill(prof, n, smp['online'], t)
+                    except Exception:  # noqa: BLE001 — одна нода не должна остановить остальные
+                        log.exception('node fill %s', n.get('uuid'))
+
+    # ───────── заполнение по онлайну ─────────
+    async def node_fill(self, prof: dict, n: dict, online: int, now: float) -> None:
+        """Нода заполняется: онлайн держится от 90% предела группы ~15 минут — сообщение (и докупка, если включена)
+        заранее, пока пользователи ещё не жалуются. Спал ниже 75% — «снова свободно»."""
+        cap = auto_cfg(prof)['online_max']
+        key = f'ap:fill:{prof["id"]}:{n["uuid"]}'
+        st = self.get(key)
+        if cap <= 0:
+            if st:
+                self.put(key, {})
+            return
+        ratio = online / cap
+        st['high'] = int(st.get('high') or 0) + 1 if ratio >= FILL_WARN else 0
+        name, g = html.escape(n.get('name') or n.get('address') or ''), html.escape(prof.get('name', ''))
+        if st['high'] >= FILL_CYCLES and now - float(st.get('alerted') or 0) >= REALERT:
+            st['alerted'], st['told'] = now, True
+            self.put(key, st)
+            bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(n.get('address')) or {}
+            extra, markup = await self.scale_offer(prof, n, bd)
+            full = ratio >= 1
+            await self.say(prof, f'👥 <b>{name}</b> · {g}\n'
+                                 f'Онлайн {online} из {cap} ({round(ratio * 100)}%) — '
+                                 + ('нода заполнена: новым пользователям может не хватать скорости.' if full else
+                                    'нода заполняется, ещё немного — и пользователям станет тесно.')
+                                 + ' Поставьте ещё одну ноду в этой стране или поднимите предел в «Автоматизации», '
+                                   'если нода тянет больше.' + extra, markup or self.button(), type_='node.load')
+        elif st.get('told') and ratio < FILL_OK:
+            st['told'], st['alerted'] = False, 0
+            await self.say(prof, f'✅ <b>{name}</b> · {g}\nна ноде снова свободно: онлайн {online} из {cap}.', type_='node.load')
+        st['online'] = online
+        self.put(key, st)
+
+    def online_peaks(self, pid: int, nodes: list[dict], now: float | None = None) -> list[dict]:
+        """Онлайн нод группы сейчас и пик за сутки — подсказка, какой предел поставить."""
+        now = now or time.time()
+        out = []
+        for n in nodes:
+            if not isinstance(n, dict) or not n.get('uuid'):
+                continue
+            hist = self.get(f'ap:pload:{pid}:{n["uuid"]}').get('hist') or []
+            vals = [x['online'] for x in hist if isinstance(x.get('online'), int) and x.get('t', 0) > now - HIST_KEEP]
+            cur = n.get('usersOnline')
+            if isinstance(cur, int):
+                vals.append(cur)
+            if vals:
+                out.append({'uuid': n['uuid'], 'name': n.get('name') or n.get('address') or '', 'country': n.get('countryCode') or '',
+                            'now': cur if isinstance(cur, int) else None, 'peak': max(vals)})
+        return sorted(out, key=lambda x: -x['peak'])
 
     # ───────── сторож панели ─────────
     async def panel_down(self, prof: dict, err: str, now: float) -> None:

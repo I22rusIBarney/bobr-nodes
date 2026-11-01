@@ -406,7 +406,108 @@ function serviceRows() {
     row({ icon: 'sparkle', color: 'violet', title: 'Gemini', status: conn(ok('gemini_key'), ['Не задан', 'quiet']), onClick: () => UI.nav.push(geminiView) }),
     row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) }),
     row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } }),
+    row({ icon: 'disc', color: 'blue', title: 'Резервные копии', sub: 'база каждый день — вам в Telegram',
+      status: !ST.backup ? null : !ST.backup.on ? ['Выключены', 'bad'] : !ST.backup.key_saved ? ['Сохраните пароль', 'warn'] : ST.backup.error ? ['Ошибка', 'bad'] : ['В норме', 'ok'],
+      onClick: () => { BK = null; UI.nav.push(backupView); } }),
     row({ icon: 'upload', color: 'violet', title: 'Переезд на другой сервер', sub: 'бот, база и настройки — на новый VPS', onClick: () => { MIG = null; UI.nav.push(migrateView); } })];
+}
+// ───────── резервные копии ─────────
+let BK = null, BK_KEY = null;
+const sizeText = n => n >= 1048576 ? (n / 1048576).toFixed(1).replace('.', ',') + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ';
+function backupView() {
+  const v = h('div', { class: 'backup-page' }, ...pageHead('Резервные копии', { sub: 'зашифрованная копия базы — каждый день в Telegram' }));
+  const load = () => api('backup').then(r => { BK = r; }).catch(e => { BK = { error: e.message }; }).then(() => { if (document.querySelector('#root .backup-page')) UI.nav.refresh(); });
+  if (BK === null) { BK = { loading: true }; load(); }
+  if (BK.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (BK.error && BK.on === undefined) { v.append(UI.failed(BK.error, () => { BK = null; UI.nav.refresh(); })); return v; }
+  const B = BK;
+  const save = async patch => {
+    const r = await UI.run(() => api('backup', 'POST', { ...patch, tz: tzNow() }));
+    if (r) { BK = r; if (ST.backup) Object.assign(ST.backup, { on: r.on, key_saved: r.key_saved, error: r.last_error }); UI.haptic('select'); UI.nav.refresh(); }
+  };
+  // пароль восстановления — главное: без него копия бесполезна
+  const keyRows = [];
+  if (BK_KEY) {
+    const parts = BK_KEY.split('-');
+    keyRows.push(h('div', { class: 'bk-key code', 'aria-label': 'Пароль восстановления' }, h('span', {}, parts.slice(0, 3).join('-') + (parts.length > 3 ? '-' : '')), h('span', {}, parts.slice(3).join('-'))),
+      h('div', { class: 'bk-key-acts' }, h('button', { class: 'btn secondary small', type: 'button', onclick: () => UI.copy(BK_KEY, 'Пароль') }, 'Скопировать'),
+        B.key_saved ? h('button', { class: 'btn secondary small', type: 'button', onclick: () => { BK_KEY = null; UI.nav.refresh(); } }, 'Скрыть')
+          : h('button', { class: 'btn small', type: 'button', onclick: async () => { await save({ key_saved: true }); BK_KEY = null; UI.nav.refresh(); } }, 'Я сохранил')));
+  } else {
+    keyRows.push(row({ icon: 'key', color: B.key_saved ? 'green' : 'amber', title: 'Пароль восстановления', cls: 'wrap',
+      sub: B.key_saved ? 'сохранён у вас' : 'ещё не сохранён — без него копию не открыть', status: B.key_saved ? null : ['важно', 'warn'],
+      onClick: async () => { const r = await UI.run(() => api('backup/key')); if (r) { BK_KEY = r.key; UI.nav.refresh(); } } }));
+  }
+  v.append(group('Пароль', keyRows, 'Сохраните в менеджер паролей или запишите. В Telegram он не отправляется: тот, у кого окажется файл копии, без пароля её не откроет.'));
+  if (!B.key_saved && !BK_KEY) v.append(h('div', { class: 'notice' }, h('b', {}, 'Сначала сохраните пароль. '), 'Нажмите «Пароль восстановления» — без него копии бесполезны.'));
+  // расписание
+  const rows = [row({ icon: 'disc', color: 'blue', title: 'Каждый день', sub: 'файл придёт без звука', chevron: false, right: UI.toggle(B.on, on => save({ on }), 'Резервные копии') })];
+  if (B.on) rows.push(row({ title: 'Время', sub: 'по вашему времени', chevron: false, right: hourStep(B.hour, x => save({ hour: x })) }),
+    row({ title: 'Хранить на сервере', sub: 'последние копии — на случай «случайно удалил»', chevron: false, cls: 'wrap', right: numStep(B.keep, 1, 30, 1, x => save({ keep: x })) }));
+  const last = B.last_at ? `Последняя копия — ${repAt(B.last_at)}` + (B.last_size ? `, ${sizeText(B.last_size)}` : '') + '.' : 'Копий ещё не было.';
+  v.append(group('Расписание', rows, last));
+  if (B.last_error) v.append(h('div', { class: 'notice bad' }, h('b', {}, 'Последняя копия: '), B.last_error + '.'));
+  const now = h('button', { class: 'btn secondary', type: 'button' }, 'Сделать копию сейчас');
+  now.onclick = UI.busy(now, async () => { const r = await UI.run(() => api('backup/now', 'POST')); if (r) { BK = r; UI.toast(r.result && r.result.ok ? 'Копия отправлена вам в Telegram' : (r.result && r.result.error) || 'Готово', !(r.result && r.result.ok)); UI.nav.refresh(); } });
+  v.append(h('div', { class: 'cta' }, now));
+  v.append(group('Как восстановить', [h('ol', { class: 'bk-steps' },
+    h('li', {}, 'Поставьте бота на новый сервер обычной установкой — тот же токен бота и ваш Telegram ID.'),
+    h('li', {}, 'Перешлите боту файл последней копии (.bnb) из этого чата.'),
+    h('li', {}, 'Пришлите пароль — бот покажет, что в копии, и после «Восстановить» перезапустится с ней.'))],
+    'Восстанавливается всё: группы, ноды, пользователи и подписки, задачи, SSH-ключи, настройки. Если домен бота другой — поправьте адрес в настройках.'));
+  const regen = h('button', { class: 'btn plain danger', type: 'button' }, 'Новый пароль');
+  regen.onclick = UI.busy(regen, async () => {
+    if (!await UI.ask({ title: 'Сменить пароль?', message: 'Новые копии будут под новым паролем. Старые копии откроются только старым — сохраните оба, пока старые нужны.', buttons: [{ id: 'y', text: 'Сменить', type: 'destructive' }] })) return;
+    const r = await UI.run(() => api('backup/key', 'POST'));
+    if (r) { BK_KEY = r.key; BK = r; UI.nav.refresh(); }
+  });
+  v.append(h('div', { class: 'cta' }, regen));
+  return v;
+}
+// ───────── журнал действий ─────────
+let AUD = null;
+const AUD_F = { uid: null, q: '' };
+const audDay = ts => new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+const audTime = ts => new Date(ts * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+const AUD_ICON = [[/^(node|relay)\./, 'server', 'blue'], [/^group/, 'layers', 'violet'], [/^(billing|wallet|rent|invite|user)/, 'wallet', 'green'], [/^(deploy|scale)/, 'plusCircle', 'teal'],
+  [/^(server|script)\.delete|delete$/, 'trash', 'red'], [/^(backup|migrate|update)/, 'disc', 'blue'], [/^(settings|theme|auto|monitor|plugins)/, 'sliders', 'gray']];
+const audIcon = a => { const x = AUD_ICON.find(([rx]) => rx.test(a)) || [null, 'list', 'gray']; return [x[1], x[2]]; };
+function auditView() {
+  const v = h('div', { class: 'audit-page' }, ...pageHead('Журнал действий', { sub: 'кто, когда и что поменял' }));
+  const qs = before => 'audit?' + [AUD_F.uid != null ? 'uid=' + AUD_F.uid : '', AUD_F.q ? 'q=' + encodeURIComponent(AUD_F.q) : '', before ? 'before=' + before : ''].filter(Boolean).join('&');
+  const load = () => api(qs()).then(r => { AUD = r; }).catch(e => { AUD = { error: e.message }; }).then(() => { if (document.querySelector('#root .audit-page')) UI.nav.refresh(); });
+  if (AUD === null) { AUD = { loading: true }; load(); }
+  // фильтр: все / сам бот / я / пользователи
+  const ppl = (AUD && AUD.people) || [];
+  const opts = [{ value: null, label: 'Все' }, { value: ST.me_id, label: 'Я' }, { value: 0, label: 'Бот' }];
+  const seg = UI.segmented(opts, opts.some(o => o.value === AUD_F.uid) ? AUD_F.uid : null, x => { AUD_F.uid = x; AUD = null; UI.nav.refresh(); }, 'fill');
+  const find = h('input', { type: 'search', placeholder: 'Поиск: нода, домен, пользователь…', value: AUD_F.q, enterkeyhint: 'search' });
+  let t = 0;
+  find.oninput = () => { clearTimeout(t); t = setTimeout(() => { AUD_F.q = find.value.trim(); AUD = null; UI.nav.refresh(); setTimeout(() => { const f = document.querySelector('#root .audit-page input[type=search]'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }, 0); }, 400); };
+  const filt = [h('div', { class: 'seg-row' }, seg), h('label', { class: 'field stack' }, find)];
+  if (ppl.length) filt.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Пользователи'),
+    UI.chips(ppl.slice(0, 12).map(p => ({ value: p.id, label: p.name })), ppl.some(p => p.id === AUD_F.uid) ? AUD_F.uid : undefined, x => { AUD_F.uid = x; AUD = null; UI.nav.refresh(); })));
+  v.append(group(null, filt));
+  if (AUD.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (AUD.error) { v.append(UI.failed(AUD.error, () => { AUD = null; UI.nav.refresh(); })); return v; }
+  if (!AUD.items.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'Пусто'), AUD_F.uid != null || AUD_F.q ? 'По этому фильтру действий нет.' : 'Здесь появятся действия в панели и в боте.')); return v; }
+  const byDay = new Map();
+  AUD.items.forEach(x => { const d = audDay(x.ts); if (!byDay.has(d)) byDay.set(d, []); byDay.get(d).push(x); });
+  byDay.forEach((items, d) => v.append(group(d, items.map(x => {
+    const [ic, col] = audIcon(x.action);
+    return row({ lead: x.uid ? UI.avatar({ first_name: x.who, id: x.uid }, 36, ava(x.uid)) : UI.tile(ic, col, 'lg'), title: x.label, cls: 'wrap', chevron: false,
+      sub: [audTime(x.ts), x.who, x.group, x.detail].filter(Boolean).join(' · ') });
+  }))));
+  if (AUD.more) {
+    const more = h('button', { class: 'btn secondary', type: 'button' }, 'Показать раньше');
+    more.onclick = UI.busy(more, async () => {
+      const last = AUD.items[AUD.items.length - 1].id;
+      const r = await UI.run(() => api(qs(last)));
+      if (r) { AUD.items = AUD.items.concat(r.items); AUD.more = r.more; UI.nav.refresh(); }
+    });
+    v.append(h('div', { class: 'cta' }, more));
+  }
+  return v;
 }
 // ───────── обучение: экскурсия по разделам с подсветкой ─────────
 const TOUR = { on: false, offered: false, i: 0, steps: [], ui: null, timer: 0, gen: 0 };
@@ -2155,6 +2256,14 @@ function autoView(pid) {
   v.append(group('Обновление', upd, `Устаревшие ноды — до последней версии из ветки панели. Новая версия не вышла на связь — бот вернёт прежнюю и остановится. ${lastText}`));
   v.append(group('Нагрузка', [row({ icon: 'cpu', color: 'blue', title: 'Следить за нагрузкой', cls: 'wrap', sub: 'процессор, память, диск, трафик — раз в 15 минут', chevron: false, right: UI.toggle(A.load, on => save({ load: on }), 'Нагрузка') })],
     'Нода упирается ~45 минут (процессор от 85%, память или диск от 90%) — бот напишет и посоветует тариф или ещё одну ноду. Нужен доступ по SSH.'));
+  // заполнение по онлайну: предел на ноду и подсказка — пик за сутки
+  const on = [row({ icon: 'users', color: 'violet', title: 'Онлайн на ноду', cls: 'wrap', sub: A.online_max ? 'сообщу от 90%' : 'не следить', chevron: false,
+    right: numStep(A.online_max, 0, 100000, A.online_max >= 500 ? 100 : 50, x => save({ online_max: x }), x => x ? String(x) : 'выкл.') })];
+  (A.online || []).slice(0, 5).forEach(x => on.push(row({ title: (x.country ? flagOf(x.country) + ' ' : '') + x.name, chevron: false, cls: 'wrap',
+    sub: `сейчас ${x.now ?? '—'} · пик за сутки ${x.peak}`, status: A.online_max && x.peak >= A.online_max * 0.9 ? [x.peak >= A.online_max ? 'полна' : 'почти полна', x.peak >= A.online_max ? 'bad' : 'warn'] : null })));
+  v.append(group('Заполнение по онлайну', on, A.online_max
+    ? 'Онлайн держится от 90% предела ~15 минут — бот напишет заранее, пока пользователям не тесно. С автомасштабированием — предложит или сам докупит ноду рядом.'
+    : 'Сколько пользователей одновременно тянет одна нода — зависит от тарифа и трафика. Поставьте предел чуть выше обычного пика: бот предупредит, когда нода начнёт заполняться.'));
   v.append(group('Аренда серверов', [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Автопродление в Bobr Cloud'),
     UI.segmented([{ value: null, label: 'Не трогать' }, { value: true, label: 'Включать всем' }], A.renew === true ? true : null, x => save({ renew: x }), 'fill'))],
     'Раз в 6 часов бот проверяет аренду и пишет, если сервер кончится через 3 дня и сам не продлится.'));
@@ -2169,7 +2278,7 @@ function autoView(pid) {
     row({ title: 'Лимит докупленных нод', sub: 'сколько нод бот держит купленными сам', chevron: false, cls: 'wrap', right: numStep(A.scale_max, 1, 20, 1, x => save({ scale_max: x })) }),
     row({ title: 'Не тратить ниже', sub: 'останется на балансе после покупки', chevron: false, cls: 'wrap', right: numStep(A.scale_floor, 0, 100000, 100, x => save({ scale_floor: x }), x => x + ' ₽') }));
   v.append(group('Автомасштабирование', sc, A.scale === 'off' ? 'Перегруженной ноде бот может докупить соседа в той же локации и с тем же тарифом — нагрузка разделится.'
-    : 'Докупает только для нод, купленных ботом, не чаще раза в сутки на ноду. Нужно «Следить за нагрузкой». ' + (A.scale === 'ask' ? 'В сообщении о перегрузе будет кнопка «Докупить ноду».' : 'О каждой покупке бот напишет.')));
+    : 'Докупает только для нод, купленных ботом, не чаще раза в сутки на ноду: когда упирается процессор или память («Следить за нагрузкой») или нода заполняется по онлайну. ' + (A.scale === 'ask' ? 'В сообщении о перегрузе будет кнопка «Докупить ноду».' : 'О каждой покупке бот напишет.')));
   v.append(group('Дополнительно', [
     row({ icon: 'calendar', color: 'green', title: 'Аренда серверов', sub: 'сроки и ручное продление', onClick: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); } }),
     row({ icon: 'layers', color: 'violet', title: 'Обновление нод вручную', sub: 'выбранные или все, другая версия', onClick: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); } }),
@@ -3110,7 +3219,8 @@ function settingsTab() {
   if (!admin) return v;
   v.append(group('Доступ', [row({ icon: 'users', color: 'green', title: 'Пользователи', sub: 'приглашения и доступ к группам', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }),
     row({ icon: 'wallet', color: 'green', title: 'Тариф и оплата', sub: 'подписка для приглашённых', status: BILL_ON() ? ['включено', 'ok'] : ['бесплатно', ''], onClick: () => { TARIFF = null; UI.nav.push(tariffView); } }),
-    row({ icon: 'chart', color: 'violet', title: 'Отзывы и ошибки', sub: 'отчёты, опросы, статистика установок', status: ST.reports_open ? ['новых: ' + ST.reports_open, 'warn'] : null, onClick: () => { REP = null; UI.nav.push(reportsView); } })]));
+    row({ icon: 'chart', color: 'violet', title: 'Отзывы и ошибки', sub: 'отчёты, опросы, статистика установок', status: ST.reports_open ? ['новых: ' + ST.reports_open, 'warn'] : null, onClick: () => { REP = null; UI.nav.push(reportsView); } }),
+    row({ icon: 'list', color: 'gray', title: 'Журнал действий', sub: 'кто, когда и что поменял', onClick: () => { AUD = null; UI.nav.push(auditView); } })]));
   v.append(group('Сервер бота', serviceRows()));
   return v;
 }

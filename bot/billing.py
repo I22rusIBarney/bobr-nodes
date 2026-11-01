@@ -150,6 +150,9 @@ class Billing:
         u.pop('reminded', None)
         u.pop('paused_told', None)
         self.store.save_user(u)
+        if how == 'auto':
+            from . import audit
+            audit.log(self.store, 0, 'billing.auto', 'Автопродление подписки', detail=f'пользователь {uid}, {amount // 100} ₽')
         return u
 
     async def tick(self, now: float | None = None) -> None:
@@ -199,6 +202,8 @@ class Billing:
             u = self.store.user(uid)
             u['paused_told'] = until
             self.store.save_user(u)
+            from . import audit
+            audit.log(self.store, 0, 'billing.pause', 'Доступ пользователя на паузе', detail=f'пользователь {uid}: {why}')
             await self.say(uid, f'⏸ <b>Доступ к BobrNet на паузе</b>: {html.escape(why)}.\n\n'
                                 'Ваши ноды работают как прежде, но бот пока ими не управляет: нет мониторинга, починки и '
                                 f'уведомлений. Продлите за {amount // 100} ₽ — всё вернётся сразу.', self.pay_kb(amount))
