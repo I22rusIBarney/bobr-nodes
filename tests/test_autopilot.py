@@ -32,7 +32,8 @@ def test_due_local_hour_and_weekday():
 
 def test_clean_auto():
     a = ap.clean_auto({'update': True, 'hour': 4, 'weekday': None, 'tz': 420, 'load': False, 'renew': True}, {})
-    assert a == {'update': True, 'hour': 4, 'weekday': None, 'tz': 420, 'load': False, 'renew': True}
+    assert a == {'update': True, 'hour': 4, 'weekday': None, 'tz': 420, 'load': False, 'renew': True,
+                 'bal_days': 7, 'scale': 'off', 'scale_max': 2, 'scale_floor': 500}
     for bad in ({'hour': 24}, {'weekday': 7}, {'tz': 9999}, {'hour': True}):
         with pytest.raises(ValueError):
             ap.clean_auto(bad, {})
