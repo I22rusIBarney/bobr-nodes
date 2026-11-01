@@ -404,7 +404,8 @@ function serviceRows() {
     row({ icon: 'globe', color: 'amber', title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ icon: 'sparkle', color: 'violet', title: 'Gemini', status: conn(ok('gemini_key'), ['Не задан', 'quiet']), onClick: () => UI.nav.push(geminiView) }),
     row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) }),
-    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } })];
+    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } }),
+    row({ icon: 'upload', color: 'violet', title: 'Переезд на другой сервер', sub: 'бот, база и настройки — на новый VPS', onClick: () => { MIG = null; UI.nav.push(migrateView); } })];
 }
 // ───────── обучение: экскурсия по разделам с подсветкой ─────────
 const TOUR = { on: false, offered: false, i: 0, steps: [], ui: null, timer: 0, gen: 0 };
@@ -516,6 +517,73 @@ function tourPlace() {
   Object.assign(hole.style, { left: r.left - pad + 'px', top: r.top - pad + 'px', width: r.width + pad * 2 + 'px', height: r.height + pad * 2 + 'px' });
   hole.classList.add('show');
   card.className = 'tour-card ' + (r.top + r.height / 2 > vh / 2 ? 'top' : 'bottom');
+}
+// ───────── переезд бота на новый VPS ─────────
+let MIG = null;
+const MIGF = { ip: '', port: '22', password: '', key_text: '', showKey: false, bcloud_url: '', dns: true };
+function migrateView() {
+  const v = h('div', { class: 'mig-page' }, ...pageHead('Переезд', { sub: 'бот, база и все настройки — на новый сервер' }));
+  const load = () => api('migrate').then(r => { MIG = r; }).catch(e => { MIG = { error: e.message }; }).then(() => { if (document.querySelector('#root .mig-page')) UI.nav.refresh(); });
+  if (MIG === null) { MIG = { loading: true }; load(); }
+  if (MIG.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (MIG.error && !MIG.status) { v.append(UI.failed(MIG.error, () => { MIG = null; UI.nav.refresh(); })); return v; }
+  const M = MIG;
+  // идёт или закончился: ход по этапам и журнал
+  if (M.status === 'running' || M.status === 'done' || (M.status === 'failed' && M.log.length)) {
+    if (M.status === 'running') poll(() => { if (document.querySelector('#root .mig-page')) load(); }, 2000);
+    const cur = M.stages.findIndex(x => x.code === M.stage);
+    v.append(group('Ход переезда', M.stages.map((x, i) => {
+      const st = M.status === 'done' || i < cur ? 'ok' : i === cur ? (M.status === 'failed' ? 'bad' : 'run') : '';
+      return row({ icon: st === 'ok' ? 'check' : st === 'bad' ? 'close' : st === 'run' ? 'restart' : 'clock', color: st === 'ok' ? 'green' : st === 'bad' ? 'red' : st === 'run' ? 'blue' : 'gray',
+        title: x.title, chevron: false, cls: st ? '' : 'is-dim', status: st === 'run' ? ['идёт', 'run'] : null });
+    })));
+    if (M.status === 'done') v.append(h('div', { class: 'notice' }, h('b', {}, 'Готово. '), `Бот работает на ${M.target.ip}. Через минуту закройте и откройте панель заново — она откроется уже с нового сервера. Старый сервер остановлен, данные на нём остались: удалите его, когда убедитесь, что всё работает.`));
+    if (M.status === 'failed') {
+      v.append(h('div', { class: 'notice bad' }, h('b', {}, 'Переезд не удался. '), M.error + '. Бот остался на этом сервере и работает как раньше.'));
+      const again = h('button', { class: 'btn secondary', type: 'button', onclick: () => { MIG = { ...M, status: 'idle', log: [] }; UI.nav.refresh(); } }, 'Попробовать снова');
+      v.append(h('div', { class: 'cta' }, again));
+    }
+    const pre = h('pre', { class: 'code log' }, M.log.slice(-14).join('\n'));
+    v.append(group('Журнал', [pre]));
+    return v;
+  }
+  // форма нового сервера
+  const F = MIGF;
+  const field = (label, input) => h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, label), input);
+  const pw = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'пароль root', class: 'code' }); pw.value = F.password; pw.oninput = () => { F.password = pw.value; };
+  const rows = [field('IP нового сервера', textIn(F.ip, '203.0.113.10', x => { F.ip = x.trim(); }, true)),
+    field('SSH-порт', textIn(F.port, '22', x => { F.port = x.trim(); }, true)), field('Пароль root', pw)];
+  rows.push(row({ title: 'Вход по SSH-ключу', sub: 'если на сервере вход только по ключу', chevron: false, right: UI.toggle(F.showKey, on => { F.showKey = on; UI.nav.refresh(); }, 'Ключ') }));
+  if (F.showKey) rows.push(field('Закрытый ключ', areaIn(F.key_text, 4, x => { F.key_text = x; })));
+  v.append(group('Новый сервер', rows, 'Чистый VPS с Ubuntu или Debian, вход root. Пароль нужен один раз — бот добавит свой ключ и дальше работает по нему; в базу пароль не сохраняется.'));
+  if (M.bcloud_internal) v.append(group('Bobr Cloud', [field('Публичный адрес Bobr Cloud', textIn(F.bcloud_url, 'https://cloud.example.com', x => { F.bcloud_url = x.trim(); }, true))],
+    'Сейчас бот стоит на одном сервере с Bobr Cloud и ходит к нему напрямую. С нового сервера он будет ходить по этому адресу.'));
+  v.append(group('Домен', [row({ icon: 'globe', color: 'amber', title: M.domain || 'домен панели', cls: 'wrap', chevron: false,
+    sub: M.cf ? 'A-запись в Cloudflare переключится на новый IP' : 'Cloudflare не подключён — A-запись поменяете сами после переезда',
+    right: M.cf ? UI.toggle(F.dns, on => { F.dns = on; }, 'DNS') : null })]));
+  const body = () => ({ ip: F.ip, port: Number(F.port) || 22, password: F.password, key_text: F.showKey ? F.key_text : '', bcloud_url: F.bcloud_url, dns: F.dns });
+  // итог проверки
+  if (M.facts && M.facts.OS && M.target && M.target.ip === F.ip) {
+    const f = M.facts, info = [`${f.OS} ${f.VER || ''}`.trim(), f.MEM ? `${Math.round(f.MEM / 102.4) / 10} ГБ памяти` : '', f.DISK ? `${f.DISK} ГБ свободно` : '', f.DOCKER ? 'Docker есть' : 'Docker поставлю'].filter(Boolean).join(' · ');
+    const items = [row({ icon: M.bad.length ? 'alert' : 'checkCircle', color: M.bad.length ? 'red' : 'green', title: M.bad.length ? 'Сюда переехать нельзя' : 'Сервер подходит', sub: info, cls: 'wrap', chevron: false })];
+    M.bad.forEach(x => items.push(row({ icon: 'close', color: 'red', title: x, cls: 'wrap', chevron: false })));
+    M.warn.forEach(x => items.push(row({ icon: 'info', color: 'amber', title: x, cls: 'wrap', chevron: false })));
+    v.append(group('Проверка', items));
+  }
+  const chk = h('button', { class: 'btn secondary', type: 'button' }, 'Проверить сервер');
+  chk.onclick = UI.busy(chk, async () => { const r = await UI.run(() => api('migrate/check', 'POST', body())); if (r) { MIG = r; UI.nav.refresh(); } });
+  const ready = M.status === 'ready' && M.target && M.target.ip === F.ip && !M.bad.length;
+  const go = h('button', { class: 'btn', type: 'button', disabled: !ready || M.busy_jobs > 0 }, 'Переехать');
+  go.onclick = UI.busy(go, async () => {
+    if (!await UI.ask({ title: 'Переехать на ' + F.ip + '?', message: 'Бот остановится на 2–5 минут: база скопируется, бот запустится на новом сервере' + (M.cf && F.dns ? ', домен переключится на новый IP' : '') + '. Если что-то пойдёт не так, всё вернётся как было.', buttons: [{ id: 'y', text: 'Переехать' }] })) return;
+    const r = await UI.run(() => api('migrate/start', 'POST', body()));
+    if (r) { MIG = r; F.password = ''; F.key_text = ''; UI.nav.refresh(); }
+  });
+  v.append(h('div', { class: 'cta', style: 'display:grid;gap:8px' }, chk, go));
+  v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s5)' },
+    M.busy_jobs ? `Идут задачи (${M.busy_jobs}) — переезд станет доступен, когда они закончатся. ` : '',
+    'Переносится всё: база (группы, ноды, задачи, пользователи, история), SSH-ключи бота, журналы, оформление и настройки. Новые ноды и чекеры трогать не нужно — ключ бота тот же.'));
+  return v;
 }
 // ───────── история версий ─────────
 const KIND = { new: ['sparkle', 'violet', 'Новое'], better: ['zap', 'amber', 'Лучше'], fix: ['check', 'green', 'Исправлено'] };

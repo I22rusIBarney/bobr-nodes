@@ -59,6 +59,7 @@ deploy() {
   fi
   # версия для админки бота: коммит, дата, описание
   mkdir -p data && git log -1 --format='%H%x09%cd%x09%s' --date=format:'%d.%m.%Y %H:%M' > data/version.txt 2>/dev/null || true
+  git config --get remote.origin.url > data/origin.txt 2>/dev/null || true   # откуда ставить при переезде
   if [[ $rc == 0 ]]; then
     ok "Готовый образ с GitHub скачан"
     compose up -d --remove-orphans
@@ -298,6 +299,7 @@ ${C_B}bnodes${C_0} — управление Bobr Nodes
   bnodes logs      логи бота (выход — Ctrl+C)
   bnodes status    состояние и версия
   bnodes backup    резервная копия базы и настроек в /root/bnodes-backups
+  (переезд на другой сервер — в панели: Настройки → «Переезд на другой сервер»)
   bnodes setup     повторная настройка (токен, админы, домен, bcloud)
   bnodes harden    защитить сервер: файрвол, fail2ban, SSH, автообновления
   bnodes security  состояние защиты: файрвол, блокировки, вход по паролю
@@ -327,6 +329,12 @@ case "${1:-install}" in
     { printf '%s %s\n' "${before:0:7}" "${after:0:7}"; git log --no-merges --format='%s' "$before..$after" | head -12; } > data/update-note.txt
     git merge -q --ff-only origin/main || { rm -f data/update-note.txt; exit 1; }
     exec ./install.sh _rebuild "${before:0:7}" ;;
+  restore)  # переезд: .env и data уже перенесены ботом со старого сервера — запустить без вопросов
+    [[ -f .env && -f data/bot.db ]] || die "Нет .env или data/bot.db — это команда для переезда"
+    command -v docker >/dev/null || die "Нет Docker"
+    deploy; install_cli
+    if wait_ready; then ok "Бот запущен"; echo RESTORE_OK; else die "Бот не запустился — посмотрите: bnodes logs"; fi
+    exit 0 ;;
   _rebuild)
     deploy "${2:-}"; install_cli
     wait_ready && ok "Бот перезапущен" || warn "Бот не ответил — посмотрите bnodes logs"
