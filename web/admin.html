@@ -1302,14 +1302,117 @@ function monitorView() {
         status: !g.enabled ? ['выключен', 'quiet'] : bad ? ['проблем: ' + bad, 'bad'] : g.nodes.length ? ['в норме', 'ok'] : null,
         onClick: () => { delete MONF[g.id]; UI.nav.push(() => monGroupView(g.id)); } });
     }) : [row({ title: 'Групп пока нет', cls: 'is-dim', chevron: false })])));
-  const chRows = MON.checkers.map(c => row({ icon: 'pin', color: c.status === 'running' && !c.poll_error ? 'teal' : 'gray', title: c.name,
-    sub: [c.ip, c.mine ? null : 'добавил ' + (c.by || 'другой пользователь'), c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проходят ${c.online ?? '…'} из ${c.proxies ?? '…'}`) : c.error].filter(Boolean).join(' · '),
-    status: c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c), chevron: c.mine ? undefined : false,
-    onClick: c.mine ? () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } : null }));
+  const chRows = MON.checkers.map(c => {
+    const stt = c.status === 'running' && c.poll_error ? ['нет ответа', 'bad'] : cst(c);
+    const link = c.hoster_url ? h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Сайт хостера ' + c.name, title: 'Сайт хостера',
+      onclick: e => { e.stopPropagation(); UI.openLink(c.hoster_url); } }, icon('link')) : null;
+    const right = h('span', { class: 'ck-right' }, stt ? h('span', { class: 'st ' + (stt[1] || '') + (stt[0] ? '' : ' dot'), role: stt[0] ? null : 'img', 'aria-label': stt[2] || null }, stt[0]) : null, link);
+    return row({ icon: 'pin', color: ckOk(c) ? 'teal' : 'gray', title: c.name, right,
+      sub: [c.region ? regionName(c.region) : null, c.mine ? c.ip : 'добавил ' + (c.by || 'другой пользователь'), c.status === 'running' ? (c.poll_error ? 'не отвечает' : `проходят ${c.online ?? '…'} из ${c.proxies ?? '…'}`) : c.error].filter(Boolean).join(' · '),
+      chevron: c.mine ? undefined : false, onClick: c.mine ? () => { delete CKF[c.id]; UI.nav.push(() => checkerView(c.id)); } : null });
+  });
+  if (MON.checkers.length) v.append(group('Чекеры на карте', [checkersMap(MON.checkers)],
+    MON.checkers.some(c => !c.region) ? 'Не у всех чекеров указан регион — откройте чекер и выберите округ.' : 'Пустые округа — там чекеров нет: ноды оттуда не проверяются.'));
   chRows.push(row({ icon: 'plus', title: 'Добавить чекер', cls: 'accent', onClick: () => { NEWCK = null; UI.nav.push(checkerAddView); } }));
   v.append(group(['Чекеры в России', h('span', { class: 'n' }, MON.checkers.length || '')], chRows,
     'Сервер с Ubuntu или Debian: бот ставит xray-checker и читает его по SSH. Нода недоступна, если её не пропускает большинство чекеров 3 проверки подряд.'
     + (isAdmin() ? '' : ' Чекеры общие: ваш проверяет и чужие группы, менять его можете только вы.')));
+  return v;
+}
+// ───────── карта России по федеральным округам: схема, а не география — читается на телефоне ─────────
+// x, y, w, h — в клетках сетки 13×6; подписи — строками
+const RU_MAP = {
+  nw: [0, 0, 5, 2, ['Северо-Запад']], c: [0, 2, 2, 2, ['Центр']], v: [2, 2, 3, 3, ['Поволжье']],
+  s: [0, 4, 2, 1, ['Юг']], nc: [0, 5, 3, 1, ['Сев. Кавказ']], u: [5, 0, 2, 5, ['Урал']],
+  sib: [7, 0, 3, 5, ['Сибирь']], fe: [10, 0, 3, 6, ['Дальний', 'Восток']],
+};
+const RU_ORDER = ['c', 'nw', 'v', 's', 'nc', 'u', 'sib', 'fe'];
+const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// cells: { код: { tone: 'ok'|'bad'|'warn'|'', dots: ['ok'|'bad'|'warn'|'', …], value: 'текст' } }
+function ruMap(cells, aria) {
+  const U = 30, G = 3, W = 13 * U, H = 6 * U;
+  const parts = Object.entries(RU_MAP).map(([k, [x, y, w, hh, label]]) => {
+    const c = cells[k] || {}, X = x * U + G, Y = y * U + G, w2 = w * U - 2 * G, h2 = hh * U - 2 * G;
+    const big = hh >= 2;
+    const lab = label.map((t, i) => `<text x="${X + 8}" y="${Y + 14 + i * 12}" class="rm-l">${esc(t)}</text>`).join('');
+    const dots = (c.dots || []).slice(0, 8).map((d, i) => big
+      ? `<circle cx="${X + 12 + i * 11}" cy="${Y + h2 - 10}" r="4" class="rm-d ${d}"/>`
+      : `<circle cx="${X + w2 - 10 - i * 10}" cy="${Y + h2 / 2}" r="3.5" class="rm-d ${d}"/>`).join('');
+    const val = c.value && big ? `<text x="${X + w2 - 8}" y="${Y + h2 - 7}" class="rm-v" text-anchor="end">${esc(c.value)}</text>` : '';
+    return `<g class="rm-cell ${c.tone || 'none'}"><rect x="${X}" y="${Y}" width="${w2}" height="${h2}" rx="9"/>${lab}${dots}${val}</g>`;
+  }).join('');
+  const box = h('div', { class: 'ru-map', role: 'img', 'aria-label': aria || 'Карта России по федеральным округам' });
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${parts}</svg>`;
+  return box;
+}
+const regionName = code => (MON && MON.regions && MON.regions[code]) || 'регион не указан';
+const ckOk = c => c.status === 'running' && !c.poll_error;
+// где стоят чекеры: на главной мониторинга
+function checkersMap(cks) {
+  const cells = {};
+  cks.forEach(c => { if (!c.region) return; const x = cells[c.region] || (cells[c.region] = { dots: [], n: 0 }); x.dots.push(ckOk(c) ? 'ok' : 'bad'); x.n++; });
+  Object.values(cells).forEach(x => { x.tone = x.dots.every(d => d === 'ok') ? 'ok' : x.dots.some(d => d === 'ok') ? 'warn' : 'bad'; x.value = String(x.n); });
+  return ruMap(cells, 'Чекеры по округам');
+}
+// итог одного чекера по ноде: [прошло выходов, всего, задержка] или почему нет данных
+function ckVerdict(n, c) {
+  const r = (n.by || {})[String(c.id)];
+  if (r) return r[0] ? { tone: r[0] < r[1] ? 'warn' : 'ok', text: (r[1] > 1 ? `проходит ${r[0]} из ${r[1]}` : 'проходит') + (r[2] ? ` · ${r[2]} мс` : '') } : { tone: 'bad', text: r[1] > 1 ? `не проходит ни один из ${r[1]}` : 'не проходит' };
+  if (c.status !== 'running') return { tone: '', text: 'чекер не запущен' };
+  if (c.poll_error) return { tone: '', text: 'чекер не отвечает' };
+  return { tone: '', text: 'нет данных — нода не в подписке у этого чекера' };
+}
+function nodeMap(n) {
+  const cells = {};
+  MON.checkers.forEach(c => {
+    if (!c.region) return;
+    const x = cells[c.region] || (cells[c.region] = { dots: [], ms: [] });
+    const vd = ckVerdict(n, c), r = (n.by || {})[String(c.id)];
+    x.dots.push(vd.tone);
+    if (r && r[2]) x.ms.push(r[2]);
+  });
+  Object.values(cells).forEach(x => {
+    const real = x.dots.filter(Boolean);
+    x.tone = !real.length ? '' : real.every(d => d === 'ok') ? 'ok' : real.every(d => d === 'bad') ? 'bad' : 'warn';
+    x.value = x.ms.length ? Math.min(...x.ms) + ' мс' : '';
+  });
+  return ruMap(cells, 'Где нода проходит проверку');
+}
+// страница ноды в мониторинге: карта, чекеры, действия
+function monNodeView(pid, key) {
+  const g = MON && !MON.error && MON.groups.find(x => x.id === pid);
+  const n = g && g.nodes.find(x => x.key === key);
+  if (!n) return h('div', { class: 'mon-page' }, ...pageHead('Нода'), h('div', { class: 'notice' }, 'Ноды больше нет в мониторинге'));
+  monPoll();
+  const isHost = n.kind === 'host';
+  const st = n.status === 'ok' && n.fail ? ['частично', 'warn'] : n.status === 'ok' ? ['доступна', 'ok'] : (MST[n.status] || [n.status, '']);
+  const v = h('div', { class: 'mon-page node-mon' }, ...pageHead((isHost ? '' : flagOf(n.country) + ' ') + (n.name || n.addr), { sub: [n.addr !== n.name ? n.addr : '', g.name].filter(Boolean).join(' · ') }));
+  v.append(group(null, [row({ title: 'Состояние', status: st }),
+    !isHost && n.online_users != null ? row({ title: 'Онлайн', detail: String(n.online_users) }) : null,
+    row({ title: 'Чекеры', detail: n.data ? `${n.data - n.fail} из ${n.data} пропускают` : 'нет данных' }),
+    n.status === 'repairing' && n.step ? row({ title: 'Починка', detail: MON.steps[n.step] }) : null,
+    n.connected === false ? row({ title: 'Связь с панелью', status: ['нет', 'bad'] }) : null,
+    (n.cdn_hosts || []).length ? row({ title: 'Через CDN', detail: n.cdn_hosts.join(', '), cls: 'wrap' }) : null].filter(Boolean)));
+  const placed = MON.checkers.filter(c => c.region);
+  v.append(group('Где проходит', [nodeMap(n), h('div', { class: 'rm-legend' },
+    h('span', {}, h('i', { class: 'ok' }), 'проходит'), h('span', {}, h('i', { class: 'warn' }), 'частично'), h('span', {}, h('i', { class: 'bad' }), 'не проходит'), h('span', {}, h('i', {}), 'нет данных'))],
+    placed.length < MON.checkers.length ? `Чекеров без региона: ${MON.checkers.length - placed.length} — укажите его в карточке чекера, и он появится на карте.` : 'Справа в округе — лучшая задержка до ноды.'));
+  const order = c => c.region ? RU_ORDER.indexOf(c.region) : 99;
+  v.append(group('Чекеры', [...MON.checkers].sort((a, b) => order(a) - order(b)).map(c => {
+    const vd = ckVerdict(n, c);
+    return row({ icon: 'pin', color: vd.tone === 'ok' ? 'green' : vd.tone === 'bad' ? 'pink' : vd.tone === 'warn' ? 'amber' : 'gray', title: c.name, cls: 'wrap', chevron: false,
+      sub: regionName(c.region) + ' · ' + vd.text, status: vd.tone ? ['', vd.tone, vd.text] : null });
+  })));
+  const down = ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok;
+  const act2 = a => async () => { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } };
+  const items = [];
+  if (down && !isHost && g.mon_steps.length) items.push(row({ icon: 'tools', color: 'blue', title: 'Чинить по шагам', onClick: act2('fix') }));
+  if (down && !isHost && g.mon_steps.includes('replace')) items.push(row({ icon: 'plusCircle', color: 'green', title: 'Сразу новая нода', onClick: act2('replace') }));
+  if (down && n.status !== 'ignored') items.push(row({ icon: 'eyeOff', color: 'gray', title: isHost ? 'Не напоминать' : 'Не трогать', onClick: act2('ignore') }));
+  items.push(nodeMuted(g, n)
+    ? row({ icon: 'bell', color: 'amber', title: 'Включить уведомления', sub: 'сообщать, когда нода упадёт и оживёт', onClick: () => monNotify(g, { addr: n.addr, mute: false }, 'Уведомления о ноде включены') })
+    : row({ icon: 'bell', color: 'gray', title: 'Выключить уведомления', sub: g.mon_quiet ? 'сейчас молчит вся группа' : 'проверка и починка продолжатся, сообщений не будет', onClick: () => monNotify(g, { addr: n.addr, mute: true }, 'Уведомления о ноде выключены') }));
+  v.append(group('Действия', items));
   return v;
 }
 // группа в мониторинге: поиск, фильтр, группировка; недоступные — отдельным блоком сверху
@@ -1338,18 +1441,7 @@ function monGroupView(pid, part) {
       n.status === 'replaced' && n.replaced_by ? 'новая: ' + n.replaced_by : ''].filter(Boolean).join(' · '),
     status: n.status === 'ok' && !n.fail ? [String(n.online_users ?? ''), 'ok', 'доступна', 'num'] : stOf(n),
     tags: nodeMuted(g, n) ? [['без уведомлений', '']] : null,
-    onClick: () => {
-      const down = ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok;
-      const act2 = a => async () => { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } };
-      const items = [];
-      if (down && !isHost(n) && g.mon_steps.length) items.push({ text: 'Чинить по шагам', icon: 'tools', color: 'blue', fn: act2('fix') });
-      if (down && !isHost(n) && g.mon_steps.includes('replace')) items.push({ text: 'Сразу новая нода', icon: 'plusCircle', color: 'green', fn: act2('replace') });
-      if (down && n.status !== 'ignored') items.push({ text: isHost(n) ? 'Не напоминать' : 'Не трогать', icon: 'eyeOff', color: 'gray', fn: act2('ignore') });
-      items.push(nodeMuted(g, n)
-        ? { text: 'Включить уведомления', icon: 'bell', color: 'amber', sub: 'сообщать, когда нода упадёт и оживёт', fn: () => monNotify(g, { addr: n.addr, mute: false }, 'Уведомления о ноде включены') }
-        : { text: 'Выключить уведомления', icon: 'bell', color: 'gray', sub: g.mon_quiet ? 'сейчас молчит вся группа' : 'проверка и починка продолжатся, сообщений не будет', fn: () => monNotify(g, { addr: n.addr, mute: true }, 'Уведомления о ноде выключены') });
-      actionSheet(n.name || n.addr, items);
-    } });
+    onClick: () => UI.nav.push(() => monNodeView(pid, n.key)) });
   const attn = n => MON_BAD.includes(n.status) || n.status === 'ignored' || (n.status === 'ok' && n.fail);
   const cnt = { all: nodes.length, bad: nodes.filter(attn).length, ok: nodes.filter(n => !attn(n)).length };
   v.append(monStatusCard(nodes));
@@ -1526,6 +1618,23 @@ function checkerView(id) {
   if (!c) return h('div', {}, ...title('Чекер', 'Мониторинг'), h('div', { class: 'notice' }, 'Чекер удалён'));
   monPoll();
   const v = h('div', { class: 'mon-page' }, ...title(c.name, 'Мониторинг'));
+  const edit = async patch => { if (await UI.run(() => api('checkers/' + id, 'POST', patch), 'Сохранено') !== undefined) { await loadMon(); UI.nav.refresh(); } };
+  const ask = (t, value, ph, type, save) => UI.sheet(t, close => {
+    const inp = h('input', { type, value: value || '', placeholder: ph, autocapitalize: 'off', spellcheck: false, style: 'text-align:left' });
+    const b = h('button', { class: 'btn', type: 'button' }, 'Сохранить');
+    b.onclick = UI.busy(b, async () => { await save(inp.value.trim()); close(); });
+    inp.onkeydown = e => { if (e.key === 'Enter') b.click(); };
+    setTimeout(() => inp.focus(), 250);
+    return h('div', { style: 'padding:0 var(--gutter) var(--s5)' }, h('label', { class: 'field stack' }, inp), h('div', { style: 'height:12px' }), b);
+  });
+  const info = [row({ icon: 'text', color: 'gray', title: 'Название', detail: c.name, onClick: () => ask('Название чекера', c.name, 'Например, Сбер Клауд мск', 'text', x => edit({ name: x })) }),
+    row({ icon: 'pin', color: c.region ? 'teal' : 'amber', title: 'Регион', detail: c.region ? regionName(c.region) : 'не указан',
+      onClick: () => actionSheet('Где стоит чекер', [...RU_ORDER.map(k => ({ text: MON.regions[k], icon: c.region === k ? 'check' : 'pin', color: c.region === k ? 'blue' : 'gray', fn: () => edit({ region: k }) })),
+        { text: 'Не указывать', icon: 'close', color: 'gray', fn: () => edit({ region: '' }) }]) }),
+    row({ icon: 'link', color: c.hoster_url ? 'blue' : 'gray', title: 'Хостер', detail: c.hoster_url ? c.hoster_url.replace(/^https?:\/\//, '').replace(/\/$/, '') : 'добавить ссылку',
+      onClick: () => ask('Ссылка на хостера', c.hoster_url, 'https://console.cloud.ru', 'url', x => edit({ hoster_url: x })) })];
+  if (c.hoster_url) info.push(row({ icon: 'globe', color: 'blue', title: 'Открыть сайт хостера', cls: 'accent', onClick: () => UI.openLink(c.hoster_url) }));
+  v.append(group('О чекере', info, 'Регион — чтобы чекер появился на карте. Хостер — где арендован сервер: чтобы не искать, куда идти продлевать или перезагружать.'));
   v.append(group(null, [
     row({ title: 'Состояние', status: CST[c.status] || [c.status, ''] }),
     row({ title: 'Сервер', detail: c.ip + (c.port && c.port !== 22 ? ':' + c.port : ''), mono: true, copy: c.ip }),
