@@ -104,7 +104,8 @@ def test_setup_and_teardown_panel():
     assert made['username'] == 'bridge_exitnodeuuid' and made['user'] == 'user-1' and made['reality']['private']
     bridge = next(p for p in pl.profiles if p['uuid'] == 'prof-bridge')
     vnext = bridge['config']['outbounds'][0]['settings']['vnext'][0]
-    assert vnext['users'][0]['id'] == 'vless-1' and bridge['name'] == 'Мост 203.0.113.50'
+    assert vnext['users'][0]['id'] == 'vless-1' and bridge['name'] == 'Bridge 203-0-113-50'
+    assert xb.profile_name('179.254.115.154') == 'Bridge 179-254-115-154'
     # переустановка: тот же пользователь и те же ключи
     pl.profiles = [p for p in pl.profiles if p['uuid'] != 'prof-bridge']
     again = xb.setup_panel(pl, {**RELAY, 'reality': made['reality']}, EXIT_NODE, EXIT_HOSTS, log.append)
