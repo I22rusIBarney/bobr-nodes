@@ -308,6 +308,11 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     if not uid:
         raise engine.StepError('панель не вернула VLESS UUID служебного пользователя')
     outbound = exit_outbound(panel, pnode, hosts, x['target_port'], uid)
+    try:  # Torrent Blocker выхода не должен банить весь вход разом
+        from . import plugins
+        plugins.protect_bridge(panel, x['ip'], user.get('id'), log)
+    except engine.StepError as e:
+        log(f'Torrent Blocker: исключение для входа не добавилось ({e}) — добавьте IP {x["ip"]} в исключения вручную')
     vision = x.get('mode') == 'vision'
     tag = vision_tag(x['ip']) if vision else TAG
     keep = x.get('reality') or {}  # переустановка — те же ключи: у клиентов в подписке ничего не меняется
@@ -351,7 +356,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
             panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
-            'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'username': bridge_username(pnode['uuid']),
+            'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'user_id': user.get('id'), 'ip': x['ip'], 'username': bridge_username(pnode['uuid']),
             'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}
 
 
@@ -378,6 +383,12 @@ def teardown_panel(panel: engine.Panel, made: dict, user_in_use: bool, log) -> N
             log('панель: профиль моста удалён')
         except engine.StepError as e:
             log(f'панель: профиль моста удалить не удалось: {e}')
+    if not user_in_use and made.get('ip'):
+        try:
+            from . import plugins
+            plugins.protect_bridge(panel, made['ip'], made.get('user_id'), log, remove=True)
+        except engine.StepError as e:
+            log(f'Torrent Blocker: исключение входа убрать не удалось: {e}')
     if made.get('user') and not user_in_use:
         try:
             panel.call('DELETE', f'/api/users/{made["user"]}')

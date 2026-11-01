@@ -20,6 +20,7 @@ class FakePanel:
         self.profiles = [exit_profile(security)]
         self.users, self.hosts, self.nodes, self.calls = {}, [], [], []
         self.squads = [{'uuid': 'sq1', 'name': 'Default', 'inbounds': [{'uuid': EXIT_INB}]}]
+        self.plugin = None  # конфиг плагина нод; None — плагина нет
 
     def call(self, method, path, body=None):
         self.calls.append((method, path))
@@ -38,7 +39,7 @@ class FakePanel:
                 raise engine.StepError('HTTP 404')
             return u
         if (method, path) == ('POST', '/api/users'):
-            u = {'uuid': 'user-1', 'vlessUuid': 'vless-1', 'username': body['username'],
+            u = {'uuid': 'user-1', 'id': 77, 'vlessUuid': 'vless-1', 'username': body['username'],
                  'activeInternalSquads': [{'uuid': s} for s in body['activeInternalSquads']]}
             self.users[body['username']] = u
             return u
@@ -47,6 +48,15 @@ class FakePanel:
         if (method, path) == ('GET', '/api/hosts'):
             return self.hosts
         if (method, path) == ('PATCH', '/api/hosts'):
+            return {}
+        if (method, path) == ('GET', '/api/node-plugins'):
+            return {'nodePlugins': [{'uuid': 'pl1', 'name': 'Reverse Node Plugins'}] if self.plugin is not None else []}
+        if (method, path) == ('GET', '/api/node-plugins/pl1'):
+            return {'pluginConfig': self.plugin}
+        if (method, path) == ('PATCH', '/api/node-plugins'):
+            self.plugin = body['pluginConfig']
+            return {}
+        if method == 'POST' and path in ('/api/node-plugins/actions/sync', '/api/node-plugins/executor'):
             return {}
         if method == 'DELETE' or (method, path) == ('PATCH', '/api/internal-squads'):
             return {}
@@ -219,3 +229,18 @@ def test_setup_panel_vision():
     assert pl.nodes[0]['address'] == 'de1.example.com'
     assert any(p['name'] == 'Bridge V 203-0-113-50' for p in pl.profiles)
     assert not [c for c in pl.calls if c == ('PATCH', '/api/hosts')]   # SNI хоста — домен входа, его ставит attach
+
+
+def test_bridge_ip_excluded_from_torrent_blocker():
+    pl, log = FakePanel(), []
+    pl.plugin = {'torrentBlocker': {'enabled': True, 'blockDuration': 3600, 'ignoreLists': {'ip': ['1.1.1.1'], 'userId': []}}}
+    made = xb.setup_panel(pl, RELAY, EXIT_NODE, EXIT_HOSTS, log.append)
+    ign = pl.plugin['torrentBlocker']['ignoreLists']
+    assert ign['ip'] == ['1.1.1.1', '203.0.113.50'] and ign['userId'] == [77]
+    assert ('POST', '/api/node-plugins/executor') in pl.calls          # бан с IP входа снят сразу
+    n = len(pl.calls)
+    xb.setup_panel(pl, {**RELAY, 'reality': made['reality']}, EXIT_NODE, EXIT_HOSTS, log.append)
+    assert pl.plugin['torrentBlocker']['ignoreLists']['ip'].count('203.0.113.50') == 1
+    assert ('PATCH', '/api/node-plugins') not in pl.calls[n:]          # уже в исключениях — не трогаем
+    xb.teardown_panel(pl, made, user_in_use=False, log=log.append)
+    assert pl.plugin['torrentBlocker']['ignoreLists'] == {'ip': ['1.1.1.1'], 'userId': []}

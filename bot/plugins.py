@@ -140,6 +140,37 @@ def adopt(panel: engine.Panel, node_uuid: str, nodes: list[dict], log) -> None:
         log(f'⚠️ плагин группы к ноде не привязался: {e}')
 
 
+def protect_bridge(panel: engine.Panel, ip: str, user_id, log, remove: bool = False) -> bool:
+    """Мост: весь трафик входа приходит на выход с одного IP под служебным пользователем. Если Torrent Blocker
+    выхода забанит этот IP (кто-то из клиентов скачал торрент), на час встанет весь мост. Поэтому IP входа и
+    служебный пользователь — в исключениях плагина; торренты ловит плагин на самом входе, по настоящим IP клиентов.
+    remove — убрать из исключений (мост удалён). Возвращает, поменялось ли что-то."""
+    st = state(panel)
+    if not st['uuid']:
+        return False
+    cfg = full_config(st['config'])
+    ign = cfg['torrentBlocker']['ignoreLists']
+    ips, uids = list(ign.get('ip') or []), list(ign.get('userId') or [])
+    if remove:
+        new_ips = [x for x in ips if x != ip]
+        new_uids = [x for x in uids if str(x) != str(user_id)] if user_id is not None else uids
+    else:
+        new_ips = ips + ([ip] if ip and ip not in ips else [])
+        new_uids = uids + ([user_id] if user_id is not None and str(user_id) not in map(str, uids) else [])
+    if (new_ips, new_uids) == (ips, uids):
+        return False
+    cfg['torrentBlocker']['ignoreLists'] = {**ign, 'ip': new_ips, 'userId': new_uids}
+    panel.call('PATCH', '/api/node-plugins', {'uuid': st['uuid'], 'pluginConfig': cfg})
+    panel.call('POST', '/api/node-plugins/actions/sync', {'uuid': st['uuid']})
+    if not remove:
+        try:
+            unblock(panel, ip)  # если уже забанил — снять сразу
+        except engine.StepError:
+            pass
+    log(f'Torrent Blocker: IP входа {ip} и служебный пользователь моста ' + ('убраны из исключений' if remove else 'в исключениях, бан снят'))
+    return True
+
+
 def unblock(panel: engine.Panel, ip: str) -> None:
     panel.call('POST', '/api/node-plugins/executor',
                {'command': {'command': 'unblockIps', 'ips': [ip]}, 'targetNodes': {'target': 'allNodes'}})
