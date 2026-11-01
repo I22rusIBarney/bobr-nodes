@@ -578,6 +578,24 @@ async def monitor_button(c: CallbackQuery, store: Store, monitor=None, access: A
     await c.answer(msg, show_alert=True)
 
 
+# ───────────────────────── автомасштабирование ─────────────────────────
+
+@router.callback_query(F.data.regexp(r'^ap:s:[0-9a-f]{8}$'))
+async def scale_button(c: CallbackQuery, store: Store, autopilot=None, access: Access | None = None,
+                       role: str = 'admin', uid: int = 0, username: str = ''):
+    if autopilot is None:
+        return await c.answer('Автопилот выключен', show_alert=True)
+    pid = autopilot.scale_owner(c.data[5:])
+    if pid and not my_profile(store, access, role, uid, username, pid):
+        return await c.answer('Нет доступа', show_alert=True)
+    msg = await autopilot.scale_confirm(c.data[5:])
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(msg[:200], show_alert=True)
+
+
 # ───────────────────────── задачи ─────────────────────────
 
 @router.callback_query(F.data == 'm:jobs')

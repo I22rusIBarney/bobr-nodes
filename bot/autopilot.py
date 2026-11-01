@@ -18,6 +18,7 @@ import html
 import json
 import logging
 import re
+import secrets
 import time
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -44,6 +45,7 @@ HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
 HIGH_CYCLES = 3              # подряд высоких замеров до сообщения (~45 минут)
 REALERT = 12 * 3600
 RENT_DAYS = 3
+SCALE_COOLDOWN = 24 * 3600   # одна докупка на перегруженную ноду в сутки
 WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
 MARK = 'BNODES_LOAD'
 
@@ -56,7 +58,13 @@ LOAD_CMD = (f': {MARK}; a=$(head -1 /proc/stat); sleep 1; b=$(head -1 /proc/stat
 def auto_cfg(prof: dict) -> dict:
     a = prof.get('auto') or {}
     return {'update': bool(a.get('update')), 'hour': int(a.get('hour', 4)), 'weekday': a.get('weekday'),
-            'tz': int(a.get('tz', 0)), 'load': a.get('load', True) is not False, 'renew': a.get('renew')}
+            'tz': int(a.get('tz', 0)), 'load': a.get('load', True) is not False, 'renew': a.get('renew'),
+            # прогноз баланса: предупредить, если денег хватит меньше чем на столько дней (0 — не предупреждать)
+            'bal_days': int(a.get('bal_days', 7)),
+            # автомасштабирование: off | ask | auto, сколько нод бот может держать докупленными сам,
+            # и сколько рублей должно остаться на балансе после покупки
+            'scale': a.get('scale') if a.get('scale') in ('off', 'ask', 'auto') else 'off',
+            'scale_max': int(a.get('scale_max', 2)), 'scale_floor': int(a.get('scale_floor', 500))}
 
 
 def clean_auto(raw: dict, cur: dict) -> dict:
@@ -79,6 +87,17 @@ def clean_auto(raw: dict, cur: dict) -> dict:
         a['load'] = bool(raw['load'])
     if 'renew' in raw:
         a['renew'] = None if raw['renew'] is None else bool(raw['renew'])
+    for k, lo, hi, what in (('bal_days', 0, 60, 'Предупреждать за: 0–60 дней'), ('scale_max', 1, 20, 'Лимит нод: от 1 до 20'),
+                            ('scale_floor', 0, 1_000_000, 'Порог баланса: от 0 ₽')):
+        if k in raw:
+            v = raw[k]
+            if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+                raise ValueError(what)
+            a[k] = v
+    if 'scale' in raw:
+        if raw['scale'] not in ('off', 'ask', 'auto'):
+            raise ValueError('Автомасштабирование: выкл., спросить или сам')
+        a['scale'] = raw['scale']
     return a
 
 
@@ -193,6 +212,27 @@ def load_text(s: dict) -> str:
 
 
 ADVICE = {'cpu': 'не хватает процессора', 'mem': 'не хватает памяти', 'disk': 'кончается место на диске'}
+
+
+def forecast(servers: list[dict], balance_kop: int, horizon: int = 120) -> dict:
+    """На сколько хватит баланса: продления по датам (раз в 30 дней) всех серверов с автопродлением,
+    пока очередное продление не окажется дороже остатка. days — через сколько дней не хватит (None — хватит
+    на horizon дней), need_kop — сколько нужно на то продление, server — какой сервер не продлится первым."""
+    monthly = sum(x['price_kop'] for x in servers if x.get('auto_renew') is not False)
+    events = []
+    for x in servers:
+        if x.get('auto_renew') is False or x.get('days_left') is None or not x.get('price_kop'):
+            continue
+        d = max(0.0, float(x['days_left']))
+        while d <= horizon:
+            events.append((d, int(x['price_kop']), x.get('domain') or x.get('name') or ''))
+            d += 30
+    bal = int(balance_kop)
+    for d, price, name in sorted(events):
+        if bal < price:
+            return {'days': int(d), 'need_kop': price - bal, 'server': name, 'monthly_kop': monthly, 'balance_kop': int(balance_kop)}
+        bal -= price
+    return {'days': None, 'need_kop': 0, 'server': '', 'monthly_kop': monthly, 'balance_kop': int(balance_kop)}
 
 
 class Autopilot:
@@ -387,14 +427,117 @@ class Autopilot:
         if h and s['high'] >= HIGH_CYCLES and now - s['alerted'] >= REALERT:
             s['alerted'] = now
             why = ' и '.join(ADVICE[k] for k in h)
+            extra, markup = await self.scale_offer(prof, n, bd)
             await self.say(prof, f'🔥 <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\n'
                                  f'{load_text(s)} — уже ~{s["high"] * LOAD_EVERY // 60} мин.\n\n'
                                  f'Ноде {why}: возьмите тариф помощнее или поставьте ещё одну ноду в этой стране — '
-                                 'нагрузка разделится.', self.button(), type_='node.load')
+                                 'нагрузка разделится.' + extra, markup or self.button(), type_='node.load')
         elif not h and prev.get('alerted') and prev.get('high', 0) >= HIGH_CYCLES:
             s['alerted'] = 0
             await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.', type_='node.load')
         self.put(key, s)
+
+    # ───────── автомасштабирование ─────────
+    def scaled(self, pid: int) -> list[dict]:
+        """Ноды, докупленные автомасштабированием и ещё живые (покупка идёт или нода стоит)."""
+        return [j for j in self.store.jobs(5000, include_hidden=True)
+                if j['profile_id'] == pid and j['data'].get('autoscale') and not j['data'].get('removed')
+                and (j['status'] in ACTIVE or j['status'] == 'done')]
+
+    async def plan_scale(self, prof: dict, n: dict, bd: dict) -> dict | str:
+        """Что докупить для перегруженной ноды: та же локация и конфигурация. Строка — почему нельзя."""
+        cfg = auto_cfg(prof)
+        if not bd.get('location'):
+            return 'нода куплена не через бота, её тариф неизвестен'
+        if time.time() - float(self.store.get(f'ap:scaled:{prof["id"]}:{n["uuid"]}') or 0) < SCALE_COOLDOWN:
+            return 'для этой ноды уже докупал за последние сутки — новой ноде нужно время, чтобы забрать нагрузку'
+        if len(self.scaled(prof['id'])) >= cfg['scale_max']:
+            return f'достигнут лимит: бот уже докупил {cfg["scale_max"]} нод(ы) — поднимите его в «Автоматизации»'
+        cat = await svc.load_catalog(self.store, prof)
+        loc = bd['location']
+        L = next((x for x in cat['locations'] if x['code'] == loc), None)
+        if not L or not L['offers']:
+            return f'локации {bd.get("loc_name") or loc} сейчас нет в Bobr Cloud'
+        idx, custom = None, None
+        if bd.get('custom'):
+            try:
+                custom = await svc.custom_offer(self.store, prof, cat, loc, bd['custom'])
+            except (ValueError, BcloudError):
+                custom = None
+        if custom is None:
+            idx = bd['idx'] if any(o['idx'] == bd.get('idx') for o in L['offers']) else min(L['offers'], key=lambda o: o['price_kop'])['idx']
+        q = svc.quote(cat, loc, idx, '1m', 1, custom)
+        price = int(q['one_kop'])
+        bal = await bcloud_from(self.store, buyer_of(self.store, prof)).balance()
+        if bal - price < cfg['scale_floor'] * 100:
+            return (f'на балансе {bal // 100} ₽, после покупки за {price // 100} ₽ останется меньше порога '
+                    f'{cfg["scale_floor"]} ₽')
+        return {'cat': cat, 'loc': loc, 'L': L, 'idx': idx, 'custom': custom, 'price': price,
+                'label': f'{L["flag"]} {L["name"]}, {svc.spec_text(q["offer"])}'}
+
+    async def do_scale(self, prof: dict, n: dict, bd: dict, plan: dict) -> str:
+        """Купить и поставить ноду по плану: как перегруженная — те же сквады, хосты и дополнения."""
+        doms = await svc.auto_domains(self.store, prof, plan['loc'], 1)
+        extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
+        rc = self.notify.recipients(prof, 'money.scale')
+        ids = await svc.create_jobs(self.store, self.runner, rc[0] if rc else 0, prof['id'], plan['cat'], plan['loc'],
+                                    plan['idx'], '1m', doms, squads=bd.get('squads'), host=bd.get('host'), extras=extras,
+                                    custom=plan['custom'], note={'autoscale': True, 'scale_for': n['uuid']})
+        self.store.set(f'ap:scaled:{prof["id"]}:{n["uuid"]}', str(time.time()))
+        text = (f'➕ <b>Докупаю ноду</b> · {html.escape(prof["name"])}\n<code>{html.escape(doms[0])}</code> — '
+                f'{html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес, рядом с перегруженной '
+                f'<b>{html.escape(n["name"])}</b>. Задача #{ids[0]}.')
+        await self.notify.emit('money.scale', text, prof, self.button())
+        return doms[0]
+
+    async def scale_offer(self, prof: dict, n: dict, bd: dict) -> tuple[str, object]:
+        """Дополнение к сообщению о перегрузе: докупил сам / кнопка «Докупить» / почему не докупаю."""
+        mode = auto_cfg(prof)['scale']
+        if mode == 'off':
+            return '', None
+        try:
+            plan = await self.plan_scale(prof, n, bd)
+        except (BcloudError, ValueError, engine.StepError) as e:
+            plan = f'не получилось посчитать покупку: {e}'
+        if isinstance(plan, str):
+            return f'\n\n⚖️ Автомасштабирование: не докупаю — {html.escape(plan)}.', None
+        if mode == 'auto':
+            try:
+                dom = await self.do_scale(prof, n, bd, plan)
+            except (BcloudError, ValueError) as e:
+                return f'\n\n⚖️ Автомасштабирование: покупка не удалась — {html.escape(str(e))}.', None
+            return f'\n\n⚖️ Докупаю ещё одну ноду: {html.escape(dom)}.', None
+        tok = secrets.token_hex(4)
+        self.put(f'ap:scaleask:{tok}', {'pid': prof['id'], 'uuid': n['uuid'], 'addr': n['address'], 'at': time.time()})
+        rows = [[InlineKeyboardButton(text=f'➕ Докупить ноду · {plan["price"] // 100} ₽/мес', callback_data=f'ap:s:{tok}')]]
+        b = self.button()
+        if b:
+            rows += b.inline_keyboard
+        return (f'\n\n⚖️ Могу докупить ещё одну: {html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес.',
+                InlineKeyboardMarkup(inline_keyboard=rows))
+
+    async def scale_confirm(self, tok: str) -> str:
+        """Кнопка «Докупить ноду»: проверить всё заново (баланс, лимит могли измениться) и купить."""
+        ask = self.get(f'ap:scaleask:{tok}')
+        if not ask or time.time() - ask.get('at', 0) > 24 * 3600:
+            return 'Предложение устарело — дождитесь нового сообщения о нагрузке'
+        self.put(f'ap:scaleask:{tok}', {})
+        prof = self.store.profile(int(ask['pid']))
+        if not prof:
+            return 'Группы больше нет'
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(ask['addr']) or {}
+        n = {'uuid': ask['uuid'], 'address': ask['addr'], 'name': bd.get('domain') or ask['addr']}
+        try:
+            plan = await self.plan_scale(prof, n, bd)
+            if isinstance(plan, str):
+                return 'Не докупаю: ' + plan
+            return f'Покупаю {await self.do_scale(prof, n, bd, plan)} — прогресс в «Задачах»'
+        except (BcloudError, ValueError, engine.StepError) as e:
+            return f'Не получилось: {e}'
+
+    def scale_owner(self, tok: str) -> int | None:
+        ask = self.get(f'ap:scaleask:{tok}')
+        return int(ask['pid']) if ask.get('pid') else None
 
     async def panel_load(self, now: float | None = None) -> None:
         """Нагрузка всех нод из панелей групп: один запрос на группу, история за сутки."""
@@ -594,7 +737,7 @@ class Autopilot:
                         'auto_renew': x.get('auto_renew'), 'expires_at': x.get('expires_at'),
                         'days_left': round((exp - now).total_seconds() / 86400, 1) if exp else None})
         out.sort(key=lambda x: (x['days_left'] is None, x['days_left'] or 0))
-        return {'servers': out, 'balance_kop': bal, 'buyer': prof.get('owner_label') or 'ваш аккаунт'}
+        return {'servers': out, 'balance_kop': bal, 'buyer': prof.get('owner_label') or 'ваш аккаунт', 'forecast': forecast(out, bal)}
 
     @staticmethod
     def rent_risks(r: dict) -> list[dict]:
@@ -736,13 +879,15 @@ class Autopilot:
             lines.append('\nУдалить можно в панели управления: группа → «Уборка».')
             await self.say(prof, '\n'.join(lines), self.button(), type_='money.cleanup')
 
-    async def check_rent(self) -> None:
+    async def check_rent(self, now: float | None = None) -> None:
+        by_buyer: dict[int, list[tuple[dict, dict]]] = {}
         for prof in self.store.profiles():
             try:
                 r = await self.rent(prof)
             except BcloudError as e:
                 log.info('autopilot rent %s: %s', prof['id'], e)
                 continue
+            by_buyer.setdefault(buyer_of(self.store, prof), []).append((prof, r))
             if auto_cfg(prof)['renew'] is True:
                 bc = bcloud_from(self.store, buyer_of(self.store, prof))
                 for x in r['servers']:
@@ -763,6 +908,31 @@ class Autopilot:
                                      f'{x["flag"]} {html.escape(x["domain"] or x["name"])} · <code>{x["ip"]}</code> — '
                                      f'осталось {max(0, int(x["days_left"]))} дн.: {html.escape(x["why"])}.\n\n'
                                      'Продлите в «Аренде» группы или пополните баланс Bobr Cloud.', self.button(), type_='money.rent')
+        for buyer, items in by_buyer.items():
+            await self.balance_warn(buyer, items, now)
+
+    async def balance_warn(self, buyer: int, items: list[tuple[dict, dict]], now: float | None = None) -> None:
+        """Прогноз по аккаунту Bobr Cloud целиком (все его группы): денег хватит меньше чем на bal_days —
+        одно сообщение в день. Последние дни перед концом аренды уже покрывает «Скоро конец аренды»."""
+        limit = max((auto_cfg(p)['bal_days'] for p, _ in items), default=0)
+        if not limit:
+            return
+        servers = [x for _, r in items for x in r['servers']]
+        f = forecast(servers, items[0][1]['balance_kop'])
+        if f['days'] is None or f['days'] > limit or f['days'] <= RENT_DAYS:
+            return
+        today = local_now(auto_cfg(items[0][0])['tz'], now).strftime('%Y-%m-%d')
+        key = f'ap:balwarn:{buyer}'
+        if self.store.get(key) == today:
+            return
+        self.store.set(key, today)
+        to = list(dict.fromkeys(u for p, _ in items for u in self.notify.recipients(p, 'money.balance')))
+        groups = ', '.join(html.escape(p.get('name', '')) for p, _ in items)
+        await self.notify.emit('money.balance',
+                               f'💰 <b>Денег на Bobr Cloud хватит на ~{f["days"]} дн.</b> · {groups}\n'
+                               f'На балансе {f["balance_kop"] // 100} ₽, продления — {f["monthly_kop"] // 100} ₽ в месяц. '
+                               f'Первым не продлится {html.escape(f["server"])}: не хватит {f["need_kop"] // 100} ₽.\n\n'
+                               'Пополните баланс — кошелёк в панели управления.', items[0][0], self.button(), to=to)
 
     # ───────── сервер бота ─────────
     def host_line(self) -> str:

@@ -160,7 +160,7 @@ def test_selfupdate_clean_and_note(tmp_path):
     assert 'abc1234 → def5678' in note and '• Плагины нод' in note and '&lt;b&gt;' in note
     assert su.take_note(str(tmp_path)) is None
     (tmp_path / 'version.txt').write_text('0123456789abcdef\t01.11.2026 07:00\tКэш\n', encoding='utf-8')
-    assert su.version(str(tmp_path)) == {'sha': '0123456', 'date': '01.11.2026 07:00', 'subject': 'Кэш'}
+    assert su.version(str(tmp_path)) == {'number': su.current(), 'sha': '0123456', 'date': '01.11.2026 07:00', 'subject': 'Кэш'}
     assert json.loads(json.dumps(su.cfg(type('S', (), {'get': lambda self, k: ''})()))) == {'on': False, 'hour': 4, 'tz': 0, 'last': ''}
 
 

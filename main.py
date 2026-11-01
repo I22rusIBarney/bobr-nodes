@@ -99,7 +99,8 @@ async def main():
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
     logging.info('веб-админка: %s/admin', public_url or 'http://localhost:8080')
 
-    note = selfupdate.take_note(data_dir)  # после автообновления — что нового
+    selfupdate.take_note(data_dir)  # список коммитов от bnodes больше не нужен — что нового берём из истории версий
+    note = selfupdate.whats_new(store)
     if note:
         await autopilot.notify.emit('system.update', note)
 

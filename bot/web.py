@@ -95,7 +95,7 @@ ADMIN_ONLY = [
     (r'GET', r'/api/scripts/.+'),
     (r'.*', r'/api/(users|invites)(/.*)?'),
     (r'.*', r'/api/host'),
-    (r'.*', r'/api/selfupdate'),
+    (r'POST', r'/api/selfupdate'),
 ]
 
 
@@ -1948,7 +1948,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def selfupdate_get(request):
         from . import selfupdate as su
         c = su.cfg(store)
-        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW})
+        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW, 'changelog': su.changelog()})
 
     @r.post('/api/selfupdate')
     async def selfupdate_save(request):
@@ -1958,7 +1958,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (TypeError, ValueError) as e:
             raise ApiError(str(e) or 'Неверные данные') from None
         store.set(su.KEY, json.dumps(c))
-        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW})
+        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW, 'changelog': su.changelog()})
 
     # ── центр уведомлений: лента (колокольчик) и настройки каждого пользователя ──
     @r.get('/api/notify/feed')
