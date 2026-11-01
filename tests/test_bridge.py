@@ -23,3 +23,30 @@ def test_relay_servers_are_not_offered_for_nodes(tmp_path, monkeypatch):
     assert out[11]['ready'] and not out[11]['relay']
     assert out[12]['relay'] and out[12]['used'] and not out[12]['ready'] and 'мост' in out[12]['why']
     assert out[14]['relay'] and not out[14]['ready']
+
+
+def test_node_server_info_for_conversion(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'g', 'panel_url': 'https://p', 'panel_token': 't'})
+    j = store.add_job('b', pid, 1, {'server_id': 21, 'ip': '203.0.113.31', 'domain': 'ch1.example.com'})
+    store.update_job(j, status='done')
+
+    class BC:
+        RETRY_FOR = 0
+
+        async def servers(self):
+            return [{'id': 21, 'ip': '203.0.113.31', 'status': 'active', 'os': 'debian12'}]
+    monkeypatch.setattr(svc, 'bcloud_from', lambda store, tg: BC())
+    x = asyncio.run(svc.own_servers(store, store.profile(pid)))[0]
+    assert x['used'] and not x['relay'] and x['node'] == {'job': j, 'pid': pid, 'domain': 'ch1.example.com', 'ip': '203.0.113.31'}
+
+
+def test_convert_cmd_stops_node_but_keeps_files():
+    from bot import relay as rl
+    c = rl.convert_cmd('ch1.example.com')
+    assert 'docker compose --project-directory /opt/remnanode' in c and 'down' in c
+    assert 'mv /opt/remnanode "/opt/remnanode.bridge-$ts"' in c and 'rm -rf' not in c
+    for u in ('nuvrion-decoy', 'vps-psiphon', 'wg-quick@warp', 'bnodes-port-'):
+        assert u in c
+    assert "certbot delete --non-interactive --cert-name ch1.example.com" in c and 'CONVERT_OK' in c
+    assert "''" in rl.convert_cmd('')

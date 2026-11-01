@@ -77,6 +77,39 @@ def apply_cmd(entries: list[tuple[int, str, int]], closed: list[int] = ()) -> st
         'echo RELAY_OK')
 
 
+def convert_cmd(domain: str) -> str:
+    """Сервер с нодой → под мост: остановить ноду (Xray освобождает 443) и всё, что ставил установщик и дополнения.
+    Ничего не удаляем вслепую: каталог ноды переезжает в /opt/remnanode.bridge-<время> (откатить — переименовать
+    обратно и docker compose up -d), фаервол, fail2ban и защита SSH остаются."""
+    dom = shlex.quote(domain) if domain else "''"
+    return (
+        f': {MARK}; set +e; ts=$(date +%Y%m%d-%H%M%S); '
+        'if [ -f /opt/remnanode/docker-compose.yml ]; then '
+        'docker compose --project-directory /opt/remnanode -f /opt/remnanode/docker-compose.yml down --remove-orphans >/dev/null 2>&1; fi; '
+        'docker rm -f remnanode >/dev/null 2>&1; '
+        'for u in nuvrion-decoy nuvrion-pokehabitat nuvrion-acme-cleanup nuvrion-two-way-ping nuvrion-traffic-control '
+        'vps-psiphon wg-quick@warp; do systemctl disable --now "$u" >/dev/null 2>&1; done; '
+        'for f in /etc/systemd/system/bnodes-port-*.service; do [ -e "$f" ] || continue; u=$(basename "$f" .service); '
+        'systemctl disable --now "$u" >/dev/null 2>&1; rm -f "$f"; done; systemctl daemon-reload; '
+        'rm -f /etc/letsencrypt/renewal-hooks/pre/90-nuvrion-vision /etc/letsencrypt/renewal-hooks/post/90-nuvrion-vision '
+        '/etc/letsencrypt/renewal-hooks/deploy/90-nuvrion-vision; '
+        f'[ -n {dom} ] && certbot delete --non-interactive --cert-name {dom} >/dev/null 2>&1; '
+        '[ -e /opt/remnanode ] && mv /opt/remnanode "/opt/remnanode.bridge-$ts"; '
+        # Xray должен отпустить порты — проверяем 443
+        'for i in 1 2 3 4 5 6 7 8 9 10; do ss -Hltn "sport = :443" | grep -q . || break; sleep 1; done; '
+        'ss -Hltn "sport = :443" | grep -q . && echo CONVERT_BUSY || echo CONVERT_OK')
+
+
+def convert(r: engine.Remote, domain: str, log) -> None:
+    rc, out = r.run(convert_cmd(domain), 300)
+    if 'CONVERT_OK' in out:
+        log('нода на сервере остановлена, её файлы — в /opt/remnanode.bridge-<время>')
+        return
+    if 'CONVERT_BUSY' in out:
+        raise engine.StepError('после остановки ноды порт 443 всё ещё занят — посмотрите сервер вручную (ss -ltnp)')
+    raise engine.StepError('не удалось остановить ноду на сервере: ' + engine.strip_ansi(out).strip()[-200:])
+
+
 def remove_cmd(ports: list[int]) -> str:
     return (f': {MARK}; systemctl disable --now {UNIT} >/dev/null 2>&1; rm -f /etc/systemd/system/{UNIT}.service; '
             f'rm -rf {DIR}; systemctl daemon-reload; '

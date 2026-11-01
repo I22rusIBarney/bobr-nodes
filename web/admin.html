@@ -2683,13 +2683,18 @@ function relayAddView(pid, uuid) {
     if (!R.servers) v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })])));
     else if (R.servers.error) v.append(UI.failed(R.servers.error, () => { R.servers = null; redraw(); }));
     else {
-      const ok = R.servers.filter(x => x.ready || (x.relay && x.status === 'active')), no = R.servers.filter(x => !ok.includes(x));
-      v.append(group('Сервер из Bobr Cloud', ok.length ? ok.map(x => row({ icon: x.id === R.sid ? 'checkCircle' : 'disc', color: x.id === R.sid ? 'blue' : 'gray',
-        title: `${x.flag || ''} ${x.name || x.ip}`.trim(), chevron: false, cls: 'wrap',
-        sub: [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ`, x.relay ? 'уже вход для другой ноды — добавлю порт' : ''].filter(Boolean).join(' · '),
-        onClick: () => { R.sid = x.id; redraw(); } }))
-        : [row({ title: 'Свободных серверов нет', sub: 'на всех стоят ноды — купите новый', cls: 'is-dim wrap', chevron: false })],
-        no.length ? 'Не подходят: ' + no.slice(0, 4).map(x => `${x.name || x.ip} — ${x.why}`).join('; ') + (no.length > 4 ? '…' : '') : 'Пароль root бот возьмёт из Bobr Cloud.'));
+      const self = x => x.node && [x.node.domain, x.node.ip].includes(n.address);
+      const ok = R.servers.filter(x => x.ready || (x.relay && x.status === 'active'));
+      const conv = R.servers.filter(x => x.node && !x.relay && x.status === 'active' && !self(x));
+      const no = R.servers.filter(x => !ok.includes(x) && !conv.includes(x) && !self(x));
+      const pickRow = (x, sub) => row({ icon: x.id === R.sid ? 'checkCircle' : 'disc', color: x.id === R.sid ? (conv.includes(x) ? 'pink' : 'blue') : 'gray',
+        title: `${x.flag || ''} ${x.name || x.ip}`.trim(), chevron: false, cls: 'wrap', sub, onClick: () => { R.sid = x.id; R.convert = conv.includes(x); redraw(); } });
+      v.append(group('Свободные серверы', ok.length ? ok.map(x => pickRow(x, [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ`, x.relay ? 'уже вход для другой ноды — добавлю порт' : ''].filter(Boolean).join(' · ')))
+        : [row({ title: 'Свободных серверов нет', sub: conv.length ? 'можно переделать сервер с нодой — ниже' : 'купите новый', cls: 'is-dim wrap', chevron: false })],
+        'Пароль root бот возьмёт из Bobr Cloud.'));
+      if (conv.length) v.append(group('С нодой — переделать в мост', conv.map(x => pickRow(x, [x.ip, 'нода ' + (x.node.domain || x.ip) + ' будет убрана'].join(' · '))),
+        'Бот остановит ноду на сервере, уберёт её и её хосты из панели и A-запись из Cloudflare, затем поставит проброс. Файлы ноды не удаляются — остаются в /opt/remnanode.bridge-… на сервере. Пользователи этой ноды переключатся на другие ноды подписки.'));
+      if (no.length) v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s4)' }, 'Не подходят: ' + no.slice(0, 4).map(x => `${x.name || x.ip} — ${x.why}`).join('; ') + (no.length > 4 ? '…' : '')));
     }
   } else {
     v.append(group('Сервер', [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))]),
@@ -2703,13 +2708,15 @@ function relayAddView(pid, uuid) {
     h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP входа или entry.example.com', x => { f.address = x.trim(); }, true)),
     h('div', { class: 'group-f', style: 'padding:0 var(--gutter)' }, `Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол откройте сами — ufw бот откроет.`)] })));
   const pick = R.src === 'buy' && R.cat && !R.cat.error ? (R.cat.locations.find(l => l.code === R.loc) || { offers: [] }).offers.find(o => o.idx === R.idx) : null;
-  const go = h('button', { class: 'btn', type: 'button', disabled: (R.src === 'buy' && !pick) || (R.src === 'server' && !R.sid) },
-    R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : 'Поставить проброс');
+  const conv = R.src === 'server' && R.convert && R.servers && !R.servers.error ? R.servers.find(x => x.id === R.sid) : null;
+  const go = h('button', { class: conv ? 'btn danger' : 'btn', type: 'button', disabled: (R.src === 'buy' && !pick) || (R.src === 'server' && !R.sid) },
+    R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : conv ? 'Убрать ноду и поставить мост' : 'Поставить проброс');
   go.onclick = UI.busy(go, async () => {
     if (R.src === 'buy' && !await UI.ask({ title: 'Купить сервер под вход?', message: `${rubK(pick.price_kop)} в месяц спишется с баланса Bobr Cloud. Бот поставит на сервер проброс на ноду ${n.name}.`, buttons: [{ id: 'y', text: 'Купить' }] })) return;
+    if (conv && !await UI.ask({ title: 'Убрать ноду ' + mid(conv.node.domain || conv.ip, 30) + '?', message: 'Нода на этом сервере перестанет работать и пропадёт из панели и подписок. Сервер станет входом для ' + n.name + '.', buttons: [{ id: 'y', text: 'Убрать и сделать мостом', type: 'destructive' }] })) return;
     try {
-      showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : 'Ставлю HAProxy на сервер — до пары минут…' });
-      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid } : {}) };
+      showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : conv ? 'Останавливаю ноду и ставлю HAProxy — до пары минут…' : 'Ставлю HAProxy на сервер — до пары минут…' });
+      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}) };
       const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', body);
       NEWRL = null; await reloadNode(pid, uuid);
       UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));

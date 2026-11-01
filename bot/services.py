@@ -146,14 +146,18 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
     bc = bcloud_from(store, buyer_of(store, prof))
     bc.RETRY_FOR = 8
     used_ids, used_ips = set(), set()
+    node_of: dict = {}  # сервер → нода на нём (для переделки в мост)
     for j in store.jobs(5000):
         d = j['data']
         if d.get('kind') in SERVICE_KINDS or d.get('removed') or j['status'] == 'failed':  # с ошибкой — сервер свободен
             continue
+        info = {'job': j['id'], 'pid': j['profile_id'], 'domain': d.get('domain') or '', 'ip': d.get('ip') or ''}
         if d.get('server_id'):
             used_ids.add(int(d['server_id']))
+            node_of[('id', int(d['server_id']))] = info
         if d.get('ip'):
             used_ips.add(d['ip'])
+            node_of[('ip', d['ip'])] = info
     relay_ids = {int(r['server_id']) for r in store.relays() if r.get('server_id')}
     relay_ips = {r['ip'] for r in store.relays() if r.get('ip')}
     out = []
@@ -167,7 +171,8 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
                else 'нужна Ubuntu или Debian')
         out.append({**{k: x.get(k) for k in ('id', 'name', 'status', 'ip', 'location', 'loc_name', 'flag', 'cpu', 'ram', 'disk',
                                               'os', 'expires_at', 'root_password')},
-                    'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'relay': relay, 'ready': not why, 'why': why})
+                    'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'relay': relay, 'ready': not why, 'why': why,
+                    'node': None if relay else node_of.get(('id', int(x['id']))) or node_of.get(('ip', x.get('ip') or ''))})
     return out
 
 
