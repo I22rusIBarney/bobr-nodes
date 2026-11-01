@@ -808,11 +808,22 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         from . import sshaccess
         return {'id': x['id'], 'ip': x['ip'], 'address': x.get('address') or x['ip'], 'listen': x['listen'],
                 'source': x.get('source', 'ssh'), 'server_id': x.get('server_id'), 'bought': bool(x.get('bought')),
+                'stage': x.get('stage', ''), 'stages': relay_stages(x),
                 'flag': x.get('flag', ''), 'spec': x.get('spec', ''), 'price_kop': x.get('price_kop'),
                 'target': x['target'], 'target_port': x['target_port'], 'remark': x.get('remark', ''),
                 'status': x.get('status', 'new'), 'error': x.get('error', ''), 'bad': x.get('bad') or [],
                 'hosts': len(x.get('hosts') or []), 'ssh': sshaccess.view(x.get('ssh')),
                 'access': sshaccess.describe(x.get('ssh')), 'log': x.get('log') or []}
+
+    def relay_stages(x: dict) -> list[dict]:
+        out = []
+        if x.get('bought'):
+            out += [{'code': 'buy', 'title': 'Покупка сервера в Bobr Cloud'}, {'code': 'wait', 'title': 'Сервер создаётся'}]
+        out.append({'code': 'ssh', 'title': 'Вход по SSH'})
+        if x.get('convert'):
+            out.append({'code': 'convert', 'title': 'Остановка ноды на сервере'})
+        out += [{'code': 'haproxy', 'title': 'HAProxy и порт входа'}, {'code': 'hosts', 'title': 'Хосты в панели'}]
+        return out
 
     def relay_or_404(rid, request) -> dict:
         try:
@@ -947,25 +958,20 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
              'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
              'created_by': uid_of(request), 'created_at': int(time.time()), **extra}
         if source != 'buy':
-            pre: list[str] = []
-            if extra.get('convert'):
-                try:
-                    await relay_convert(x, acc, pre.append)
-                except (engine.StepError, OSError) as e:
-                    raise ApiError(f'Не получилось освободить сервер: {e}') from None
-            x['id'] = store.save_relay(x)
-            res = await relay_run(x, p, ip)
-            if pre:
-                res['log'] = pre + res.get('log', [])
-                store.save_relay({**store.relay(x['id']), 'log': (pre + (store.relay(x['id']).get('log') or []))[-24:]})
-            return J(res)
+            x['id'] = store.save_relay({**x, 'status': 'installing', 'stage': 'convert' if extra.get('convert') else 'ssh', 'log': []})
+            if b.get('background'):
+                relay_start(x, p, wait=source == 'server')
+                return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю — ход на странице входа'})
+            return J(await relay_run(x, p, ip))
         # новый сервер: покупка сейчас (деньги и ошибки Bobr Cloud — сразу в ответе), проброс — когда сервер создастся
         bc = bcloud_from(store, buyer_of(store, p))
         try:
             srv = await bc.buy(x['buy']['location'], x['buy']['os'], x['buy']['idx'], '1m', acc['password'])
         except BcloudError as e:
             raise ApiError(f'Bobr Cloud: {e}') from None
-        x.update(server_id=int(srv['id']), status='buying', buying_since=int(time.time()))
+        x.update(server_id=int(srv['id']), status='buying', stage='wait', buying_since=int(time.time()),
+                 log=[time.strftime('%H:%M:%S ') + f'куплен сервер #{srv["id"]} в Bobr Cloud: {x["flag"]} {x["spec"]}, {x["price_kop"] // 100} ₽/мес',
+                      time.strftime('%H:%M:%S ') + 'жду, пока Bobr Cloud создаст сервер и выдаст IP'])
         x['id'] = store.save_relay(x)
         relay_bg(x['id'])
         return J({'id': x['id'], 'ok': True, 'pending': True,
@@ -1013,49 +1019,91 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if srv.get('status') == 'active' and srv.get('ip'):
                 engine.forget_host(runner.known_hosts(), srv['ip'])
                 ssh = {**x['ssh'], 'password': srv.get('root_password') or x['ssh'].get('password', '')}
-                x.update(ip=srv['ip'], address=x.get('address') or srv['ip'], ssh=ssh, status='new')
+                x.update(ip=srv['ip'], address=x.get('address') or srv['ip'], ssh=ssh, status='installing', stage='ssh')
                 store.save_relay(x)
-                await asyncio.sleep(20)  # SSH на свежем сервере поднимается не сразу
+                relay_say(rid, f'сервер создан, IP {srv["ip"]}')
                 try:
-                    await relay_run(x, p, x['ip'])
+                    await relay_run(store.relay(rid), p, srv['ip'], wait=True)  # SSH на свежем сервере поднимается не сразу
                 except Exception as e:  # noqa: BLE001
-                    store.save_relay({**store.relay(rid), 'status': 'failed', 'error': str(e)[:300]})
+                    relay_say(rid, f'ошибка: {e}', status='failed', error=str(e)[:300])
                 return
             if srv.get('status') in ('deleted', 'failed', 'error') or time.time() > end:
                 why = (f'Bobr Cloud не создал сервер (статус {srv.get("status")})' if time.time() <= end
                        else 'сервер слишком долго создаётся — проверьте его в Bobr Cloud')
-                store.save_relay({**x, 'status': 'failed', 'error': why})
+                relay_say(rid, why, status='failed', error=why)
                 return
             await asyncio.sleep(15)
 
     async def relay_resume(_app) -> None:
-        for x in store.relays():  # бот перезапустился, пока создавался сервер под мост — ждём дальше
+        for x in store.relays():  # бот перезапустился посреди покупки или установки входа — продолжаем
             if x.get('status') == 'buying':
                 relay_bg(x['id'])
+            elif x.get('status') == 'installing' and x.get('ip') and store.profile(x['pid']):
+                relay_say(x['id'], 'бот перезапустился — продолжаю установку')
+                relay_start(store.relay(x['id']), store.profile(x['pid']), wait=x.get('source') in ('server', 'buy'))
     app.on_startup.append(relay_resume)
 
-    async def relay_run(x: dict, p: dict, ip: str, closed: list[int] = ()) -> dict:
-        """Применить проброс на сервере и, если хостов ещё нет, создать их. Итог — в записи входа."""
+    def relay_say(rid: int, line: str | None = None, stage: str | None = None, **fields) -> None:
+        """Ход установки входа — в его запись: этап и строка журнала (страница входа показывает их сразу)."""
+        rec = store.relay(rid)
+        if not rec:
+            return
+        if stage:
+            rec['stage'] = stage
+        if line:
+            rec['log'] = ((rec.get('log') or []) + [time.strftime('%H:%M:%S ') + line])[-40:]
+        rec.update(fields)
+        store.save_relay(rec)
+
+    async def relay_run(x: dict, p: dict, ip: str, closed: list[int] = (), wait: bool = False) -> dict:
+        """Применить проброс на сервере и, если хостов ещё нет, создать их. Итог — в записи входа.
+        wait — сервер свежий: сначала дождаться SSH."""
         lines: list[str] = []
+
+        def say(t: str) -> None:
+            lines.append(t)
+            relay_say(x['id'], t)
         lock = relay_locks.setdefault(ip, asyncio.Lock())
         async with lock:
             for o in store.relays():  # доступ по SSH — общий у всех входов одного сервера
                 if o['ip'] == ip and o['id'] != x['id'] and o.get('ssh') != x['ssh']:
                     store.save_relay({**o, 'ssh': x['ssh']})
-            store.save_relay({**x, 'status': 'installing', 'error': ''})
+            x['log'] = (store.relay(x['id']) or {}).get('log') or []
+            store.save_relay({**x, 'status': 'installing', 'error': '', 'stage': 'ssh'})
             try:
-                res = await relay_sync(ip, lines.append, closed)
+                if wait:
+                    say('жду, пока на сервере поднимется SSH')
+                    await asyncio.to_thread(engine.wait_ssh, relay_remote({'ip': ip, 'ssh': x['ssh']}), say)
+                if x.get('convert') and not x['convert'].get('done'):
+                    relay_say(x['id'], stage='convert')
+                    await relay_convert(x, x['ssh'], say)
+                    store.save_relay({**store.relay(x['id']), 'convert': x['convert']})
+                relay_say(x['id'], 'ставлю HAProxy и открываю порт (если HAProxy ещё нет — apt, до минуты)', stage='haproxy')
+                res = await relay_sync(ip, say, closed)
                 if not x.get('hosts'):
-                    x['hosts'] = await relay_hosts(x, p, lines.append)
-            except (engine.StepError, ApiError) as e:
-                x.update(status='failed', error=str(e)[:300], log=lines[-20:])
+                    relay_say(x['id'], stage='hosts')
+                    x['hosts'] = await relay_hosts(x, p, say)
+            except (engine.StepError, ApiError, OSError) as e:
+                say(f'ошибка: {e}')
+                x.update(status='failed', error=str(e)[:300], log=store.relay(x['id'])['log'])
                 store.save_relay(x)
                 return {'id': x['id'], 'ok': False, 'message': str(e), 'log': lines}
-            x.update(status='ok' if not res['bad'] else 'warn', error='', bad=res['bad'], log=lines[-20:])
+            say('готово' if not res['bad'] else 'проброс стоит, но нода с сервера не открывается')
+            x.update(status='ok' if not res['bad'] else 'warn', error='', bad=res['bad'], stage='done', log=store.relay(x['id'])['log'])
             store.save_relay(x)
         msg = (f'Готово: клиенты подключаются к {x.get("address") or ip}:{x["listen"]}, трафик идёт на {x["target"]}:{x["target_port"]}'
-               if not res['bad'] else f'Проброс стоит, но с российского сервера не открывается {", ".join(res["bad"])} — проверьте ноду')
+               if not res['bad'] else f'Проброс стоит, но с сервера входа не открывается {", ".join(res["bad"])} — проверьте ноду')
         return {'id': x['id'], 'ok': not res['bad'], 'message': msg, 'log': lines}
+
+    def relay_start(x: dict, p: dict, wait: bool = False) -> None:
+        """Установка в фоне — страница входа показывает этапы и журнал."""
+        async def go():
+            try:
+                await relay_run(x, p, x['ip'], wait=wait)
+            except Exception as e:  # noqa: BLE001
+                logging.getLogger(__name__).exception('relay %s', x['id'])
+                relay_say(x['id'], f'ошибка: {e}', status='failed', error=str(e)[:300])
+        relay_tasks[x['id']] = asyncio.get_running_loop().create_task(go())
 
     @r.post('/api/relays/{rid}/apply')
     async def relay_apply(request):
@@ -1068,6 +1116,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 x['ssh'] = sshaccess.clean(b, x.get('ssh'), runner.keydir)
             except ValueError as e:
                 raise ApiError(str(e)) from None
+        if b.get('background'):
+            store.save_relay({**x, 'status': 'installing', 'stage': 'ssh', 'error': '',
+                              'log': [time.strftime('%H:%M:%S ') + 'переустановка']})
+            relay_start(x, store.profile(x['pid']))
+            return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю — ход на этой странице'})
         return J(await relay_run(x, store.profile(x['pid']), x['ip']))
 
     @r.post('/api/relays/{rid}/forget-hostkey')
