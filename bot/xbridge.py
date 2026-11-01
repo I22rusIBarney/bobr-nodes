@@ -144,7 +144,105 @@ def vision_tag(ip: str) -> str:
     return 'BRIDGE_VISION_' + re.sub(r'[^0-9A-Za-z]', '_', ip)
 
 
-def vision_config(base: dict, domain: str, tag: str, outbound: dict) -> dict:
+# ───────── связь вход → выход по Shadowsocks (как в eGames remnawave-reverse-proxy) ─────────
+# Вход ходит на выход не через общий inbound клиентов (с его доменом, Psiphon, WARP и прочим), а через отдельный
+# Shadowsocks-inbound на выходе: включён только на ноде-выходе, в нём только служебный пользователь моста.
+SS_METHOD = 'chacha20-ietf-poly1305'
+SS_PORT = 9999
+RU_RULES = [{'type': 'field', 'ip': ['geoip:ru'], 'outboundTag': 'DIRECT'},
+            {'type': 'field', 'domain': ['geosite:category-ru'], 'outboundTag': 'DIRECT'}]
+
+
+def ss_tag(exit_uuid: str) -> str:
+    return 'BRIDGE_SS_' + re.sub(r'[^a-z0-9]', '', exit_uuid.lower())[:8].upper()
+
+
+def ss_squad_name(exit_uuid: str) -> str:
+    return 'Bridge SS ' + re.sub(r'[^a-z0-9]', '', exit_uuid.lower())[:8]
+
+
+def ensure_ss_exit(panel: engine.Panel, pnode: dict, log, port: int = SS_PORT) -> dict:
+    """Shadowsocks-inbound для моста в профиле ноды-выхода (включён только на ней) и сквад только с ним."""
+    puuid = (pnode.get('configProfile') or {}).get('activeConfigProfileUuid')
+    profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
+    prof = next((p for p in profiles if p['uuid'] == puuid), None)
+    if not prof:
+        raise engine.StepError('профиль ноды-выхода не найден в панели')
+    tag = ss_tag(pnode['uuid'])
+    cfg = prof.get('config') or {}
+    inb = next((i for i in cfg.get('inbounds', []) if i.get('tag') == tag), None)
+    if inb:
+        port = int(inb.get('port') or port)
+    else:
+        used = {int(i.get('port') or 0) for i in cfg.get('inbounds', [])}
+        while port in used:
+            port += 1
+        new = {'tag': tag, 'port': port, 'listen': '0.0.0.0', 'protocol': 'shadowsocks',
+               'settings': {'method': SS_METHOD, 'network': 'tcp,udp', 'clients': []},
+               'sniffing': {'enabled': True, 'destOverride': ['http', 'tls', 'quic']}}
+        panel.call('PATCH', '/api/config-profiles', {'uuid': prof['uuid'], 'config': {**cfg, 'inbounds': [*cfg.get('inbounds', []), new]}})
+        prof = next(p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == prof['uuid'])
+        log(f'панель: на выходе добавлен Shadowsocks-inbound {tag} (порт {port}) — только для моста')
+    inb_uuid = next((i['uuid'] for i in prof.get('inbounds', []) if i.get('tag') == tag), None)
+    if not inb_uuid:
+        raise engine.StepError('панель не вернула inbound Shadowsocks на выходе')
+    active = engine.active_inbounds(pnode)
+    if not active:
+        raise engine.StepError('у ноды-выхода не видно активных inbound — не трогаю её, чтобы не выключить клиентов')
+    if inb_uuid not in active:
+        panel.call('PATCH', '/api/nodes', {'uuid': pnode['uuid'], 'configProfile': {'activeConfigProfileUuid': prof['uuid'],
+                                                                                    'activeInbounds': [*active, inb_uuid]}})
+        log('панель: Shadowsocks-inbound включён на ноде-выходе (на других нодах этого профиля — нет)')
+    name = ss_squad_name(pnode['uuid'])
+    sqs = panel.call('GET', '/api/internal-squads')['internalSquads']
+    sq = next((q for q in sqs if q.get('name') == name), None)
+    if not sq:
+        sq = panel.call('POST', '/api/internal-squads', {'name': name, 'inbounds': [inb_uuid]})
+        log(f'панель: создан сквад «{name}» — в нём только вход моста на выход')
+    elif [i.get('uuid') for i in sq.get('inbounds', [])] != [inb_uuid]:
+        panel.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': [inb_uuid]})
+    address = pnode.get('address') or ''
+    return {'profile': prof['uuid'], 'inbound': inb_uuid, 'tag': tag, 'port': port, 'squad': sq['uuid'], 'address': address,
+            'exit_node': pnode['uuid']}
+
+
+def ss_outbound(ss: dict, password: str) -> dict:
+    return {'tag': OUT_TAG, 'protocol': 'shadowsocks',
+            'settings': {'servers': [{'address': ss['address'], 'port': int(ss['port']), 'method': SS_METHOD,
+                                      'password': password, 'level': 0}]}}
+
+
+def remove_ss_exit(panel: engine.Panel, ss: dict, log) -> None:
+    """Убрать Shadowsocks-inbound моста с выхода и его сквад."""
+    for q in panel.call('GET', '/api/internal-squads')['internalSquads']:
+        if q['uuid'] == ss.get('squad'):
+            panel.call('DELETE', f'/api/internal-squads/{q["uuid"]}')
+    node = next((n for n in panel.call('GET', '/api/nodes') if n['uuid'] == ss.get('exit_node')), None)
+    if node and ss.get('inbound') in engine.active_inbounds(node):
+        cp = node.get('configProfile') or {}
+        panel.call('PATCH', '/api/nodes', {'uuid': node['uuid'], 'configProfile': {
+            'activeConfigProfileUuid': cp.get('activeConfigProfileUuid'),
+            'activeInbounds': [u for u in engine.active_inbounds(node) if u != ss['inbound']]}})
+    prof = next((p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == ss.get('profile')), None)
+    if prof:
+        cfg = prof.get('config') or {}
+        if any(i.get('tag') == ss.get('tag') for i in cfg.get('inbounds', [])):
+            panel.call('PATCH', '/api/config-profiles', {'uuid': prof['uuid'], 'config': {
+                **cfg, 'inbounds': [i for i in cfg.get('inbounds', []) if i.get('tag') != ss.get('tag')]}})
+    log('панель: Shadowsocks-вход моста убран с выхода')
+
+
+def bridge_rules(rules: list[dict], tag: str, block: set, ru_direct: bool) -> list[dict]:
+    """Правила профиля входа: блокировки → (Россия напрямую) → «всё из входа → выход» → остальное."""
+    def ours(r):
+        return r.get('outboundTag') == OUT_TAG or (r.get('outboundTag') == 'DIRECT' and
+                                                    (r.get('ip') == ['geoip:ru'] or r.get('domain') == ['geosite:category-ru']))
+    rest = [r for r in rules if not ours(r)]
+    return ([r for r in rest if r.get('outboundTag') in block] + (RU_RULES if ru_direct else []) +
+            [{'type': 'field', 'inboundTag': [tag], 'outboundTag': OUT_TAG}] + [r for r in rest if r.get('outboundTag') not in block])
+
+
+def vision_config(base: dict, domain: str, tag: str, outbound: dict, ru_direct: bool = False) -> dict:
     """Профиль моста на Vision TLS: inbound — как ставит встроенный скрипт бота (сертификат через общую ссылку),
     выход — на ноду-выход. Правила блокировки профиля остаются первыми, дальше — «всё из входа → выход»."""
     cfg = engine.retag(engine.shared_profile(base, domain), engine.SHARED_TAG, tag)
@@ -153,10 +251,7 @@ def vision_config(base: dict, domain: str, tag: str, outbound: dict) -> dict:
     if not any(o.get('protocol') == 'freedom' for o in outs):
         outs.append({'tag': 'DIRECT', 'protocol': 'freedom'})
     block = {o.get('tag') for o in outs if o.get('protocol') == 'blackhole'}
-    rules = (cfg.get('routing') or {}).get('rules') or []
-    mine = {'type': 'field', 'inboundTag': [tag], 'outboundTag': OUT_TAG}
-    rules = [r for r in rules if r.get('outboundTag') in block] + [mine] + \
-            [r for r in rules if r.get('outboundTag') not in block and r.get('outboundTag') != OUT_TAG]
+    rules = bridge_rules((cfg.get('routing') or {}).get('rules') or [], tag, block, ru_direct)
     return {**cfg, 'outbounds': [out, *outs], 'routing': {**(cfg.get('routing') or {}), 'rules': rules}}
 
 
@@ -303,11 +398,23 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     squads = squads_with(panel, exit_inbound)
     if not squads:
         raise engine.StepError('inbound ноды-выхода не входит ни в один сквад — некому выдавать мост')
-    user = ensure_user(panel, pnode['uuid'], squads, log)
-    uid = user.get('vlessUuid') or user.get('vless_uuid')
-    if not uid:
-        raise engine.StepError('панель не вернула VLESS UUID служебного пользователя')
-    outbound = exit_outbound(panel, pnode, hosts, x['target_port'], uid)
+    ss = ensure_ss_exit(panel, pnode, log) if x.get('hop') == 'ss' else None
+    user = ensure_user(panel, pnode['uuid'], squads + ([ss['squad']] if ss else []), log)
+    if ss:
+        pw = user.get('ssPassword') or user.get('ss_password')
+        if not pw:
+            raise engine.StepError('панель не вернула пароль Shadowsocks служебного пользователя')
+        outbound = ss_outbound(ss, pw)
+    else:
+        uid = user.get('vlessUuid') or user.get('vless_uuid')
+        if not uid:
+            raise engine.StepError('панель не вернула VLESS UUID служебного пользователя')
+        outbound = exit_outbound(panel, pnode, hosts, x['target_port'], uid)
+    try:  # Torrent Blocker выхода не должен банить весь вход разом
+        from . import plugins
+        plugins.protect_bridge(panel, x['ip'], user.get('id'), log)
+    except engine.StepError as e:
+        log(f'Torrent Blocker: исключение для входа не добавилось ({e}) — добавьте IP {x["ip"]} в исключения вручную')
     vision = x.get('mode') == 'vision'
     tag = vision_tag(x['ip']) if vision else TAG
     keep = x.get('reality') or {}  # переустановка — те же ключи: у клиентов в подписке ничего не меняется
@@ -315,22 +422,27 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     sid = keep.get('sid') or ('' if vision else secrets.token_hex(4))
     name = profile_name(x['ip'], vision)
     if vision:
-        cfg = vision_config(x['base_cfg'], x['domain'], tag, outbound)
+        cfg = vision_config(x['base_cfg'], x['domain'], tag, outbound, ru_direct=bool(ss))
     else:
         cfg = profile_config(x['listen'], x['sni'], priv, sid, outbound)
+        if ss:
+            cfg['routing']['rules'] = bridge_rules(cfg['routing']['rules'], tag, {'BLOCK'}, True)
     profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
     old = next((p for p in profiles if p['name'] == name), None)
-    via = (f'выход на {outbound["settings"]["vnext"][0]["address"]}:{outbound["settings"]["vnext"][0]["port"]} '
-           f'({outbound["streamSettings"]["network"]}, {outbound["streamSettings"]["security"]})')
+    if ss:
+        via = f'выход на {ss["address"]}:{ss["port"]} (Shadowsocks, как в eGames), российские сайты — напрямую со входа'
+    else:
+        via = (f'выход на {outbound["settings"]["vnext"][0]["address"]}:{outbound["settings"]["vnext"][0]["port"]} '
+               f'({outbound["streamSettings"]["network"]}, {outbound["streamSettings"]["security"]})')
     if old:
         # переустановка: inbound входа (SNI, ключи — их могли поменять в панели руками) не трогаем, меняем выход
         oc = old.get('config') or {}
         if not vision and any(i.get('tag') == tag for i in oc.get('inbounds', [])):
             outs = [o for o in oc.get('outbounds', []) if o.get('tag') != OUT_TAG]
-            cfg = {**oc, 'outbounds': [cfg['outbounds'][0], *outs], 'routing': oc.get('routing') or cfg['routing']}
-            if not any(r.get('outboundTag') == OUT_TAG for r in cfg['routing'].get('rules', [])):
-                cfg['routing'] = {**cfg['routing'], 'rules': [*cfg['routing'].get('rules', []),
-                                                              {'type': 'field', 'inboundTag': [tag], 'outboundTag': OUT_TAG}]}
+            routing = oc.get('routing') or cfg['routing']
+            block = {o.get('tag') for o in outs if o.get('protocol') == 'blackhole'}
+            cfg = {**oc, 'outbounds': [cfg['outbounds'][0], *outs],
+                   'routing': {**routing, 'rules': bridge_rules(routing.get('rules') or [], tag, block, bool(ss))}}
         panel.call('PATCH', '/api/config-profiles', {'uuid': old['uuid'], 'config': cfg})
         prof = next(p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == old['uuid'])
         log(f'панель: профиль «{name}» обновлён — {via}')
@@ -351,7 +463,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
             panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
-            'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'username': bridge_username(pnode['uuid']),
+            'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'user_id': user.get('id'), 'ip': x['ip'], 'ss': ss, 'username': bridge_username(pnode['uuid']),
             'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}
 
 
@@ -378,6 +490,17 @@ def teardown_panel(panel: engine.Panel, made: dict, user_in_use: bool, log) -> N
             log('панель: профиль моста удалён')
         except engine.StepError as e:
             log(f'панель: профиль моста удалить не удалось: {e}')
+    if made.get('ss') and not user_in_use:
+        try:
+            remove_ss_exit(panel, made['ss'], log)
+        except engine.StepError as e:
+            log(f'панель: Shadowsocks-вход моста с выхода убрать не удалось: {e}')
+    if not user_in_use and made.get('ip'):
+        try:
+            from . import plugins
+            plugins.protect_bridge(panel, made['ip'], made.get('user_id'), log, remove=True)
+        except engine.StepError as e:
+            log(f'Torrent Blocker: исключение входа убрать не удалось: {e}')
     if made.get('user') and not user_in_use:
         try:
             panel.call('DELETE', f'/api/users/{made["user"]}')

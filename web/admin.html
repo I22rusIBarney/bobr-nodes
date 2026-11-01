@@ -2758,6 +2758,24 @@ async function toVision(pid, uuid, x) {
   const r = await UI.run(() => api(`relays/${x.id}/to-xray`, 'POST', { mode: 'vision' }));
   if (r) { await reloadNode(pid, uuid); UI.nav.refresh(); }
 }
+function hopSheet(pid, uuid, x) {
+  UI.sheet('Связь входа с выходом', close => {
+    let hop = x.hop || 'vless';
+    const opts = [{ value: 'ss', label: 'Shadowsocks' }, { value: 'vless', label: 'VLESS' }];
+    const wrap = h('div', {}), draw = () => wrap.replaceChildren(UI.chips(opts, hop, v => { hop = v; draw(); }));
+    draw();
+    const go = h('button', { class: 'btn', type: 'button' }, 'Применить');
+    go.onclick = UI.busy(go, async () => {
+      if (hop === (x.hop || 'vless')) return close();
+      const r = await UI.run(() => api(`relays/${x.id}/hop`, 'POST', { hop }));
+      if (r) { close(); await reloadNode(pid, uuid); UI.nav.refresh(); }
+    });
+    return h('div', { style: 'padding-bottom:var(--s5)' }, group('Как вход ходит на ' + mid(x.target, 22), [h('div', { class: 'seg-row' }, wrap)],
+      'Shadowsocks — как в скриптах eGames: на выходе отдельный вход только для моста (порт 9999, включён только на этой ноде), мимо общего inbound клиентов с его Psiphon, WARP и правилами; российские сайты идут со входа напрямую. ' +
+      'VLESS — вход подключается к выходу как обычный клиент. Меняется только панель, Xray выхода перезапустится на пару секунд, подписку клиентам обновлять не нужно.'),
+      h('div', { class: 'cta' }, go));
+  });
+}
 function toXraySheet(pid, uuid, x) {
   UI.sheet('Серверный роутинг', close => {
     let sni = XB_SNI[0];
@@ -2799,6 +2817,7 @@ function relayView(pid, uuid, rid) {
     x.server_id ? row({ title: 'Сервер', cls: 'wrap', sub: [x.flag, specText(x.spec) || ('Bobr Cloud #' + x.server_id)].filter(Boolean).join(' '), detail: x.price_kop ? rubK(x.price_kop) + '/мес' : null }) : null,
     x.ip ? row({ title: 'Клиенты подключаются', detail: `${mid(x.address, 22)}:${x.listen}`, mono: true, copy: x.address }) : null,
     row({ title: 'Трафик идёт на', detail: `${mid(x.target, 22)}:${x.target_port}`, mono: true }),
+    ['xray', 'vision'].includes(x.mode) && x.status === 'ok' ? row({ title: 'Связь с выходом', detail: x.hop === 'ss' ? `Shadowsocks :${x.hop_port || ''}` : 'VLESS', onClick: () => hopSheet(pid, uuid, x) }) : null,
     row({ title: 'Хостов в панели', detail: String(x.hosts) }),
     row({ title: 'Вход по SSH', detail: x.access })].filter(Boolean)));
   if ((x.log || []).length) v.append(group(running ? 'Журнал' : 'Последняя установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, x.log.slice(-16).join('\n'))]));
