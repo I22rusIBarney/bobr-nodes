@@ -585,6 +585,95 @@ function migrateView() {
     'Переносится всё: база (группы, ноды, задачи, пользователи, история), SSH-ключи бота, журналы, оформление и настройки. Новые ноды и чекеры трогать не нужно — ключ бота тот же.'));
   return v;
 }
+// ───────── отзывы и ошибки ─────────
+let REP = null, MYREP = null;
+const REP_F = { status: 'open' };
+const REP_KIND = { auto: ['Ошибка', 'bad', 'alert', 'red'], survey: ['Опрос', 'warn', 'chat', 'amber'], user: ['Сообщение', 'accent', 'chat', 'blue'] };
+const repAt = ts => new Date(ts * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+// пользователь дописывает подробности к отчёту
+function reportComment(rid, after) {
+  UI.sheet('Подробности к отчёту #' + rid, close => {
+    const ta = h('textarea', { rows: 5, placeholder: 'Что делали, что видите, когда началось…', style: 'text-align:left' });
+    const b = h('button', { class: 'btn', type: 'button' }, 'Отправить');
+    b.onclick = UI.busy(b, async () => { const r = await UI.run(() => api(`reports/${rid}/comment`, 'POST', { text: ta.value })); if (r) { UI.toast(r.message); close(); if (after) after(); } });
+    return h('div', { style: 'padding:0 var(--gutter) var(--s5)' }, h('label', { class: 'field stack' }, ta), h('div', { style: 'height:12px' }), b);
+  });
+}
+// пользователь: сообщить о проблеме и свои отчёты
+function problemView() {
+  const v = h('div', { class: 'problem-page' }, ...pageHead('Сообщить о проблеме', { sub: 'Администратор получит сообщение в Telegram и ответит здесь же' }));
+  const load = () => api('my/reports').then(r => { MYREP = r.reports; }).catch(() => { MYREP = []; }).then(() => { if (document.querySelector('#root .problem-page')) UI.nav.refresh(); });
+  if (MYREP === null) { MYREP = undefined; load(); }
+  const ta = h('textarea', { rows: 5, placeholder: 'Что случилось? Какая группа или нода, что вы делали, что видите.', style: 'text-align:left' });
+  const ps = ST.profiles || [];
+  let pid = ps.length === 1 ? ps[0].id : null;
+  const rows = [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Описание'), ta)];
+  if (ps.length > 1) rows.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Группа'),
+    UI.segmented([{ value: null, label: 'Не важно' }, ...ps.slice(0, 3).map(p => ({ value: p.id, label: mid(p.name, 14) }))], pid, x => { pid = x; }, 'fill')));
+  v.append(group('Новое сообщение', rows, 'Ошибки установок и обновлений администратор получает сам — о них писать не нужно.'));
+  const send = h('button', { class: 'btn', type: 'button' }, 'Отправить');
+  send.onclick = UI.busy(send, async () => { const r = await UI.run(() => api('reports', 'POST', { text: ta.value, pid })); if (r) { UI.toast(r.message); ta.value = ''; load(); } });
+  v.append(h('div', { class: 'cta' }, send));
+  if (MYREP && MYREP.length) v.append(group('Мои отчёты', MYREP.map(x => {
+    const [kt, kc, ic, col] = REP_KIND[x.kind] || REP_KIND.user;
+    const reply = x.replies.length ? x.replies[x.replies.length - 1].text : '';
+    return row({ icon: ic, color: col, title: x.kind === 'auto' ? `${x.domain || 'Задача'}: ${mid(x.error, 60)}` : mid((x.text || x.domain || '').replace(/^\[[^\]]+\]\s*/, ''), 80), cls: 'wrap', chevron: false,
+      sub: `#${x.id} · ${repAt(x.ts)}` + (reply ? ` · ответ: ${mid(reply, 120)}` : ''), status: x.status === 'done' ? ['решено', 'ok'] : ['у администратора', 'warn'],
+      onClick: x.status === 'open' ? () => reportComment(x.id, load) : null });
+  })));
+  return v;
+}
+// администратор: статистика, список, отчёт
+function reportsView() {
+  const v = h('div', { class: 'reports-page' }, ...pageHead('Отзывы и ошибки', { sub: 'за 30 дней' }));
+  const load = () => api('reports?status=' + REP_F.status).then(r => { REP = r; }).catch(e => { REP = { error: e.message }; }).then(() => { if (document.querySelector('#root .reports-page')) UI.nav.refresh(); });
+  if (REP === null) { REP = { loading: true }; load(); }
+  if (REP.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (REP.error) { v.append(UI.failed(REP.error, () => { REP = null; UI.nav.refresh(); })); return v; }
+  const S = REP.stats, total = S.done + S.failed;
+  const pct = (a, b) => b ? Math.round(a * 100 / b) + '%' : '—';
+  v.append(h('div', { class: 'stats' }, statTile(pct(S.done, total), 'успешно', null, 'ok'), statTile(S.failed, 'ошибок', null, 'bad'),
+    statTile(S.surveys ? pct(S.good, S.surveys) : '—', 'довольны', null, 'surv')));
+  if (S.kinds.length) v.append(group('По задачам', S.kinds.map(k => row({ title: k.title, chevron: false, cls: 'wrap',
+    sub: `успешно ${k.done} · ошибок ${k.failed}` + (k.good + k.bad ? ` · опрос 👍 ${k.good} 👎 ${k.bad}` : ''),
+    status: k.failed && k.failed / (k.done + k.failed) > 0.2 ? ['часто падает', 'bad'] : null }))));
+  v.append(UI.fchips([{ value: 'open', label: 'Открытые', n: S.open, tone: S.open ? 'warn' : '' }, { value: '', label: 'Все' }], REP_F.status, x => { REP_F.status = x; REP = null; UI.nav.refresh(); }));
+  const L = REP.reports;
+  v.append(group(null, L.length ? L.map(x => {
+    const [kt, kc] = REP_KIND[x.kind] || REP_KIND.user;
+    const head = x.kind === 'auto' ? `${x.domain || 'задача #' + x.job_id}: ${mid(x.error, 70)}` : x.kind === 'survey' ? `Не работает: ${x.domain}` : mid((x.text || '').replace(/^\[[^\]]+\]\s*/, ''), 80);
+    return row({ lead: UI.avatar({ first_name: x.who, id: x.uid }, 36, ava(x.uid)), title: head, cls: 'wrap',
+      sub: [x.who, x.group, repAt(x.ts), x.count > 1 ? `повторялось ${x.count} раз` : '', x.text && x.kind !== 'user' ? 'есть комментарий' : ''].filter(Boolean).join(' · '),
+      tags: [[kt, kc], x.status === 'done' ? ['решено', 'ok'] : null].filter(Boolean), onClick: () => UI.nav.push(() => reportView(x.id)) });
+  }) : [row({ title: REP_F.status === 'open' ? 'Открытых отчётов нет' : 'Отчётов пока нет', sub: 'Ошибки задач и ответы «есть проблема» появятся здесь сами', cls: 'is-dim wrap', chevron: false })]));
+  return v;
+}
+const REPD = {};
+function reportView(id) {
+  const x = REPD[id];
+  const load = () => api('reports/' + id).then(r => { REPD[id] = r; }).catch(e => { REPD[id] = { error: e.message }; }).then(() => UI.nav.refresh());
+  if (!x) { REPD[id] = { loading: true }; load(); }
+  if (!x || x.loading) return h('div', {}, ...pageHead('Отчёт #' + id), h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })])));
+  if (x.error && !x.id) return h('div', {}, ...pageHead('Отчёт #' + id), UI.failed(x.error, () => { delete REPD[id]; UI.nav.refresh(); }));
+  const [kt, kc] = REP_KIND[x.kind] || REP_KIND.user;
+  const v = h('div', {}, ...pageHead('Отчёт #' + id, { sub: `${kt} · ${repAt(x.ts)}` }));
+  const info = [row({ lead: UI.avatar({ first_name: x.who, id: x.uid }, 40, ava(x.uid)), title: x.who, sub: x.group || null, chevron: false })];
+  if (x.domain) info.push(row({ title: x.kind === 'survey' ? 'Ноды' : 'Нода', detail: mid(x.domain, 30), mono: true, chevron: false }));
+  if (x.job_id) info.push(row({ title: 'Задача #' + x.job_id, sub: x.stage ? 'этап «' + x.stage + '»' : null, onClick: () => { delete JOB[x.job_id]; UI.nav.push(() => jobView(x.job_id)); } }));
+  v.append(group(null, info));
+  if (x.error) v.append(h('div', { class: 'notice bad' }, h('b', {}, 'Ошибка' + (x.count > 1 ? ` (повторялась ${x.count} раз)` : '') + ': '), x.error));
+  if (x.text) v.append(group('От пользователя', [h('pre', { class: 'code log' }, x.text)]));
+  if (x.replies.length) v.append(group('Ответы', x.replies.map(r => row({ icon: 'send', color: 'blue', title: r.text, sub: repAt(r.at), cls: 'wrap', chevron: false }))));
+  if (x.log) v.append(group('Журнал задачи', [h('pre', { class: 'code log' }, x.log)]));
+  const ta = h('textarea', { rows: 3, placeholder: 'Ответ пользователю (придёт ему в Telegram)', style: 'text-align:left' });
+  const act = async done => { const r = await UI.run(() => api(`reports/${id}/resolve`, 'POST', { reply: ta.value, done }), done ? 'Отмечено решённым' : 'Отправлено'); if (r) { REPD[id] = r; REP = null; UI.nav.refresh(); load(); } };
+  const solve = h('button', { class: 'btn', type: 'button' }, x.status === 'done' ? 'Ответить' : 'Решено' + (x.uid === ST.me_id ? '' : ' — сообщить пользователю'));
+  solve.onclick = UI.busy(solve, () => act(true));
+  const reply = h('button', { class: 'btn secondary', type: 'button' }, x.status === 'done' ? 'Открыть снова' : 'Только ответить');
+  reply.onclick = UI.busy(reply, () => act(false));
+  v.append(group('Ответ', [h('label', { class: 'field stack' }, ta)]), h('div', { class: 'cta', style: 'display:grid;gap:8px' }, solve, reply));
+  return v;
+}
 // ───────── история версий ─────────
 const KIND = { new: ['sparkle', 'violet', 'Новое'], better: ['zap', 'amber', 'Лучше'], fix: ['check', 'green', 'Исправлено'] };
 function changelogView() {
@@ -1391,9 +1480,12 @@ function usersView() {
   if (old.length) v.append(group(['Прошлые приглашения', h('span', { class: 'n' }, old.length)], old.map(i => inviteCard(i, reload))));
   return v;
 }
+// аватарки из Telegram: одна загрузка на человека за сеанс, нет фото — инициалы
+const AVA = new Map();
+const ava = id => () => { const k = Number(id) || 0; if (!k) return null; if (!AVA.has(k)) AVA.set(k, UI.blobUrl('/api/avatar/' + k).catch(() => null)); return AVA.get(k); };
 function userCard(u) {
   const own = u.groups.filter(g => g.mine).length;
-  return row({ lead: UI.avatar(u, 40), title: u.label, cls: 'wrap',
+  return row({ lead: UI.avatar(u, 40, ava(u.tg_id)), title: u.label, cls: 'wrap',
     sub: [u.username && '@' + u.username !== u.label ? '@' + u.username : '', 'с ' + day(u.created_at), u.groups.length ? `групп ${u.groups.length}` : 'групп нет', u.checkers ? `чекеров ${u.checkers}` : ''].filter(Boolean).join(' · '),
     tags: [u.blocked ? ['Закрыт', 'bad'] : own ? ['Владелец группы', 'accent'] : u.groups.length ? ['Клиент', 'ok'] : ['Без групп', '']],
     onClick: () => UI.nav.push(() => userView(u.tg_id)) });
@@ -1433,6 +1525,7 @@ function userView(tg) {
   if (!u) return h('div', {}, ...title('Пользователь', 'Пользователи'), h('div', { class: 'notice' }, 'Пользователь удалён'));
   const reload = async () => { await loadUsers(); await load(); UI.nav.refresh(); };
   const v = h('div', {}, ...title(u.label, 'Пользователи'));
+  v.append(group(null, [row({ lead: UI.avatar(u, 56, ava(u.tg_id)), title: [u.first_name, u.last_name].filter(Boolean).join(' ') || u.label, sub: u.username ? '@' + u.username : null, chevron: false, cls: 'wrap' })]));
   v.append(group(null, [
     row({ title: 'Telegram ID', detail: String(u.tg_id), mono: true, copy: String(u.tg_id) }),
     u.username ? row({ title: 'Username', detail: '@' + u.username }) : null,
@@ -1503,7 +1596,7 @@ function groupView(pid) {
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Панель',
     st ? h('span', { class: 'st ' + (st.ok ? 'ok' : 'bad'), style: 'margin-left:auto;font-size:13px;font-weight:500' }, st.ok ? st.message.replace(/^Панель отвечает: /, '') : 'нет связи') : null),
     st && !st.ok ? h('div', { class: 'failed', style: 'margin:0 0 10px' }, h('p', { style: 'margin:0' }, h('b', {}, 'Панель не отвечает'), st.message)) : null,
-    h('div', { class: 'qa four' }, [['Обновление нод', 'renew', 'teal', go.upd], ['Автоматизация', 'zap', 'amber', go.auto], ['Аренда', 'calendar', 'green', go.rent], ['Настройки', 'gear', 'gray', go.set]]
+    h('div', { class: 'qa four' }, [['Обновления', 'renew', 'teal', go.upd], ['Автоматизация', 'zap', 'amber', go.auto], ['Аренда', 'calendar', 'green', go.rent], ['Настройки', 'gear', 'gray', go.set]]
       .map(([t, ic, c, fn]) => h('button', { type: 'button', onclick: fn }, UI.tile(ic, c), t))),
     UI.stack([row({ icon: 'shield', color: 'red', title: 'Плагины нод', sub: 'блокировка торрентов, фильтры сканеров', onClick: go.plug }),
       row({ icon: 'trash', color: 'gray', title: 'Уборка', sub: 'лишние серверы и мёртвые ноды', onClick: go.clean })])));
@@ -1594,10 +1687,10 @@ function groupStats(v, pid, L) {
 }
 function groupAccess(v, g) {
   const admin = isAdmin(), rows = [];
-  if (admin) rows.push(row({ lead: UI.avatar({ first_name: ST.me || 'Вы', id: 1 }, 40), title: (ST.me || 'Вы') + ' — администратор', sub: 'все группы и настройки бота', chevron: false, tags: [['Владелец', 'accent']] }));
-  else rows.push(row({ lead: UI.avatar({ first_name: ST.me || 'Вы', id: 2 }, 40), title: ST.me || 'Вы', sub: g.kind === 'shared' ? 'группу завёл для вас администратор' : 'ваша группа', chevron: false, tags: [['Вы', 'accent']] }));
-  if (admin && g.created_by_label) rows.push(row({ lead: UI.avatar({ first_name: g.created_by_label, id: 3 }, 40), title: g.created_by_label, sub: 'создал группу', chevron: false, tags: [['Пользователь', '']] }));
-  if (g.owner_label) rows.push(row({ lead: UI.avatar({ first_name: g.owner_label, id: 4 }, 40), title: g.owner_label, sub: 'серверы покупаются с его баланса в Bobr Cloud', chevron: false, tags: [['Клиент Bobr Cloud', 'ok']] }));
+  if (admin) rows.push(row({ lead: UI.avatar({ first_name: ST.me || 'Вы', id: 1 }, 40, ava(ST.me_id)), title: (ST.me || 'Вы') + ' — администратор', sub: 'все группы и настройки бота', chevron: false, tags: [['Владелец', 'accent']] }));
+  else rows.push(row({ lead: UI.avatar({ first_name: ST.me || 'Вы', id: 2 }, 40, ava(ST.me_id)), title: ST.me || 'Вы', sub: g.kind === 'shared' ? 'группу завёл для вас администратор' : 'ваша группа', chevron: false, tags: [['Вы', 'accent']] }));
+  if (admin && g.created_by_label) rows.push(row({ lead: UI.avatar({ first_name: g.created_by_label, id: 3 }, 40, ava(g.created_by)), title: g.created_by_label, sub: 'создал группу', chevron: false, tags: [['Пользователь', '']] }));
+  if (g.owner_label) rows.push(row({ lead: UI.avatar({ first_name: g.owner_label, id: 4 }, 40, isAdmin() ? ava(g.owner_tg_id) : null), title: g.owner_label, sub: 'серверы покупаются с его баланса в Bobr Cloud', chevron: false, tags: [['Клиент Bobr Cloud', 'ok']] }));
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Кто видит группу', h('span', { class: 'n' }, rows.length)), UI.stack(rows),
     h('div', { class: 'group-f' }, 'Пользователи бота видят только свои группы и группы, где они клиенты Bobr Cloud. Клиента меняют в настройках группы.')));
   if (admin) v.append(h('div', { class: 'cta' }, h('button', { class: 'btn tinted', type: 'button', onclick: () => { USERS = null; UI.nav.push(usersView); } }, icon('userPlus'), 'Пользователи и приглашения')));
@@ -2872,10 +2965,12 @@ function settingsTab() {
     row({ icon: 'sun', color: 'amber', title: 'Утренняя сводка', sub: 'итог по группам раз в день', onClick: () => { SUM = null; UI.nav.push(summaryView); } }),
     row({ icon: 'palette', color: 'pink', title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) }),
     row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } }),
-    row({ icon: 'sparkle', color: 'violet', title: 'Обучение', sub: 'короткая экскурсия по разделам', onClick: () => tourStart() })],
+    row({ icon: 'sparkle', color: 'violet', title: 'Обучение', sub: 'короткая экскурсия по разделам', onClick: () => tourStart() }),
+    admin ? null : row({ icon: 'chat', color: 'blue', title: 'Сообщить о проблеме', sub: 'отчёт уйдёт администратору', onClick: () => { MYREP = null; UI.nav.push(problemView); } })].filter(Boolean),
     admin ? null : 'Серверы покупаются с вашего баланса в Bobr Cloud, домены — вашим токеном Cloudflare.'));
   if (!admin) return v;
-  v.append(group('Доступ', [row({ icon: 'users', color: 'green', title: 'Пользователи', sub: 'приглашения и доступ к группам', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } })]));
+  v.append(group('Доступ', [row({ icon: 'users', color: 'green', title: 'Пользователи', sub: 'приглашения и доступ к группам', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }),
+    row({ icon: 'chart', color: 'violet', title: 'Отзывы и ошибки', sub: 'отчёты, опросы, статистика установок', status: ST.reports_open ? ['новых: ' + ST.reports_open, 'warn'] : null, onClick: () => { REP = null; UI.nav.push(reportsView); } })]));
   v.append(group('Сервер бота', serviceRows()));
   return v;
 }
@@ -2921,6 +3016,9 @@ function jobView(id) {
     if (other) retry.className = 'btn tinted';
     v.append(h('div', { class: 'notice bad' }, h('b', {}, (j.stages[cur] || {}).label ? 'Остановилось на шаге «' + j.stages[cur].label + '». ' : 'Ошибка. '), j.error,
       other, other ? h('div', { style: 'height:8px' }) : null, retry));
+    if (j.report && j.report_to_admin) v.append(h('div', { class: 'notice' }, h('b', {}, '📨 Отчёт об ошибке уже у администратора. '),
+      'Писать ему отдельно не нужно — он видит ошибку, этап и журнал. ',
+      h('button', { class: 'btn plain', type: 'button', style: 'width:auto;padding:0;min-height:0', onclick: () => reportComment(j.report) }, 'Добавить подробности')));
   }
   if (j.status === 'done' && j.ip) v.append(group('Доступ', [
     row({ title: 'IP', detail: j.ip, mono: true, copy: j.ip, copyLabel: 'IP' }),

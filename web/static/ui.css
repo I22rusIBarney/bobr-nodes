@@ -338,11 +338,19 @@ textarea.code, input.code { font-family: var(--mono); font-size: 13px; letter-sp
 .stat span { display: block; font-size: 13px; color: var(--hint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .stat b.ok { color: var(--ok); } .stat b.bad { color: var(--danger); } .stat b.warn { color: var(--warn); }
 .cta { margin: 0 var(--gutter) var(--s5); }
-.qa { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.qa { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.group:has(> .qa:not(.four)) { container-type: inline-size; }
+@container (max-width: 19em) { .qa:not(.four) { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .qa button { min-height: 92px; border: 0; border-radius: 14px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--line); color: var(--text);
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 12px 6px; font-size: 13px; line-height: 16px; font-weight: 500; text-align: center; position: relative; }
 .qa button:active { background: var(--surface-2); }
-.qa.four { grid-template-columns: repeat(4, 1fr); }
+.qa.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* четыре плитки не помещаются (узкий экран, крупный шрифт) — 2 × 2, а не 3 + 1 */
+.group:has(> .qa.four) { container-type: inline-size; }
+@container (max-width: 25em) { .qa.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* крупный шрифт в Telegram: плитки переходят в 2 ряда, а не налезают друг на друга; подписи переносятся по слогам */
+.qa button { min-width: 0; overflow-wrap: anywhere; hyphens: auto; }
+.qa + .stack, .qa + .list { margin-top: 8px; }
 .qa.four button { min-height: 80px; font-size: 12px; line-height: 15px; padding: 10px 4px; gap: 7px; }
 .qa.four button .icon-tile { width: 32px; height: 32px; border-radius: 10px; }
 .qa button .icon-tile { width: 36px; height: 36px; border-radius: 11px; }

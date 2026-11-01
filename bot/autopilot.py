@@ -248,6 +248,7 @@ class Autopilot:
         self._lock = asyncio.Lock()
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
         self.notify = Notifier(store, bot, access)
+        self.feedback = None  # опросы после установки (задаётся в main)
 
     # ── служебное ──
     def get(self, key: str) -> dict:
@@ -304,6 +305,11 @@ class Autopilot:
                     log.exception('autopilot update %s', prof.get('id'))
             await self.summaries(now)
             await self.host_alert(now)
+            if self.feedback is not None:
+                try:
+                    await self.feedback.surveys(now)
+                except Exception:  # noqa: BLE001
+                    log.exception('surveys')
         if now - self._pload_at >= PANEL_EVERY:
             self._pload_at = now
             self._bg_task(self.panel_load())
