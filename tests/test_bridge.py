@@ -50,3 +50,17 @@ def test_convert_cmd_stops_node_but_keeps_files():
         assert u in c
     assert "certbot delete --non-interactive --cert-name ch1.example.com" in c and 'CONVERT_OK' in c
     assert "''" in rl.convert_cmd('')
+
+
+def test_bridge_verdict():
+    from bot import relay as rl
+    OK = {'tcp': 'ok', 'tls': 'ok'}
+    base = {'sni': 'swe.example.com', 'from_entry': OK, 'from_bot': OK}
+    assert 'фильтр по IP' in rl.verdict({**base, 'from_entry': {'tcp': 'ok', 'tls': 'fail'}, 'checkers': []})[0]
+    assert 'пробросе' in rl.verdict({**base, 'from_bot': {'tcp': '?', 'tls': 'stall'}, 'checkers': []})[0]
+    sni = rl.verdict({**base, 'checkers': [{'entry': {'tcp': 'ok', 'tls': 'stall'}, 'node': {'tcp': 'ok', 'tls': 'stall'}}]})
+    assert 'SNI' in sni[0] and 'swe.example.com' in sni[0] and 'Напрямую' in sni[1]
+    assert 'IP входа недоступен' in rl.verdict({**base, 'checkers': [{'entry': {'tcp': 'fail', 'tls': 'fail'}}]})[0]
+    assert 'мост работает' in rl.verdict({**base, 'checkers': [{'entry': OK, 'node': {'tcp': 'fail', 'tls': 'fail'}}]})[0]
+    assert rl.parse_probe('PROBE entry t=ok s=cert\nPROBE node t=fail s=fail') == {'entry': {'tcp': 'ok', 'tls': 'cert'},
+                                                                                   'node': {'tcp': 'fail', 'tls': 'fail'}}

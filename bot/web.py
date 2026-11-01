@@ -1123,6 +1123,58 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю — ход на этой странице'})
         return J(await relay_run(x, store.profile(x['pid']), x['ip']))
 
+    @r.post('/api/relays/{rid}/check')
+    async def relay_check(request):
+        """Где рвётся мост: вход → нода (с сервера входа), бот → вход (из-за рубежа), чекеры в России → вход и → нода.
+        Везде — TCP и TLS-рукопожатие с SNI домена ноды, как у клиента."""
+        import ssl
+        from . import checker as ck
+        x = relay_or_404(request.match_info['rid'], request)
+        if not x.get('ip'):
+            raise ApiError('Сервер входа ещё создаётся')
+        sni = x['target'] if not engine.is_ip(x['target']) else ''
+        items_entry = [('node', x['target'], int(x['target_port']), sni)]
+        items_ru = [('entry', x['ip'], int(x['listen']), sni), ('node', x['target'], int(x['target_port']), sni)]
+        out: dict = {'sni': sni, 'entry': x.get('address') or x['ip'], 'listen': x['listen'], 'target': x['target'],
+                     'target_port': x['target_port'], 'from_entry': None, 'from_bot': None, 'checkers': []}
+
+        async def from_entry():
+            try:
+                _, o = await asyncio.to_thread(relay_remote(x).run, rl.probe_cmd(items_entry), 60)
+                out['from_entry'] = rl.parse_probe(o).get('node') or {'error': 'нет ответа проверки'}
+            except engine.StepError as e:
+                out['from_entry'] = {'error': str(e)[:200]}
+
+        async def from_bot():
+            ctx = ssl.create_default_context()
+            try:
+                _, w = await asyncio.wait_for(asyncio.open_connection(x['ip'], int(x['listen']), ssl=ctx,
+                                                                      server_hostname=sni or None), 12)
+                w.close()
+                out['from_bot'] = {'tcp': 'ok', 'tls': 'ok'}
+            except ssl.SSLCertVerificationError:
+                out['from_bot'] = {'tcp': 'ok', 'tls': 'cert'}
+            except (asyncio.TimeoutError, TimeoutError):
+                out['from_bot'] = {'tcp': '?', 'tls': 'stall'}
+            except (OSError, ssl.SSLError) as e:
+                out['from_bot'] = {'tcp': 'fail' if isinstance(e, ConnectionRefusedError) else '?', 'tls': 'fail', 'error': str(e)[:120]}
+
+        async def from_checker(ch):
+            row = {'id': ch['id'], 'name': ch.get('name', ''), 'region': ch.get('region', '')}
+            try:
+                path, _, kh = mon().keyfiles()
+                _, o = await asyncio.to_thread(ck.remote(ch, path, kh).run, rl.probe_cmd(items_ru), 60)
+                row.update(rl.parse_probe(o))
+            except (engine.StepError, OSError) as e:
+                row['error'] = str(e)[:160]
+            out['checkers'].append(row)
+
+        cks = [ch for ch in store.checkers() if ch.get('status') == 'running'] if monitor is not None else []
+        await asyncio.gather(from_entry(), from_bot(), *[from_checker(ch) for ch in cks])
+        out['checkers'].sort(key=lambda r: r['id'])
+        out['verdict'] = rl.verdict(out)
+        return J(out)
+
     @r.post('/api/relays/{rid}/forget-hostkey')
     async def relay_forget(request):
         x = relay_or_404(request.match_info['rid'], request)

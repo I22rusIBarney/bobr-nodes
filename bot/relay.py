@@ -77,6 +77,70 @@ def apply_cmd(entries: list[tuple[int, str, int]], closed: list[int] = ()) -> st
         'echo RELAY_OK')
 
 
+def probe_cmd(items: list[tuple[str, str, int, str]]) -> str:
+    """Проверка звеньев моста с этого сервера: TCP и TLS-рукопожатие с SNI домена ноды.
+    tls: ok — сертификат проверен; cert — рукопожатие прошло, сертификат не проверился; stall — соединение
+    есть, а ответа нет (так режет ТСПУ); fail — сброс или ошибка."""
+    out = [f': {MARK}; ']
+    for label, host, port, sni in items:
+        h, p_, sn = shlex.quote(host), int(port), shlex.quote(sni or host)
+        out.append(
+            f'if timeout 6 bash -c "</dev/tcp/{host}/{p_}" 2>/dev/null; then t=ok; else t=fail; fi; '
+            f'o=$(timeout 10 openssl s_client -connect {h}:{p_} -servername {sn} </dev/null 2>&1); '
+            'if echo "$o" | grep -q "Verify return code: 0"; then s=ok; '
+            'elif echo "$o" | grep -qE "Server certificate|BEGIN CERTIFICATE"; then s=cert; '
+            'elif echo "$o" | grep -q "CONNECTED" && ! echo "$o" | grep -qiE "errno|reset|alert|error"; then s=stall; '
+            'else s=fail; fi; '
+            f'echo "PROBE {label} t=$t s=$s"; ')
+    out.append('command -v openssl >/dev/null || echo PROBE_NO_OPENSSL; true')
+    return ''.join(out)
+
+
+def parse_probe(out: str) -> dict:
+    res = {}
+    for label, t, s in re.findall(r'PROBE (\S+) t=(\w+) s=(\w+)', engine.strip_ansi(out)):
+        res[label] = {'tcp': t, 'tls': s}
+    if 'PROBE_NO_OPENSSL' in out:
+        res['_no_openssl'] = True
+    return res
+
+
+def verdict(o: dict) -> list[str]:
+    """Что значит результат проверки — простыми словами, от первого звена к последнему."""
+    good = ('ok', 'cert')
+    e, b, rus = o['from_entry'] or {}, o['from_bot'] or {}, [c for c in o['checkers'] if 'entry' in c]
+    if e.get('error'):
+        return [f'Бот не смог зайти на сервер входа: {e["error"]}']
+    if e.get('tcp') != 'ok':
+        return ['С сервера входа не открывается порт ноды — нода выключена, порт закрыт или фаервол ноды не пускает IP входа.']
+    if e.get('tls') not in good:
+        return ['Порт ноды с сервера входа открывается, но нода не отвечает по TLS. Так бывает, когда на ноде фильтр по IP '
+                '(плагин Ingress Filter или Torrent Blocker заблокировал IP входа) или на этом порту не Xray.']
+    if b.get('tls') not in good:
+        return ['Нода отвечает входу, но через сам вход TLS не проходит даже из-за рубежа — проблема в пробросе на входе '
+                '(порт, облачный фаервол хостера входа). Нажмите «Переустановить».']
+    if not rus:
+        return ['Вход и нода в порядке из-за рубежа. Чекеров в России нет — проверить путь из России нечем.']
+    tcp_bad = [c for c in rus if c['entry'].get('tcp') != 'ok']
+    tls_bad = [c for c in rus if c['entry'].get('tcp') == 'ok' and c['entry'].get('tls') not in good]
+    node_bad = [c for c in rus if (c.get('node') or {}).get('tls') not in good]
+    n = len(rus)
+    if len(tcp_bad) == n:
+        return ['Из России не открывается даже порт входа — IP входа недоступен из России (заблокирован или режется хостер). '
+                'Нужен другой сервер входа.']
+    if len(tls_bad) + len(tcp_bad) == n:
+        msg = ['Из России порт входа открывается, но TLS-рукопожатие с доменом ноды не проходит. Значит, режут не IP, а SNI '
+               f'— домен {o["sni"] or "ноды"} попал под фильтр. Мост с тем же доменом не поможет: нужен новый домен ноды '
+               '(лучше в другой зоне) или REALITY с чужим SNI.']
+        if len(node_bad) == n:
+            msg.append('Напрямую к ноде из России — то же самое.')
+        return msg
+    if tcp_bad or tls_bad:
+        return [f'Из России проходит у {n - len(tcp_bad) - len(tls_bad)} из {n} чекеров — у разных провайдеров по-разному.']
+    return ['Из России вход открывается и TLS проходит — мост работает. Если клиент не подключается: обновите подписку и '
+            'выберите хост моста (адрес входа), а не прямой хост ноды.']
+
+
 def convert_cmd(domain: str) -> str:
     """Сервер с нодой → под мост: остановить ноду (Xray освобождает 443) и всё, что ставил установщик и дополнения.
     Ничего не удаляем вслепую: каталог ноды переезжает в /opt/remnanode.bridge-<время> (откатить — переименовать
