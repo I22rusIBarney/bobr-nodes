@@ -556,8 +556,9 @@ class Monitor:
                     return prof, key, st
         return None
 
-    async def action(self, tok: str, what: str) -> str:
-        """Кнопка из сообщения или админки: fix — чинить по шагам, replace — сразу новая нода, ignore — не трогать."""
+    async def action(self, tok: str, what: str, choice: dict | None = None) -> str:
+        """Кнопка из сообщения или админки: fix — чинить по шагам, replace — сразу новая нода, ignore — не трогать.
+        choice — для replace из панели: домен для имени (zone) и тариф (idx; None — как у старой ноды)."""
         found = self.find(tok)
         if not found:
             return 'Нода уже в порядке или удалена'
@@ -573,6 +574,8 @@ class Monitor:
         if st.get('status') == 'repairing':
             return 'Починка уже идёт'
         st['steps_done'] = [x for x in STEPS if x != 'replace'] if what == 'replace' else []
+        if what == 'replace' and choice:
+            st['choice'] = {k: v for k, v in choice.items() if k in ('zone', 'idx') and v not in (None, '')}
         self.store.set_mon(key, st)
         return await self.start_repair(prof, st, only_replace=what == 'replace')
 
@@ -737,14 +740,62 @@ class Monitor:
         L = next((x for x in cat['locations'] if x['code'] == loc), None)
         if not L:
             raise ValueError(f'локации «{loc or "?"}» сейчас нет в Bobr Cloud')
-        idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
-        doms = await svc.auto_domains(self.store, prof, loc, 1)
+        choice = st.pop('choice', None) or {}
+        if isinstance(choice.get('idx'), int):  # тариф выбрали в панели
+            o = next((x for x in L['offers'] if x['idx'] == choice['idx']), None)
+            if not o:
+                raise ValueError('выбранного тарифа больше нет в этой локации — откройте выбор заново')
+            idx, custom, why = o['idx'], None, svc.spec_text(o)
+        else:
+            idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
+        zone = choice.get('zone') or await self.default_zone(prof, st, bd)
+        if not zone:
+            raise ValueError('не знаю, на каком домене назвать новую ноду: задайте «домен для имён нод» в настройках группы '
+                             'или нажмите «Сразу новая нода» в панели и выберите домен')
+        doms = await svc.auto_domains(self.store, prof, loc, 1, base=zone)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
         ids = await svc.create_jobs(self.store, self.runner, self.chat(prof), prof['id'], cat, loc, idx, '1m', doms,
                                     squads=bd.get('squads'), host=bd.get('host'), extras=extras, custom=custom,
                                     note={'monitor': True, 'replaces': st['addr']})
         self.store.set(f'mon_buys:{prof["id"]}', json.dumps(buys + [time.time()]))
         return ids[0], f'покупаю новую ноду {doms[0]} в {L["flag"]} {L["name"]}, {why}'
+
+    async def default_zone(self, prof: dict, st: dict, bd: dict) -> str:
+        """Домен для имени новой ноды: домен группы для автоимён, иначе зона Cloudflare, в которой имя старой ноды."""
+        if prof.get('base_domain'):
+            return prof['base_domain']
+        old = bd.get('domain') or ('' if engine.is_ip(st.get('addr') or '') else st.get('addr') or '')
+        if not old:
+            return ''
+        try:
+            zones = await asyncio.to_thread(lambda: svc.cf_for(self.store, prof).zone_names())
+        except engine.StepError:
+            return ''
+        hit = [z for z in zones if old == z or old.endswith('.' + z)]
+        return max(hit, key=len) if hit else ''
+
+    async def replace_plan(self, prof: dict, st: dict) -> dict:
+        """Что предложить в окне «Сразу новая нода»: локация старой ноды, домены, тарифы и какой как у старой."""
+        cfg = settings_of(prof)
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(st['addr']) or {}
+        cat = await svc.load_catalog(self.store, prof)
+        loc = bd.get('location') or (st.get('country') or '').lower()
+        L = next((x for x in cat['locations'] if x['code'] == loc), None)
+        try:
+            zones = await asyncio.to_thread(lambda: svc.cf_for(self.store, prof).zone_names())
+        except engine.StepError:
+            zones = []
+        zone = await self.default_zone(prof, st, bd)
+        if zone and zone not in zones:
+            zones = [zone, *zones]
+        offers = [{'idx': o['idx'], 'label': svc.spec_text(o), 'price_kop': o['price_kop']} for o in (L['offers'] if L else [])]
+        same = None
+        if bd.get('idx') is not None and any(o['idx'] == bd['idx'] for o in offers):
+            same = bd['idx']
+        return {'name': st.get('name') or st['addr'], 'loc': loc, 'loc_name': L['name'] if L else '', 'flag': L['flag'] if L else '',
+                'available': bool(L), 'zones': zones, 'zone': zone, 'offers': sorted(offers, key=lambda o: o['price_kop']),
+                'same': same, 'custom': bool(bd.get('custom')),
+                'buys_left': max(0, cfg['mon_max_buys'] - len(self.buys_today(prof['id']))), 'old': cfg['mon_old']}
 
     async def pick_offer(self, prof: dict, cat: dict, L: dict, bd: dict, cfg: dict) -> tuple[int | None, dict | None, str]:
         """Первая доступная в локации конфигурация из списка группы → (idx, своя конфигурация, подпись)."""

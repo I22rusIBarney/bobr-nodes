@@ -30,6 +30,7 @@ STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
           'logo.png': 'image/png',
+          'ru-map.json': 'application/json',  # карта округов России (Natural Earth, общественное достояние; tools/build_ru_map.py)
           'flags.woff': 'font/woff',  # флаги стран для Windows и Telegram Desktop (Twemoji, CC-BY 4.0, web/static/flags-LICENSE.txt)
           **{f'hero-{k}.webp': 'image/webp' for k in (f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night'))}}
 # картинка на главной: по сезону и времени суток (auto), одна из восьми или без картинки
@@ -1808,7 +1809,19 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         found = mon().find(str(b.get('tok') or ''))
         if found and not can(request, found[0]):
             raise ApiError('Нода не найдена', 404)
-        return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what)})
+        choice = None
+        if what == 'replace' and (b.get('zone') or b.get('idx') is not None):
+            choice = {'zone': str(b.get('zone') or '').strip().lower()[:100] or None,
+                      'idx': b['idx'] if isinstance(b.get('idx'), int) and not isinstance(b.get('idx'), bool) else None}
+        return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what, choice)})
+
+    @r.get('/api/monitor/replace-plan')
+    async def monitor_replace_plan(request):
+        """Окно «Сразу новая нода»: домен, тариф и цена — перед покупкой."""
+        found = mon().find(str(request.query.get('tok') or ''))
+        if not found or not can(request, found[0]):
+            raise ApiError('Нода уже в порядке или удалена', 404)
+        return J(await mon().replace_plan(found[0], found[2]))
 
     @r.post('/api/monitor/check')
     async def monitor_check(_):
