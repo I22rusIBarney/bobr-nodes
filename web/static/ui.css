@@ -630,17 +630,20 @@ pre.log { margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.5; whit
 .bk-steps { margin: 0; padding: var(--s3) var(--s4) var(--s3) calc(var(--s4) + 1.2em); display: grid; gap: 8px; line-height: 1.4; }
 
 /* карта России по федеральным округам (мониторинг) */
-.ru-map { padding: var(--s3) var(--s3) var(--s2); }
-.ru-map svg { display: block; width: 100%; height: auto; }
-.rm-cell rect { fill: rgba(127, 127, 127, .08); stroke: rgba(127, 127, 127, .18); stroke-width: 1; }
-.rm-cell.ok rect { fill: var(--ok-soft); stroke: color-mix(in srgb, var(--ok) 45%, transparent); }
-.rm-cell.warn rect { fill: var(--warn-soft); stroke: color-mix(in srgb, var(--warn) 45%, transparent); }
-.rm-cell.bad rect { fill: var(--danger-soft); stroke: color-mix(in srgb, var(--danger) 50%, transparent); }
-.rm-l { fill: var(--hint); font-size: 10.5px; font-weight: 600; }
-.rm-cell.ok .rm-l, .rm-cell.warn .rm-l, .rm-cell.bad .rm-l { fill: var(--text); }
-.rm-v { fill: var(--text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.rm-d { fill: var(--hint-2); }
-.rm-d.ok { fill: var(--ok); } .rm-d.warn { fill: var(--warn); } .rm-d.bad { fill: var(--danger); }
+.ru-map { padding: var(--s3) var(--s2) var(--s2); }
+.ru-map svg { display: block; width: 100%; height: auto; overflow: visible; }
+.rm-d { fill: rgba(127, 127, 127, .16); stroke: rgba(127, 127, 127, .16); stroke-width: 1; transition: fill .3s; }
+.rm-d.ok { fill: color-mix(in srgb, var(--ok) 30%, transparent); stroke: color-mix(in srgb, var(--ok) 30%, transparent); }
+.rm-d.warn { fill: color-mix(in srgb, var(--warn) 30%, transparent); stroke: color-mix(in srgb, var(--warn) 30%, transparent); }
+.rm-d.bad { fill: color-mix(in srgb, var(--danger) 32%, transparent); stroke: color-mix(in srgb, var(--danger) 32%, transparent); }
+.rm-b { fill: none; stroke: var(--cell); stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; opacity: .9; }
+.rm-l { fill: var(--hint-2); font-size: 30px; font-weight: 600; paint-order: stroke; stroke: rgba(0, 0, 0, .35); stroke-width: 6px; }
+.rm-l.on { fill: var(--text); }
+.rm-p circle { fill: var(--hint-2); stroke: var(--cell); stroke-width: 4; }
+.rm-p .halo { stroke: none; opacity: .25; }
+.rm-p.ok circle { fill: var(--ok); } .rm-p.warn circle { fill: var(--warn); } .rm-p.bad circle { fill: var(--danger); }
+.rm-p.ok .halo, .rm-p.warn .halo, .rm-p.bad .halo { stroke: none; }
+.rm-n { fill: var(--text); font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: rgba(0, 0, 0, .55); stroke-width: 7px; }
 .rm-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 var(--s4) var(--s3); font-size: 12px; color: var(--hint); }
 .rm-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .rm-legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--hint-2); }
