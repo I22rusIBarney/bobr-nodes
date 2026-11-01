@@ -520,7 +520,7 @@
   // касание пришлось не на интерфейс (что-то прозрачное поверх) — назвать перехватчика, чтобы найти и убрать
   document.addEventListener('click', e => {
     const t = e.target;
-    if (!(t instanceof Element) || t === document.body || t === document.documentElement || t.closest('#root, .tabbar, .sheet, .dlg, .scrim, .toast, .composer')) return;
+    if (!(t instanceof Element) || t === document.body || t === document.documentElement || t.closest('#root, .tabbar, .sheet, .dlg, .scrim, .toast, .composer, .tour-card, .tour-block')) return;
     report('касание перехватил ' + t.tagName.toLowerCase() + (t.id ? '#' + t.id : '') + (t.className && typeof t.className === 'string' ? '.' + t.className.trim().split(/\s+/).join('.') : ''));
   }, true);
   window.addEventListener('unhandledrejection', e => report((e.reason && e.reason.message) || e.reason || 'сбой'));

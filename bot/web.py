@@ -394,6 +394,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
                   'notif_unread': NT.unread(uid_of(request)),
+                  'tour_done': bool(store.get(f'tour_done:{uid_of(request)}')),
                   'me': request['user'].get('first_name', '')})
 
     @r.post('/api/settings')
@@ -1996,6 +1997,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (TypeError, ValueError, KeyError) as e:
             raise ApiError(str(e) or 'Неверные настройки') from None
         return J(notify_view(request))
+
+    # ── обучение: показано ли пользователю (на любом устройстве) ──
+    @r.post('/api/tour')
+    async def tour_save(request):
+        done = bool((await body(request)).get('done', True))
+        store.set(f'tour_done:{uid_of(request)}', '1' if done else '')
+        return J({'ok': True, 'tour_done': done})
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:
