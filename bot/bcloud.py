@@ -11,6 +11,14 @@ class BcloudError(Exception):
     pass
 
 
+class NoMoney(BcloudError):
+    """Не хватает денег на балансе: balance_kop — сколько есть, need_kop — сколько нужно."""
+
+    def __init__(self, balance_kop: int, need_kop: int):
+        super().__init__(f'на балансе Bobr Cloud {balance_kop // 100} ₽, нужно {need_kop // 100} ₽')
+        self.balance_kop, self.need_kop = balance_kop, need_kop
+
+
 class BcloudUnavailable(BcloudError):
     """Bobr Cloud не ответил (перезапускается, сеть) — запрос можно повторить позже."""
 
@@ -55,6 +63,8 @@ class Bcloud:
                 detail = r.json().get('detail')
             except ValueError:
                 detail = r.text[:200]
+            if r.status_code == 402 and isinstance(detail, dict):
+                raise NoMoney(int(detail.get('balance_kop') or 0), int(detail.get('need_kop') or 0))
             hint = {401: ' — неверный токен', 404: ' — API выключен или неверный адрес (bcloud api-token)',
                     403: ' — доступ запрещён'}.get(r.status_code, '')
             raise BcloudError(f'Bobr Cloud {r.status_code}{hint}: {detail}')
@@ -128,6 +138,13 @@ class Bcloud:
         """Пополнение: {'url'} — оплатить на странице банка, {'status'} — списано привязанным способом."""
         return await self._new_api(self._call('POST', '/topup', json={'tg_id': self.tg_id, 'amount_rub': int(amount_rub),
                                                                        'provider': provider, 'method_id': method_id}))
+
+    async def charge(self, amount_kop: int, ref: str, comment: str = '') -> dict:
+        """Списать с баланса клиента оплату (подписка BobrNet). Повтор с тем же ref не спишет второй раз.
+        Не хватает денег — NoMoney. Списание не повторяем при обрыве: повторит следующая попытка с тем же ref."""
+        self.RETRY_FOR = 0
+        return await self._new_api(self._call('POST', '/charge', json={'tg_id': self.tg_id, 'amount_kop': int(amount_kop),
+                                                                        'ref': ref, 'comment': comment}))
 
     @staticmethod
     async def _new_api(coro):

@@ -250,8 +250,16 @@ class Autopilot:
         self.notify = Notifier(store, bot, access)
         self.feedback = None  # опросы после установки (задаётся в main)
         self.data_dir = None  # папка данных: версия бота (задаётся в main)
+        self.billing = None   # подписка пользователей (задаётся в main)
+        self._bill_at = 0.0
 
     # ── служебное ──
+    def profiles(self) -> list[dict]:
+        """Группы, которыми бот занимается: без групп пользователей, чья подписка на паузе."""
+        from . import billing
+        stop = billing.paused_profiles(self.store)
+        return [p for p in self.store.profiles() if p['id'] not in stop]
+
     def get(self, key: str) -> dict:
         try:
             v = json.loads(self.store.get(key) or '{}')
@@ -299,13 +307,19 @@ class Autopilot:
     async def tick(self, now: float | None = None) -> None:
         now = now if now is not None else time.time()
         async with self._lock:
-            for prof in self.store.profiles():
+            for prof in self.profiles():
                 try:
                     await self.drive_update(prof, now)
                 except Exception:  # noqa: BLE001
                     log.exception('autopilot update %s', prof.get('id'))
             await self.summaries(now)
             await self.host_alert(now)
+            if self.billing is not None and now - self._bill_at >= 3600:
+                self._bill_at = now
+                try:
+                    await self.billing.tick(now)
+                except Exception:  # noqa: BLE001
+                    log.exception('billing')
             if self.feedback is not None:
                 try:
                     await self.feedback.surveys(now)
@@ -398,7 +412,7 @@ class Autopilot:
     async def check_load(self) -> None:
         sem = asyncio.Semaphore(4)
         tasks = []
-        for prof in self.store.profiles():
+        for prof in self.profiles():
             if not auto_cfg(prof)['load']:
                 continue
             try:
@@ -549,7 +563,7 @@ class Autopilot:
 
     async def panel_load(self, now: float | None = None) -> None:
         """Нагрузка всех нод из панелей групп: один запрос на группу, история за сутки."""
-        for prof in self.store.profiles():
+        for prof in self.profiles():
             t = now if now is not None else time.time()
             try:
                 nodes = await asyncio.to_thread(lambda p=prof: self.panel(p).call('GET', '/api/nodes'))
@@ -765,7 +779,7 @@ class Autopilot:
         """Раз в сутки — свежие списки включённых пресетов входящих. Меняется список — плагин обновляется
         и рассылается нодам; не скачался — оставляем прежний и пробуем завтра."""
         lists: dict[str, list[str] | None] = {}
-        for prof in self.store.profiles():
+        for prof in self.profiles():
             key = f'plug:{prof["id"]}'
             mem = self.get(key)
             for pid, old in list((mem.get('ingress') or {}).items()):
@@ -882,7 +896,7 @@ class Autopilot:
     async def report_cleanup(self, now: float | None = None) -> None:
         """Нашлось что убрать — пишем сразу; тот же список — не чаще раза в неделю."""
         now = now if now is not None else time.time()
-        for prof in self.store.profiles():
+        for prof in self.profiles():
             try:
                 c = await self.cleanup(prof, now)
             except (engine.StepError, BcloudError) as e:
@@ -910,7 +924,7 @@ class Autopilot:
 
     async def check_rent(self, now: float | None = None) -> None:
         by_buyer: dict[int, list[tuple[dict, dict]]] = {}
-        for prof in self.store.profiles():
+        for prof in self.profiles():
             try:
                 r = await self.rent(prof)
             except BcloudError as e:

@@ -86,6 +86,9 @@ async def main():
     feedback = Feedback(store, bot, access, f'{data_dir}/logs', autopilot.button)
     runner.feedback = autopilot.feedback = dp['feedback'] = feedback
     autopilot.data_dir = data_dir
+    from bot.billing import Billing
+    billing = Billing(store, autopilot.notify, autopilot.button)
+    autopilot.billing = dp['billing'] = billing
     dp['autopilot'] = autopilot
 
     await bot.set_my_commands([BotCommand(command='start', description='Меню'),
@@ -105,7 +108,8 @@ async def main():
     host_task = asyncio.create_task(hostload.run())  # автообновление, нагрузка, аренда, утренняя сводка  # доступность нод из России: чекеры, сообщения, починка
     mover = migrate.Migration(store, runner, data_dir)
     app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir, monitor=monitor,
-                    access=access, autopilot=autopilot, hostload=hostload, mover=mover, feedback=feedback)
+                    access=access, autopilot=autopilot, hostload=hostload, mover=mover, feedback=feedback,
+                    billing=billing)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()

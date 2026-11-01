@@ -62,8 +62,30 @@ class AdminOnly(BaseMiddleware):
             return None
         if role == 'member':
             self.access.touch(user)
+        if role == 'paused':  # подписка на паузе: только оплата и пополнение
+            if isinstance(event, CallbackQuery) and (event.data or '').startswith('bill:'):
+                data.update(role=role, uid=uid, username=uname(user) if user else '')
+                return await handler(event, data)
+            if isinstance(event, CallbackQuery):
+                await event.answer('Доступ на паузе — продлите подписку', show_alert=True)
+                return None
+            billing = data.get('billing')
+            text, markup = paywall(billing, uid) if billing is not None else ('Доступ на паузе.', None)
+            await event.answer(text, reply_markup=markup, parse_mode='HTML')
+            return None
         data.update(role=role, uid=uid, username=uname(user) if user else '')
         return await handler(event, data)
+
+
+def paywall(billing, uid: int):
+    """Экран паузы в Telegram: что случилось, сколько стоит, кнопки «Продлить» и «Пополнить»."""
+    from . import billing as bm
+    u = billing.store.user(int(uid)) or {}
+    amount = bm.price_kop(bm.cfg(billing.store), u)
+    text = (f'⏸ <b>Доступ к BobrNet на паузе</b>\n\nСрок закончился {bm.Billing.date(u.get("access_until") or 0)}. '
+            'Ваши ноды работают, но бот ими сейчас не управляет. '
+            f'Продлите за {amount // 100} ₽ — оплата с баланса Bobr Cloud, всё вернётся сразу.')
+    return text, billing.pay_kb(amount)
 
 
 def my_profiles(store: Store, access: Access | None, role: str, uid: int, username: str = '') -> list[dict]:
@@ -641,6 +663,28 @@ async def report_comment_text(m: Message, state: FSMContext, feedback=None, uid:
     if feedback is None or not rid:
         return
     await m.answer('📨 ' + await feedback.comment(uid or m.from_user.id, int(rid), m.text or ''))
+
+
+# ───────────────────────── подписка ─────────────────────────
+
+@router.callback_query(F.data == 'bill:pay')
+async def billing_pay(c: CallbackQuery, billing=None, uid: int = 0):
+    from .bcloud import BcloudError, NoMoney
+    if billing is None:
+        return await c.answer('Оплата недоступна', show_alert=True)
+    try:
+        u = await billing.renew(uid, 'manual')
+    except NoMoney as e:
+        return await c.answer(f'Не хватает денег: {e}. Пополните баланс Bobr Cloud в панели управления (кошелёк) и нажмите ещё раз.',
+                              show_alert=True)
+    except (BcloudError, ValueError) as e:
+        return await c.answer(f'Не получилось: {str(e)[:150]}', show_alert=True)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.message.answer(f'✅ <b>Подписка продлена</b> до {billing.date(u["access_until"])}. Всё снова работает.', parse_mode='HTML')
+    await c.answer()
 
 
 # ───────────────────────── новая версия бота ─────────────────────────

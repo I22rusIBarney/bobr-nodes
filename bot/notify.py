@@ -41,6 +41,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'money.cleanup':    ('money', 'Можно убрать лишнее', TG, False, False),
     'money.balance':    ('money', 'Прогноз: деньги скоро кончатся', TG, False, False),
     'money.scale':      ('money', 'Автомасштабирование: докупка нод', TG, False, False),
+    'billing.notice':   ('money', 'Подписка BobrNet: напоминания и оплата', TG, True, False),
     'security.login':   ('security', 'Вход по SSH на сервер бота', TG, True, True),
     'security.brute':   ('security', 'Подбор паролей к серверу бота', TG, False, True),
     'system.host':      ('system', 'Серверу бота не хватает ресурсов', TG, False, True),
