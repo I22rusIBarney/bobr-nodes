@@ -2716,11 +2716,11 @@ function relayAddView(pid, uuid) {
     if (conv && !await UI.ask({ title: 'Убрать ноду ' + mid(conv.node.domain || conv.ip, 30) + '?', message: 'Нода на этом сервере перестанет работать и пропадёт из панели и подписок. Сервер станет входом для ' + n.name + '.', buttons: [{ id: 'y', text: 'Убрать и сделать мостом', type: 'destructive' }] })) return;
     try {
       showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : conv ? 'Останавливаю ноду и ставлю HAProxy — до пары минут…' : 'Ставлю HAProxy на сервер — до пары минут…' });
-      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}) };
+      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}), background: true };
       const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', body);
       NEWRL = null; await reloadNode(pid, uuid);
       UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));
-      if (r.pending) UI.toast(r.message); else if (r.ok) UI.toast('Вход работает'); else UI.alert(r.message);
+      if (!r.pending) { if (r.ok) UI.toast('Вход работает'); else UI.alert(r.message); }
     } catch (e) { showStatus(status, { ok: false, message: e.message }); }
   });
   v.append(h('div', { class: 'pad' }, status, go));
@@ -2730,9 +2730,19 @@ function relayView(pid, uuid, rid) {
   const n = NODE[uuid], x = n && !n.error && (n.relays || []).find(r => r.id === rid);
   if (!x) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Вход убран'));
   const v = h('div', { class: 'relay-page' }, ...title(x.remark, mid(n.name, 18)));
-  if (['buying', 'installing'].includes(x.status)) poll(async () => { if (!document.querySelector('#root .relay-page')) return; await reloadNode(pid, uuid); UI.nav.refresh(); }, 4000);
-  if (x.status === 'buying') v.append(h('div', { class: 'notice info' }, h('b', {}, 'Сервер создаётся в Bobr Cloud. '), 'Как только он получит IP, бот поставит проброс и добавит хосты — обычно 1–3 минуты. Страницу можно закрыть.'));
+  const running = ['new', 'buying', 'installing'].includes(x.status);
+  if (running) poll(async () => { if (!document.querySelector('#root .relay-page')) return; await reloadNode(pid, uuid); UI.nav.refresh(); }, 3000);
+  if (x.status === 'buying') v.append(h('div', { class: 'notice info' }, h('b', {}, 'Сервер создаётся в Bobr Cloud. '), 'Как только он получит IP, бот поставит проброс и добавит хосты — обычно 2–4 минуты. Страницу можно закрыть: ход сохранится.'));
   if (x.error) v.append(h('div', { class: 'notice bad' }, x.error));
+  // этапы установки — как у задачи установки ноды
+  if ((running || x.status === 'failed') && (x.stages || []).length) {
+    const order = x.stages.map(s => s.code), cur = x.status === 'buying' ? Math.max(0, order.indexOf('wait')) : order.indexOf(x.stage);
+    v.append(group(running ? 'Установка' : 'Остановилось', x.stages.map((st, i) => {
+      const k = cur < 0 ? '' : i < cur ? 'ok' : i === cur ? (x.status === 'failed' ? 'bad' : 'run') : '';
+      return row({ icon: k === 'ok' ? 'check' : k === 'bad' ? 'close' : k === 'run' ? 'restart' : 'clock', color: k === 'ok' ? 'green' : k === 'bad' ? 'red' : k === 'run' ? 'blue' : 'gray',
+        title: st.title, chevron: false, cls: k ? '' : 'is-dim', status: k === 'run' ? ['идёт', 'run'] : null });
+    })));
+  }
   else if (x.bad.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
   v.append(group(null, [
     row({ title: 'Состояние', status: RST[x.status] || [x.status, ''] }),
@@ -2741,16 +2751,16 @@ function relayView(pid, uuid, rid) {
     row({ title: 'Трафик идёт на', detail: `${mid(x.target, 22)}:${x.target_port}`, mono: true }),
     row({ title: 'Хостов в панели', detail: String(x.hosts) }),
     row({ title: 'Вход по SSH', detail: x.access })].filter(Boolean)));
-  if ((x.log || []).length) v.append(group('Последняя установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, x.log.join('\n'))]));
+  if ((x.log || []).length) v.append(group(running ? 'Журнал' : 'Последняя установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, x.log.slice(-16).join('\n'))]));
   const F = RLF[rid] || (RLF[rid] = sshState(x.ssh)), st = statusLine();
   const re = h('button', { class: 'btn tinted', type: 'button' }, x.status === 'failed' ? 'Повторить установку' : 'Переустановить');
   re.onclick = UI.busy(re, async () => {
     const changed = F.password || F.key_text || F.sudo_password || F.user !== x.ssh.user || F.port !== String(x.ssh.port) || F.key !== x.ssh.key;
     showStatus(st, { ok: true, message: 'Ставлю — до пары минут…' });
-    try { const r = await api(`relays/${rid}/apply`, 'POST', changed ? F : {}); delete RLF[rid]; await reloadNode(pid, uuid); UI.nav.refresh(); showStatus(st, r); }
+    try { const r = await api(`relays/${rid}/apply`, 'POST', { ...(changed ? F : {}), background: true }); delete RLF[rid]; await reloadNode(pid, uuid); UI.nav.refresh(); if (!r.pending) showStatus(st, r); }
     catch (e) { showStatus(st, { ok: false, message: e.message }); }
   });
-  if (x.status !== 'buying') v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
+  if (!running) v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
     'Новый доступ сохранится при переустановке и будет у всех входов этого сервера.'), h('div', { class: 'pad' }, re, st));
   v.append(group(null, [row({ title: 'Забыть ключ сервера', onClick: async () => {
     const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на сервере переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
