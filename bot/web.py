@@ -100,7 +100,14 @@ ADMIN_ONLY = [
     (r'.*', r'/api/migrate(/.*)?'),
     (r'GET', r'/api/reports'),
     (r'.*', r'/api/reports/\d+/resolve'),
+    (r'.*', r'/api/billing/settings'),
+    (r'.*', r'/api/users/\d+/access'),
 ]
+
+
+# подписка на паузе: только состояние, оплата, кошелёк, аватарка и оформление
+PAUSED_OK = re.compile(r'^(GET /api/state|GET /api/billing|POST /api/billing/(pay|autorenew)|GET /api/wallet|POST /api/wallet/topup'
+                       r'|GET /api/avatar/\d+|GET /api/theme.*)$')
 
 
 def admin_only(method: str, path: str) -> bool:
@@ -122,7 +129,8 @@ def client_ip(request) -> str:
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
-              access: Access | None = None, autopilot=None, hostload=None, mover=None, feedback=None) -> web.Application:
+              access: Access | None = None, autopilot=None, hostload=None, mover=None, feedback=None,
+              billing=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     NT = notify.Notifier(store, None, access, admins)  # веб: только лента и настройки, без отправки
@@ -158,6 +166,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     fails.pop(k, None)
             return web.json_response({'detail': 'Нет доступа. Откройте панель из Telegram-бота.'}, status=403)
         request['user'], request['role'] = user, role
+        if role == 'paused' and not PAUSED_OK.match(f'{request.method} {request.path}'):
+            return web.json_response({'detail': 'Доступ на паузе — продлите подписку.', 'paused': True}, status=402)
         if role == 'member':
             access.touch(user)
             if admin_only(request.method, request.path):
@@ -382,6 +392,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.get('/api/state')
     async def state(request):
+        if request['role'] == 'paused':  # только экран «Продлить»
+            from . import billing as bm
+            u = store.user(uid_of(request)) or {}
+            return J({'role': 'paused', 'profiles': [], 'issues': [], 'settings': {}, 'jobs': {'active': 0, 'done': 0, 'failed': 0},
+                      'billing': bm.view(store, u), 'theme': theme(uid_of(request)), 'me': request['user'].get('first_name', ''),
+                      'me_id': uid_of(request), 'tour_done': True, 'notif_unread': 0, 'bot_username': bot_username})
         ps = my_profiles(request)
         ids = {p['id'] for p in ps}
         jobs = [j for j in store.jobs(1000) if j['profile_id'] in ids]
@@ -400,6 +416,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
                   'notif_unread': NT.unread(uid_of(request)),
                   'tour_done': bool(store.get(f'tour_done:{uid_of(request)}')),
+                  'billing': billing_state(request),
                   'reports_open': len(store.reports(status='open', limit=1000)) if admin else None,
                   'me': request['user'].get('first_name', ''), 'me_id': uid_of(request)})
 
@@ -2192,6 +2209,80 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         return J(report_view(r, full=True))
 
+    # ── подписка: пользователь платит за BobrNet с баланса Bobr Cloud ──
+    def bill():
+        if billing is None:
+            raise ApiError('Подписка недоступна', 404)
+        return billing
+
+    @r.get('/api/billing')
+    async def billing_get(request):
+        from . import billing as bm
+        u = store.user(uid_of(request))
+        if not u:
+            raise ApiError('Подписка — только у приглашённых пользователей', 404)
+        try:
+            bal = await bc_ui(store, uid_of(request)).balance()
+        except BcloudError:
+            bal = None
+        return J({**bm.view(store, u), 'balance_kop': bal})
+
+    @r.post('/api/billing/pay')
+    async def billing_pay(request):
+        from . import billing as bm
+        from .bcloud import NoMoney
+        try:
+            u = await bill().renew(uid_of(request), 'manual')
+        except NoMoney as e:
+            raise ApiError(f'Не хватает денег: {e}. Пополните баланс и нажмите ещё раз.', 402) from None
+        except (BcloudError, ValueError) as e:
+            raise ApiError(str(e)) from None
+        return J({**bm.view(store, u), 'message': f'Продлено до {bill().date(u["access_until"])}'})
+
+    @r.post('/api/billing/autorenew')
+    async def billing_autorenew(request):
+        from . import billing as bm
+        try:
+            u = bm.set_access(store, uid_of(request), autorenew=bool((await body(request)).get('value')))
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J(bm.view(store, u))
+
+    @r.get('/api/billing/settings')
+    async def billing_settings(request):
+        from . import billing as bm
+        return J({**bm.cfg(store), 'stats': bill().stats()})
+
+    @r.post('/api/billing/settings')
+    async def billing_settings_save(request):
+        from . import billing as bm
+        try:
+            c = bm.clean(await body(request), bm.cfg(store))
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        store.set(bm.KEY, json.dumps(c))
+        return J({**c, 'stats': bill().stats()})
+
+    @r.post('/api/users/{tg}/access')
+    async def user_access(request):
+        """Администратор: срок доступа (+дни или дата), скидка, бесплатно навсегда."""
+        from . import billing as bm
+        b = await body(request)
+        kw = {}
+        if 'add_days' in b:
+            kw['add_days'] = int(b['add_days'] or 0)
+        if 'until' in b:
+            kw['until'] = int(b['until']) if b['until'] else None
+        if 'discount' in b:
+            kw['discount'] = int(b['discount'] or 0)
+        if 'free' in b:
+            kw['free'] = bool(b['free'])
+        try:
+            u = bm.set_access(store, int(request.match_info['tg']), **kw)
+        except (TypeError, ValueError) as e:
+            raise ApiError(str(e) or 'Неверные данные') from None
+        return J(user_view(u))
+
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:
         """Чей баланс: у администратора — аккаунт из «Bobr Cloud», у пользователя — его собственный."""
@@ -2298,15 +2389,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def invite_view(inv: dict) -> dict:
         return {'id': inv['id'], 'note': inv.get('note', ''), 'max_uses': inv.get('max_uses', 1),
                 'used': [{'tg_id': u, 'label': user_label(u)} for u in inv.get('used_by', [])],
-                'created_at': inv.get('created_at'), 'expires_at': inv.get('expires_at') or 0,
+                'created_at': inv.get('created_at'), 'expires_at': inv.get('expires_at') or 0, 'access_days': inv.get('access_days'),
                 'state': access.invite_state(inv),
                 'link': f'https://t.me/{bot_username}?start={INVITE_PREFIX}{inv["token"]}' if bot_username else
                         f'/start {INVITE_PREFIX}{inv["token"]}'}
 
+    def billing_state(request) -> dict | None:
+        """Подписка для шапки и настроек: у пользователя — своя, у администратора — включён ли платный режим."""
+        from . import billing as bm
+        if is_admin(request):
+            return {'admin': True, **bm.cfg(store)}
+        u = store.user(uid_of(request))
+        return bm.view(store, u) if u else None
+
     def user_view(u: dict) -> dict:
-        ps = access.profiles_for(u['tg_id'], u.get('username', '')) if not u.get('blocked') else [
-            p for p in store.profiles() if access.owns(p, u['tg_id'], u.get('username', ''))]
+        from . import billing as bm
+        ps = [p for p in store.profiles() if access.owns(p, u['tg_id'], u.get('username', ''))]
         return {'tg_id': u['tg_id'], 'username': u.get('username', ''), 'first_name': u.get('first_name', ''),
+                'billing': bm.view(store, u),
                 'label': user_label(u['tg_id']), 'blocked': bool(u.get('blocked')), 'created_at': u.get('created_at'),
                 'note': u.get('note', ''),
                 'groups': [{'id': p['id'], 'name': p['name'], 'mine': str(p.get('created_by') or '') == str(u['tg_id'])} for p in ps],
@@ -2321,7 +2421,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def invite_create(request):
         b = await body(request)
         try:
-            inv = access.create_invite(uid_of(request), str(b.get('note') or ''), int(b.get('uses') or 1), int(b.get('days') or 0))
+            inv = access.create_invite(uid_of(request), str(b.get('note') or ''), int(b.get('uses') or 1), int(b.get('days') or 0),
+                                       int(b['access_days']) if b.get('access_days') else None)
         except (TypeError, ValueError) as e:
             raise ApiError(str(e) or 'неверные значения') from None
         return J(invite_view(inv))

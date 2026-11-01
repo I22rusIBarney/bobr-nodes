@@ -192,6 +192,7 @@ function heroImg(key, cls) {
 
 // ───────── главная ─────────
 function home() {
+  if (ST && ST.role === 'paused') return paywallView();
   const v = h('div', { class: 'home-page' }, h('div', { class: 'appbar' },
     h('span', { class: 'brand' }, h('img', { class: 'logo', src: '/static/logo.png', alt: '', width: 30, height: 30 }), h('span', { class: 'bt' }, 'Bobr', h('span', { class: 'net' }, 'Net'))), h('div', { class: 'sp' }), ST && !ST.error ? walletChip() : null, bellBtn()));
   if (!ST) {
@@ -673,6 +674,86 @@ function reportView(id) {
   reply.onclick = UI.busy(reply, () => act(false));
   v.append(group('Ответ', [h('label', { class: 'field stack' }, ta)]), h('div', { class: 'cta', style: 'display:grid;gap:8px' }, solve, reply));
   return v;
+}
+// ───────── подписка BobrNet ─────────
+let SUB = null, TARIFF = null;
+const billDate = ts => ts ? new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ г\.$/, '') : '—';
+const rubs = kop => Math.round((kop || 0) / 100) + ' ₽';
+async function billPay(after) {
+  const r = await UI.run(() => api('billing/pay', 'POST', {}));
+  if (r) { UI.toast(r.message || 'Продлено'); await load(); SUB = null; if (after) after(); UI.nav.refresh(); }
+}
+// пользователь на паузе: один экран на всех вкладках
+function paywallView() {
+  const B = ST.billing || {};
+  const v = h('div', { class: 'paywall-page' }, ...pageHead('Доступ на паузе'));
+  v.append(h('div', { class: 'notice' }, h('b', {}, 'Срок закончился ' + billDate(B.until) + '. '),
+    'Ваши ноды работают как прежде, но бот ими сейчас не управляет: нет мониторинга, починки и уведомлений. Продлите — всё вернётся сразу.'));
+  if (SUB === null) { SUB = { loading: true }; api('billing').then(r => { SUB = r; }).catch(e => { SUB = { error: e.message }; }).then(() => UI.nav.refresh()); }
+  const S = SUB && !SUB.loading && !SUB.error ? SUB : null;
+  v.append(group('Подписка', [
+    row({ icon: 'calendar', color: 'green', title: `${rubs(B.price_kop)} за ${B.period_days} дн.`, sub: B.discount ? `со скидкой ${B.discount}% (без неё ${rubs(B.base_kop)})` : null, chevron: false }),
+    row({ icon: 'wallet', color: 'blue', title: 'Баланс Bobr Cloud', detail: S && S.balance_kop != null ? rubs(S.balance_kop) : '…', onClick: () => UI.nav.push(walletView) })],
+    'Оплата списывается с баланса Bobr Cloud — того же, с которого покупаются серверы.'));
+  const pay = h('button', { class: 'btn', type: 'button' }, `Продлить за ${rubs(B.price_kop)}`);
+  pay.onclick = UI.busy(pay, () => billPay());
+  const top = h('button', { class: 'btn secondary', type: 'button', onclick: () => UI.nav.push(walletView) }, 'Пополнить баланс');
+  v.append(h('div', { class: 'cta', style: 'display:grid;gap:8px' }, pay, top));
+  return v;
+}
+// пользователь: подписка в настройках
+function subscriptionView() {
+  const v = h('div', { class: 'sub-page' }, ...pageHead('Подписка BobrNet'));
+  if (SUB === null || (SUB && SUB.error)) { if (SUB === null) { SUB = { loading: true }; api('billing').then(r => { SUB = r; }).catch(e => { SUB = { error: e.message }; }).then(() => { if (document.querySelector('#root .sub-page')) UI.nav.refresh(); }); } }
+  if (!SUB || SUB.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
+  if (SUB.error) { v.append(UI.failed(SUB.error, () => { SUB = null; UI.nav.refresh(); })); return v; }
+  const B = SUB;
+  v.append(group(null, [
+    row({ icon: 'calendar', color: B.state === 'paused' ? 'red' : 'green', title: B.state === 'paused' ? 'На паузе' : 'Доступ до ' + billDate(B.until), sub: B.state === 'active' ? `осталось ${B.days_left} дн.` : null, chevron: false }),
+    row({ icon: 'wallet', color: 'blue', title: 'Стоимость', detail: `${rubs(B.price_kop)} / ${B.period_days} дн.`, sub: B.discount ? `скидка ${B.discount}%` : null, chevron: false }),
+    row({ icon: 'wallet', color: 'teal', title: 'Баланс Bobr Cloud', detail: B.balance_kop != null ? rubs(B.balance_kop) : '—', onClick: () => UI.nav.push(walletView) }),
+    row({ icon: 'renew', color: 'amber', title: 'Автопродление', sub: 'в день окончания — с баланса Bobr Cloud', cls: 'wrap', chevron: false,
+      right: UI.toggle(B.autorenew, async on => { const r = await UI.run(() => api('billing/autorenew', 'POST', { value: on })); if (r) { SUB = { ...SUB, ...r }; } UI.nav.refresh(); }, 'Автопродление') })],
+    `За ${3} дня до конца бот напомнит. Не хватит денег — доступ встанет на паузу, ноды продолжат работать.`));
+  const pay = h('button', { class: 'btn', type: 'button' }, `Продлить сейчас за ${rubs(B.price_kop)}`);
+  pay.onclick = UI.busy(pay, () => billPay());
+  v.append(h('div', { class: 'cta' }, pay));
+  if (B.payments.length) v.append(group('Оплаты', B.payments.map(p => row({ title: rubs(p.kop), sub: `${new Date(p.at * 1000).toLocaleDateString('ru-RU')} · ${p.days} дн. · ${p.how === 'auto' ? 'автопродление' : 'вручную'}`, chevron: false }))));
+  return v;
+}
+// администратор: тариф
+function tariffView() {
+  const v = h('div', { class: 'tariff-page' }, ...pageHead('Тариф и оплата', { sub: 'подписка для приглашённых пользователей' }));
+  if (TARIFF === null) { TARIFF = { loading: true }; api('billing/settings').then(r => { TARIFF = r; }).catch(e => { TARIFF = { error: e.message }; }).then(() => { if (document.querySelector('#root .tariff-page')) UI.nav.refresh(); }); }
+  if (TARIFF.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
+  if (TARIFF.error) { v.append(UI.failed(TARIFF.error, () => { TARIFF = null; UI.nav.refresh(); })); return v; }
+  const T = TARIFF, S = T.stats;
+  const save = async patch => { const r = await UI.run(() => api('billing/settings', 'POST', patch)); if (r) { TARIFF = r; await load(); UI.haptic('select'); } UI.nav.refresh(); };
+  v.append(group(null, [row({ icon: 'wallet', color: 'green', title: 'Платный доступ', cls: 'wrap', sub: T.on ? 'пользователи платят после бесплатного срока' : 'выключен — все пользуются бесплатно', chevron: false,
+    right: UI.toggle(T.on, on => save({ on }), 'Платный доступ') })]));
+  v.append(group('Тариф', [
+    row({ title: 'Цена', sub: 'за период', chevron: false, right: numStep(T.price_rub, 0, 100000, 50, x => save({ price_rub: x }), x => x + ' ₽') }),
+    row({ title: 'Период', chevron: false, right: numStep(T.period_days, 1, 366, 1, x => save({ period_days: x }), x => x + ' дн.') }),
+    row({ title: 'Напоминать за', chevron: false, right: numStep(T.remind_days, 1, 30, 1, x => save({ remind_days: x }), x => x + ' дн.') }),
+    row({ title: 'Бесплатно новым', sub: 'срок по умолчанию в приглашении', cls: 'wrap', chevron: false, right: numStep(T.trial_days, 0, 366, 1, x => save({ trial_days: x }), x => x ? x + ' дн.' : 'бессрочно') })],
+    'Скидку и «бесплатно навсегда» ставьте в карточке пользователя. Оплата — с баланса Bobr Cloud пользователя.'));
+  if (T.on) v.append(h('div', { class: 'stats' }, statTile(S.active, 'платят', null, 'b-act'), statTile(S.paused, 'на паузе', null, 'b-pause'), statTile(rubs(S.month_kop), 'за 30 дней', null, 'b-sum')));
+  return v;
+}
+// карточка пользователя: подписка
+function userBilling(u, reload) {
+  const B = u.billing || {};
+  const act = async (body, msg) => { if (await UI.run(() => api(`users/${u.tg_id}/access`, 'POST', body), msg) !== undefined) reload(); };
+  const st = !B.on ? 'платный режим выключен' : B.free ? 'бесплатно навсегда' : !B.until ? 'бессрочно' : B.state === 'paused' ? 'на паузе с ' + billDate(B.until) : 'до ' + billDate(B.until);
+  const rows = [row({ icon: 'calendar', color: B.state === 'paused' ? 'red' : 'green', title: 'Доступ', detail: st, chevron: false, cls: 'wrap' }),
+    h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Продлить бесплатно'),
+      UI.segmented([{ value: 7, label: '+7 дн.' }, { value: 30, label: '+30 дн.' }, { value: 90, label: '+90 дн.' }, { value: 0, label: 'бессрочно' }], null,
+        x => x ? act({ add_days: x }, `+${x} дн.`) : act({ until: null }, 'Бессрочно'), 'fill')),
+    row({ title: 'Скидка', chevron: false, right: numStep(B.discount || 0, 0, 100, 5, x => act({ discount: x }), x => x + '%') }),
+    row({ title: 'Бесплатно навсегда', chevron: false, right: UI.toggle(!!B.free, on => act({ free: on }, on ? 'Бесплатно' : 'По тарифу'), 'Бесплатно') })];
+  if (B.on && !B.free) rows.splice(1, 0, row({ title: 'Цена для него', detail: `${rubs(B.price_kop)} / ${B.period_days} дн.`, chevron: false }));
+  const pays = (B.payments || []).slice(0, 5).map(p => row({ title: rubs(p.kop), sub: `${new Date(p.at * 1000).toLocaleDateString('ru-RU')} · ${p.how === 'auto' ? 'автопродление' : 'вручную'}`, chevron: false }));
+  return h('div', {}, group('Подписка', rows, B.autorenew === false ? 'Автопродление у пользователя выключено.' : null), pays.length ? group('Оплаты', pays) : '');
 }
 // ───────── история версий ─────────
 const KIND = { new: ['sparkle', 'violet', 'Новое'], better: ['zap', 'amber', 'Лучше'], fix: ['check', 'green', 'Исправлено'] };
@@ -1549,12 +1630,14 @@ function inviteCard(i, reload) {
     } });
 }
 // новое приглашение — в нижнем листе: для кого, сколько человек, срок ссылки
+const BILL_ON = () => !!(ST && ST.billing && ST.billing.on);
 function inviteSheet(reload) {
   const f = NEWINV;
+  if (f.access === undefined) f.access = BILL_ON() ? (ST.billing.trial_days || 0) : 0;
   UI.sheet('Новое приглашение', close => {
     const make = h('button', { class: 'btn', type: 'button' }, icon('link'), 'Создать и скопировать ссылку');
     make.onclick = UI.busy(make, async () => {
-      const r = await UI.run(() => api('invites', 'POST', { note: f.note, uses: f.uses, days: f.days }));
+      const r = await UI.run(() => api('invites', 'POST', { note: f.note, uses: f.uses, days: f.days, access_days: f.access || null }));
       if (!r) return;
       f.note = ''; UI.copy(r.link, 'Ссылка'); close(); await reload(); UI.nav.refresh();
     });
@@ -1562,7 +1645,9 @@ function inviteSheet(reload) {
       h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Для кого', h('span', { class: 'opt' }, ' необязательно')), textIn(f.note, 'Иван, панель EU', x => { f.note = x; })),
       row({ title: 'Сколько человек', chevron: false, right: stepper(f.uses, n => { f.uses = n; }, 20) }),
       h('div', { class: 'seg-row sepd' }, h('div', { class: 'mini-h' }, 'Ссылка действует'),
-        UI.segmented([{ value: 1, label: 'день' }, { value: 7, label: 'неделю' }, { value: 30, label: 'месяц' }, { value: 0, label: 'без срока' }], f.days, x => { f.days = x; }, 'fill'))),
+        UI.segmented([{ value: 1, label: 'день' }, { value: 7, label: 'неделю' }, { value: 30, label: 'месяц' }, { value: 0, label: 'без срока' }], f.days, x => { f.days = x; }, 'fill')),
+      h('div', { class: 'seg-row sepd' }, h('div', { class: 'mini-h' }, 'Бесплатный доступ' + (BILL_ON() ? '' : ' (платный режим выключен)')),
+        UI.segmented([{ value: 7, label: '7 дн.' }, { value: 14, label: '14 дн.' }, { value: 30, label: 'месяц' }, { value: 0, label: 'бессрочно' }], f.access, x => { f.access = x; }, 'fill'))),
       h('div', { class: 'group-f' }, 'Человек открывает ссылку — бот впускает его. Если для его Telegram ID или @username уже есть группа, она сразу у него в списке.')),
       h('div', { class: 'pad' }, make));
   });
@@ -1581,6 +1666,7 @@ function userView(tg) {
     row({ title: 'Доступ', chevron: false, right: UI.toggle(!u.blocked, async on => {
       if (await UI.run(() => api('users/' + tg + '/block', 'POST', { blocked: !on }), on ? 'Доступ открыт' : 'Доступ закрыт') !== undefined) reload();
     }, 'Доступ') })].filter(Boolean), u.blocked ? 'Доступ закрыт: бот и панель для него не открываются, сообщения мониторинга о его группах снова приходят вам.' : null));
+  v.append(userBilling(u, reload));
   v.append(group('Группы', u.groups.length ? u.groups.map(g => row({ title: g.name, sub: g.mine ? 'создал сам' : 'вы завели для него',
     onClick: () => { if (ST.profiles.some(p => p.id === g.id)) UI.nav.push(() => groupView(g.id)); } }))
     : [row({ title: 'Групп нет', cls: 'is-dim', chevron: false })],
@@ -1595,6 +1681,7 @@ function userView(tg) {
 // ───────── группа ─────────
 // ───────── вкладка «Серверы»: группы ─────────
 function serversView() {
+  if (ST && ST.role === 'paused') return paywallView();
   const v = h('div', { class: 'servers-page' });
   if (!ST || ST.error) { v.append(...pageHead('Серверы'), ST && ST.error ? UI.failed(ST.error, () => { ST = null; UI.nav.refresh(); load(); }, 'Бот не ответил') : h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   warmNodes();
@@ -2988,6 +3075,7 @@ function deployView(pid) {
 
 // ───────── вкладки «Инструменты» и «Настройки» ─────────
 function toolsView() {
+  if (ST && ST.role === 'paused') return paywallView();
   const v = h('div', { class: 'tools-page' }, ...pageHead('Инструменты'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin(), j = ST.jobs;
@@ -3003,6 +3091,7 @@ function toolsView() {
   return v;
 }
 function settingsTab() {
+  if (ST && ST.role === 'paused') return paywallView();
   const v = h('div', { class: 'settings-page' }, ...pageHead('Настройки'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin();
@@ -3013,10 +3102,14 @@ function settingsTab() {
     row({ icon: 'palette', color: 'pink', title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) }),
     row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } }),
     row({ icon: 'sparkle', color: 'violet', title: 'Обучение', sub: 'короткая экскурсия по разделам', onClick: () => tourStart() }),
+    !admin && ST.billing && ST.billing.on && ST.billing.state !== 'free' ? row({ icon: 'calendar', color: 'green', title: 'Подписка',
+      sub: ST.billing.state === 'paused' ? 'на паузе' : 'до ' + billDate(ST.billing.until), status: ST.billing.days_left <= 3 ? ['продлить', 'warn'] : null,
+      onClick: () => { SUB = null; UI.nav.push(subscriptionView); } }) : null,
     admin ? null : row({ icon: 'chat', color: 'blue', title: 'Сообщить о проблеме', sub: 'отчёт уйдёт администратору', onClick: () => { MYREP = null; UI.nav.push(problemView); } })].filter(Boolean),
     admin ? null : 'Серверы покупаются с вашего баланса в Bobr Cloud, домены — вашим токеном Cloudflare.'));
   if (!admin) return v;
   v.append(group('Доступ', [row({ icon: 'users', color: 'green', title: 'Пользователи', sub: 'приглашения и доступ к группам', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } }),
+    row({ icon: 'wallet', color: 'green', title: 'Тариф и оплата', sub: 'подписка для приглашённых', status: BILL_ON() ? ['включено', 'ok'] : ['бесплатно', ''], onClick: () => { TARIFF = null; UI.nav.push(tariffView); } }),
     row({ icon: 'chart', color: 'violet', title: 'Отзывы и ошибки', sub: 'отчёты, опросы, статистика установок', status: ST.reports_open ? ['новых: ' + ST.reports_open, 'warn'] : null, onClick: () => { REP = null; UI.nav.push(reportsView); } })]));
   v.append(group('Сервер бота', serviceRows()));
   return v;

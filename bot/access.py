@@ -35,10 +35,22 @@ class Access:
         u = self.store.user(int(uid or 0))
         return u if u and not u.get('blocked') else None
 
+    def paused(self, uid: int) -> bool:
+        """Подписка закончилась и не продлена: доступен только экран «Продлить»."""
+        from . import billing
+        return billing.paused(self.store, uid)
+
+    def active(self, uid: int) -> dict | None:
+        """Пользователь, который сейчас может работать с ботом (приглашён, не закрыт, не на паузе)."""
+        u = self.member(uid)
+        return u if u and not self.paused(uid) else None
+
     def role(self, uid: int) -> str | None:
         if self.is_admin(uid):
             return 'admin'
-        return 'member' if self.member(uid) else None
+        if not self.member(uid):
+            return None
+        return 'paused' if self.paused(uid) else 'member'
 
     def touch(self, user) -> None:
         """Обновить имя и @username пользователя — по ним видно группы, которые для него завёл администратор."""
@@ -70,13 +82,13 @@ class Access:
             return False
         if self.is_admin(uid):
             return True
-        return bool(self.member(uid)) and self.owns(prof, uid, username)
+        return bool(self.active(uid)) and self.owns(prof, uid, username)
 
     def profiles_for(self, uid: int, username: str = '') -> list[dict]:
         ps = self.store.profiles()
         if self.is_admin(uid):
             return ps
-        if not self.member(uid):
+        if not self.active(uid):
             return []
         return [p for p in ps if self.owns(p, uid, username)]
 
@@ -86,10 +98,10 @@ class Access:
         out: list[int] = []
         made = prof.get('created_by')
         if made and self.member(int(made)):
-            return [int(made)]
+            return [] if self.paused(int(made)) else [int(made)]  # на паузе — бот о его группе молчит
         out += sorted(self.admins)
         for cand in (prof.get('owner_tg_id'),):
-            if cand and str(cand).isdigit() and self.member(int(cand)) and int(cand) not in out:
+            if cand and str(cand).isdigit() and self.active(int(cand)) and int(cand) not in out:
                 out.append(int(cand))
         return out
 
@@ -99,15 +111,19 @@ class Access:
         return r[0] if r else (sorted(self.admins)[0] if self.admins else 0)
 
     # ── приглашения ──
-    def create_invite(self, by: int, note: str = '', uses: int = 1, days: int = 7) -> dict:
+    def create_invite(self, by: int, note: str = '', uses: int = 1, days: int = 7, access_days: int | None = None) -> dict:
+        """days — сколько живёт ссылка; access_days — сколько дней бесплатного доступа у вошедших (None — бессрочно)."""
         if not 1 <= int(uses) <= 100:
             raise ValueError('Сколько раз можно использовать: от 1 до 100')
         if not 0 <= int(days) <= 365:
             raise ValueError('Срок: от 0 (бессрочно) до 365 дней')
+        if access_days is not None and not 1 <= int(access_days) <= 3660:
+            raise ValueError('Бесплатный доступ: от 1 дня или бессрочно')
         token = secrets.token_urlsafe(12).replace('-', 'x').replace('_', 'y')
         now = int(time.time())
         data = {'note': str(note or '').strip()[:60], 'max_uses': int(uses), 'used_by': [], 'created_by': int(by),
-                'created_at': now, 'expires_at': now + int(days) * 86400 if int(days) else 0, 'revoked': False}
+                'created_at': now, 'expires_at': now + int(days) * 86400 if int(days) else 0, 'revoked': False,
+                'access_days': int(access_days) if access_days else None}
         iid = self.store.add_invite(token, data)
         return {**data, 'id': iid, 'token': token}
 
@@ -142,7 +158,10 @@ class Access:
             inv['used_by'] = [*inv.get('used_by', []), uid]
             self.store.save_invite(inv)
             first = (user.get('first_name') if isinstance(user, dict) else getattr(user, 'first_name', '')) or ''
+            now = int(time.time())
+            days = inv.get('access_days')
             self.store.save_user({'tg_id': uid, 'username': uname(user), 'first_name': first[:64],
                                   'invited_by': inv.get('created_by'), 'invite_id': inv['id'], 'note': inv.get('note', ''),
-                                  'created_at': int(time.time()), 'blocked': False})
+                                  'created_at': now, 'blocked': False,
+                                  'access_until': now + int(days) * 86400 if days else None})
         return True, 'Доступ открыт.'

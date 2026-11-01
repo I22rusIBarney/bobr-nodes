@@ -310,8 +310,10 @@ class Monitor:
         async with self._lock:
             await self._resync()  # чекер, на котором не тот набор подписок, — поправить до опроса
             results = await self.poll_all()
+            from . import billing
+            stop = billing.paused_profiles(self.store)  # подписка владельца на паузе — группу не проверяем и не чиним
             for prof in self.store.profiles():
-                if prof.get('mon_sub'):
+                if prof.get('mon_sub') and prof['id'] not in stop:
                     try:
                         await self.check_group(prof, results)
                     except engine.StepError as e:  # панель группы недоступна — в следующий раз
