@@ -1593,8 +1593,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def panel_node_forget(request):
         """Забыть ключ SSH сервера — после переустановки системы на ноде."""
         p = profile_or_404(request.match_info['pid'], request)
-        ip = str((await body(request)).get('ip') or '')
-        if not re.fullmatch(r'[0-9a-fA-F:.]{3,45}', ip):
+        ip = str((await body(request)).get('ip') or '').strip().lower()
+        # адрес ноды в панели бывает и доменом (swe.example.com) — бот входит по нему, ключ записан под ним и под IP
+        if not (re.fullmatch(r'[0-9a-f:.]{3,45}', ip) or re.fullmatch(r'(?=.{4,253}$)([a-z0-9-]{1,63}\.)+[a-z]{2,63}', ip)):
             raise ApiError('Неверный адрес')
         if not is_admin(request):  # пользователь забывает ключи только серверов своей группы
             uuid = request.match_info['uuid']
@@ -1605,7 +1606,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 known.add(await asyncio.to_thread(resolve, n['address']))
             if ip not in known:
                 raise ApiError('Это не адрес этой ноды')
-        engine.forget_host(runner.known_hosts(), ip)
+        hosts = {ip}
+        if not engine.is_ip(ip):
+            try:
+                hosts.add(await asyncio.to_thread(resolve, ip))
+            except Exception:  # noqa: BLE001 — домен не резолвится: забудем хотя бы по имени
+                pass
+        for hh in hosts - {'', None}:
+            engine.forget_host(runner.known_hosts(), hh)
         return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/rollback')
