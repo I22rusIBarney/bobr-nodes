@@ -315,14 +315,17 @@ def wait_dns(domain: str, ip: str, log, timeout=600, every=15, cf: 'Cloudflare |
     while time.time() < end:
         auth = [dns_query_a(s, domain) for s in auth_ips[:2]]
         auth_ok = bool(auth) and all(a == [ip] for a in auth)
-        pub = []
-        for name, url in DOH:
-            try:
-                _, data = http('GET', url + '?' + urllib.parse.urlencode({'name': domain, 'type': 'A'}),
-                               {'Accept': 'application/dns-json'}, timeout=10)
-                pub.append((name, sorted({a['data'] for a in data.get('Answer', []) if a.get('type') == 1})))
-            except StepError as e:
-                pub.append((name, f'не ответил ({str(e)[:60]})'))
+        try:
+            pub = list(zip([n for n, _ in DOH], doh_a(domain)))
+        except Exception:  # noqa: BLE001 — один из DNS не ответил: спросим по очереди, чтобы видеть какой
+            pub = []
+            for name, url in DOH:
+                try:
+                    _, data = http('GET', url + '?' + urllib.parse.urlencode({'name': domain, 'type': 'A'}),
+                                   {'Accept': 'application/dns-json'}, timeout=10)
+                    pub.append((name, sorted({a['data'] for a in data.get('Answer', []) if a.get('type') == 1})))
+                except StepError as e:
+                    pub.append((name, f'не ответил ({str(e)[:60]})'))
         pub_ok = [n for n, r in pub if r == [ip]]
         waited = time.time() - start
         if len(pub_ok) == len(pub) or (auth_ok and (pub_ok or waited >= 120)):
