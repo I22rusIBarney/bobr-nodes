@@ -64,20 +64,34 @@ def clean_sni(v: str) -> str:
 
 # ───────── выход: как до него достучаться ─────────
 def exit_outbound(panel: engine.Panel, pnode: dict, hosts: list[dict], target_port: int, user_uuid: str) -> dict:
-    """Outbound VLESS на ноду-выход: адрес и порт — как у её хоста, безопасность — как у её inbound (TLS или REALITY)."""
-    h = next((x for x in hosts if int(x.get('port') or 443) == int(target_port) and not x.get('isDisabled')), None) \
-        or next((x for x in hosts if not x.get('isDisabled')), None)
-    if not h:
+    """Outbound VLESS на ноду-выход: адрес и порт — как у её хоста, безопасность — как у её inbound (TLS или REALITY).
+    Из хостов ноды берём прямой: TCP (Vision) на адрес самой ноды, а не CDN-хост (XHTTP через Cloudflare) —
+    через CDN тяжёлый трафик рвётся, да и лишнее звено ни к чему: между входом и выходом ТСПУ нет."""
+    profiles = {p['uuid']: p for p in panel.call('GET', '/api/config-profiles')['configProfiles']}
+
+    def inbound_of(h):
+        prof = profiles.get((h.get('inbound') or {}).get('configProfileUuid'))
+        if not prof:
+            return None
+        tag = next((i['tag'] for i in prof.get('inbounds', []) if i['uuid'] == (h.get('inbound') or {}).get('configProfileInboundUuid')), None)
+        return next((i for i in (prof.get('config') or {}).get('inbounds', []) if i.get('tag') == tag), None)
+
+    def score(h, inb):
+        ss = (inb or {}).get('streamSettings') or {}
+        addr = h.get('address') or ''
+        return (bool(inb) and inb.get('protocol') == 'vless',
+                (ss.get('network') or 'tcp') in ('tcp', 'raw') and (ss.get('security') or 'none') in ('tls', 'reality'),
+                addr == pnode['address'] or (engine.is_ip(addr) and addr == pnode.get('ip')),
+                int(h.get('port') or 443) == int(target_port))
+    cands = [(h, inbound_of(h)) for h in hosts if not h.get('isDisabled')]
+    if not cands:
         raise engine.StepError('у ноды-выхода нет включённых хостов — не знаю, как к ней подключаться')
-    inb_uuid = (h.get('inbound') or {}).get('configProfileInboundUuid')
-    prof_uuid = (h.get('inbound') or {}).get('configProfileUuid')
-    prof = next((p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == prof_uuid), None)
-    if not prof:
+    h, inb = max(cands, key=lambda c: score(*c))
+    if not inb:
         raise engine.StepError('профиль ноды-выхода не найден в панели')
-    tag = next((i['tag'] for i in prof.get('inbounds', []) if i['uuid'] == inb_uuid), None)
-    inb = next((i for i in (prof.get('config') or {}).get('inbounds', []) if i.get('tag') == tag), None)
-    if not inb or inb.get('protocol') != 'vless':
+    if inb.get('protocol') != 'vless':
         raise engine.StepError('inbound ноды-выхода — не VLESS: мост с роутингом умеет только VLESS (TLS или REALITY)')
+    inb_uuid = (h.get('inbound') or {}).get('configProfileInboundUuid')
     ss = inb.get('streamSettings') or {}
     net, sec = ss.get('network') or 'tcp', ss.get('security') or 'none'
     address = h.get('address') or pnode['address']
@@ -279,9 +293,18 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
     old = next((p for p in profiles if p['name'] == name), None)
     if old:
+        # переустановка: inbound входа (SNI, ключи — их могли поменять в панели руками) не трогаем, меняем выход
+        oc = old.get('config') or {}
+        if any(i.get('tag') == TAG for i in oc.get('inbounds', [])):
+            outs = [o for o in oc.get('outbounds', []) if o.get('tag') != OUT_TAG]
+            cfg = {**oc, 'outbounds': [cfg['outbounds'][0], *outs], 'routing': oc.get('routing') or cfg['routing']}
+            if not any(r.get('outboundTag') == OUT_TAG for r in cfg['routing'].get('rules', [])):
+                cfg['routing'] = {**cfg['routing'], 'rules': [*cfg['routing'].get('rules', []),
+                                                              {'type': 'field', 'inboundTag': [TAG], 'outboundTag': OUT_TAG}]}
         panel.call('PATCH', '/api/config-profiles', {'uuid': old['uuid'], 'config': cfg})
         prof = next(p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == old['uuid'])
-        log(f'панель: профиль «{name}» обновлён')
+        log(f'панель: профиль «{name}» обновлён — выход на {outbound["settings"]["vnext"][0]["address"]}:'
+            f'{outbound["settings"]["vnext"][0]["port"]} ({outbound["streamSettings"]["network"]}, {outbound["streamSettings"]["security"]})')
     else:
         prof = panel.call('POST', '/api/config-profiles', {'name': name, 'config': cfg})
         log(f'панель: профиль «{name}» создан — REALITY с SNI {x["sni"]}, выход на {outbound["settings"]["vnext"][0]["address"]}')
@@ -292,11 +315,13 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     entry = next((n for n in panel.call('GET', '/api/nodes') if n['address'] == node['domain']), None)
     hosts_now = [h['uuid'] for h in panel.call('GET', '/api/hosts')
                  if (h.get('inbound') or {}).get('configProfileInboundUuid') == inbound['uuid']]
+    cur_in = next((i for i in (cfg.get('inbounds') or []) if i.get('tag') == TAG), {})
+    sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x['sni']])[0]
     for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
-        panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': x['sni'], 'fingerprint': 'chrome'})
+        panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
             'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'username': bridge_username(pnode['uuid']),
-            'reality': {'private': priv, 'sid': sid}}
+            'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}
 
 
 def teardown_panel(panel: engine.Panel, made: dict, user_in_use: bool, log) -> None:

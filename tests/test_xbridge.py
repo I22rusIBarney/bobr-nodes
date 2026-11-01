@@ -141,3 +141,32 @@ def test_user_found_when_lookup_path_differs():
             return super().call(method, path, body)
     u = xb.ensure_user(P(), EXIT_NODE['uuid'], ['sq1'], lambda t: None)
     assert u['vlessUuid'] == 'v-old'
+
+def test_exit_prefers_direct_tcp_host_over_cdn():
+    pl = FakePanel()
+    pl.profiles[0]['inbounds'].append({'uuid': 'inb-xh', 'tag': 'XHTTP_CDN'})
+    pl.profiles[0]['config']['inbounds'].append({'tag': 'XHTTP_CDN', 'protocol': 'vless',
+                                                 'streamSettings': {'network': 'xhttp', 'security': 'tls'}})
+    cdn = {'uuid': 'h-cdn', 'address': 'cdn-swe.example.com', 'port': 8443, 'sni': 'cdn-swe.example.com',
+           'inbound': {'configProfileUuid': 'prof-exit', 'configProfileInboundUuid': 'inb-xh'}}
+    o = xb.exit_outbound(pl, EXIT_NODE, [cdn, *EXIT_HOSTS], 8443, 'vless-1')
+    assert o['settings']['vnext'][0]['address'] == 'swe.example.com' and o['streamSettings']['network'] == 'tcp'
+
+
+def test_reinstall_keeps_manual_sni():
+    pl, log = FakePanel(), []
+    made = xb.setup_panel(pl, RELAY, EXIT_NODE, EXIT_HOSTS, log.append)
+    bridge = next(p for p in pl.profiles if p['uuid'] == 'prof-bridge')
+    bridge['config']['inbounds'][0]['streamSettings']['realitySettings']['serverNames'] = ['my.own.site']
+    patched = []
+    orig = pl.call
+
+    def call(method, path, body=None):
+        if (method, path) == ('PATCH', '/api/config-profiles'):
+            patched.append(body['config'])
+            return {}
+        return orig(method, path, body)
+    pl.call = call
+    again = xb.setup_panel(pl, {**RELAY, 'reality': made['reality']}, EXIT_NODE, EXIT_HOSTS, log.append)
+    assert again['sni'] == 'my.own.site'
+    assert patched[0]['inbounds'][0]['streamSettings']['realitySettings']['serverNames'] == ['my.own.site']

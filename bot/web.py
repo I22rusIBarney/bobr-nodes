@@ -1139,8 +1139,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 return xb.setup_panel(pl, x, n, hosts, say)
         made = await asyncio.to_thread(setup)
         x['reality'] = made.pop('reality')
+        x['sni'] = made.pop('sni', None) or x['sni']  # SNI могли поменять в панели руками — показываем настоящий
         x['made'], x['hosts'] = made, made['hosts']
-        store.save_relay({**store.relay(x['id']), 'made': made, 'hosts': made['hosts'], 'reality': x['reality']})
+        store.save_relay({**store.relay(x['id']), 'made': made, 'hosts': made['hosts'], 'reality': x['reality'], 'sni': x['sni']})
         PC.drop(p['id'])
         relay_say(x['id'], 'жду, пока нода входа выйдет на связь с панелью', stage='check')
         ok = await asyncio.to_thread(xb.wait_connected, pl, made['node']) if made.get('node') else False
