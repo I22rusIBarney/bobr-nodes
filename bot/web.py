@@ -1107,7 +1107,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         x['hosts'] = await relay_hosts(x, p, say)
             except (engine.StepError, ApiError, OSError) as e:
                 say(f'ошибка: {e}')
-                x.update(status='failed', error=str(e)[:300], log=store.relay(x['id'])['log'])
+                cur = store.relay(x['id']) or {}
+                x.update(status='failed', error=str(e)[:300], log=cur.get('log') or [], stage=cur.get('stage') or x.get('stage'))
+                if x.get('mode') == 'xray' and cur.get('made'):
+                    x['made'] = cur['made']
                 store.save_relay(x)
                 return {'id': x['id'], 'ok': False, 'message': str(e), 'log': lines}
             say('готово' if not res['bad'] else ('мост стоит, но ' + '; '.join(res['bad'])) if x.get('mode') == 'xray'
@@ -1136,8 +1139,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 return xb.setup_panel(pl, x, n, hosts, say)
         made = await asyncio.to_thread(setup)
         x['reality'] = made.pop('reality')
+        x['sni'] = made.pop('sni', None) or x['sni']  # SNI могли поменять в панели руками — показываем настоящий
         x['made'], x['hosts'] = made, made['hosts']
-        store.save_relay({**store.relay(x['id']), 'made': made, 'hosts': made['hosts'], 'reality': x['reality']})
+        store.save_relay({**store.relay(x['id']), 'made': made, 'hosts': made['hosts'], 'reality': x['reality'], 'sni': x['sni']})
         PC.drop(p['id'])
         relay_say(x['id'], 'жду, пока нода входа выйдет на связь с панелью', stage='check')
         ok = await asyncio.to_thread(xb.wait_connected, pl, made['node']) if made.get('node') else False
