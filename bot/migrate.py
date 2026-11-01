@@ -37,7 +37,8 @@ ENV_KEYS = ('BOT_TOKEN', 'ADMIN_IDS', 'DOMAIN', 'PUBLIC_URL', 'BCLOUD_URL', 'BCL
             'GEMINI_KEY', 'WEB_HOST', 'WEB_PORT')
 MOVED = 'moved.json'        # на старом сервере: бот переехал — не запускаться
 ARRIVED = 'migrated.json'   # на новом: что написать администраторам после первого запуска
-SKIP = {'bot.db', 'bot.db-wal', 'bot.db-shm', 'migrate', MOVED, 'version.txt', 'origin.txt', '.hardened'}
+SKIP = {'bot.db', 'bot.db-wal', 'bot.db-shm', 'migrate', MOVED, 'version.txt', 'origin.txt', '.hardened', 'backups', 'restore',
+        'restore-upload.bnb'}
 
 HOOKS: dict = {}   # main.py: stop — остановить приём сообщений и фоновые проверки, exit — завершить процесс
 

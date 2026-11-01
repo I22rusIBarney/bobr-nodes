@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
-from bot import migrate, selfupdate
+from bot import backup, migrate, selfupdate
 from bot.access import Access
 from bot.autopilot import Autopilot
 from bot.hostload import HostLoad
@@ -56,6 +56,9 @@ async def main():
         while True:
             await asyncio.sleep(3600)
 
+    restored = backup.apply_pending(data_dir)  # прислали копию и подтвердили — подставить её до открытия базы
+    if restored:
+        logging.warning('восстановлено из копии: %s', backup.describe(restored))
     store = Store(f'{data_dir}/bot.db')
     for env_key, key in SEED.items():
         # из .env берём, только если в админке ещё пусто или установщик выдал новый токен bcloud
@@ -89,6 +92,8 @@ async def main():
     from bot.billing import Billing
     billing = Billing(store, autopilot.notify, autopilot.button)
     autopilot.billing = dp['billing'] = billing
+    backups = backup.Backup(store, autopilot.notify, data_dir, version=selfupdate.current)
+    autopilot.backup = dp['backup'] = backups
     dp['autopilot'] = autopilot
 
     await bot.set_my_commands([BotCommand(command='start', description='Меню'),
@@ -109,7 +114,7 @@ async def main():
     mover = migrate.Migration(store, runner, data_dir)
     app = build_web(store, runner, token, admins, public_url, me.username, security=watch, data_dir=data_dir, monitor=monitor,
                     access=access, autopilot=autopilot, hostload=hostload, mover=mover, feedback=feedback,
-                    billing=billing)
+                    billing=billing, backups=backups)
     web_runner = web.AppRunner(app, access_log=None)
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
@@ -122,6 +127,9 @@ async def main():
     arrived = migrate.arrived_note(data_dir)
     if arrived:
         await autopilot.notify.emit('system.update', arrived)
+    back = backup.restored_note(data_dir)
+    if back:
+        await autopilot.notify.emit('system.update', back)
 
     async def stop_for_move():  # переезд: перестать принимать сообщения и проверять ноды, пока копируется база
         for t in (watch_task, sync_task, mon_task, pilot_task, host_task):

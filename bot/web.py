@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, notify, plugins, relay as rl, scripts as sc, services as svc, upgrade as up
+from . import audit, engine, forms, naming, notify, plugins, relay as rl, scripts as sc, services as svc, upgrade as up
 from .pcache import CACHE as PC
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
@@ -102,6 +102,8 @@ ADMIN_ONLY = [
     (r'.*', r'/api/reports/\d+/resolve'),
     (r'.*', r'/api/billing/settings'),
     (r'.*', r'/api/users/\d+/access'),
+    (r'.*', r'/api/backup(/.*)?'),
+    (r'.*', r'/api/audit'),
 ]
 
 
@@ -130,7 +132,7 @@ def client_ip(request) -> str:
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
               access: Access | None = None, autopilot=None, hostload=None, mover=None, feedback=None,
-              billing=None) -> web.Application:
+              billing=None, backups=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     NT = notify.Notifier(store, None, access, admins)  # веб: только лента и настройки, без отправки
@@ -177,7 +179,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if m:
                 PC.drop(int(m.group(1)))
         try:
-            return await handler(request)
+            resp = await handler(request)
+            if request.method != 'GET' and getattr(resp, 'status', 200) < 400 and audit.match(request.method, request.path):
+                raw = await request.read() if request.content_type == 'application/json' else b''  # тело уже прочитано — из кэша
+                audit.from_request(store, int(user.get('id', 0)), request.method, request.path, audit.body_of(raw), audit.who_of(user))
+            return resp
         except ApiError as e:
             return web.json_response({'detail': str(e)}, status=e.status)
         except (ValueError, BcloudError, engine.StepError, sc.ScriptError) as e:
@@ -418,6 +424,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'tour_done': bool(store.get(f'tour_done:{uid_of(request)}')),
                   'billing': billing_state(request),
                   'reports_open': len(store.reports(status='open', limit=1000)) if admin else None,
+                  'backup': backup_state() if admin else None,
                   'me': request['user'].get('first_name', ''), 'me_id': uid_of(request)})
 
     @r.post('/api/settings')
@@ -1803,8 +1810,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         from . import autopilot as ap
         p = profile_or_404(request.match_info['pid'], request)
         st = pilot().get(f'ap:upd:{p["id"]}')
+        try:
+            nodes, _ = await PC.get(p, 'nodes')
+        except Exception:  # noqa: BLE001 — панель не ответила: подсказка по онлайну просто не покажется
+            nodes = []
         return J({**ap.auto_cfg(p), 'last': {k: st.get(k) for k in ('date', 'tag', 'done', 'failed', 'stopped', 'queue', 'reported')},
-                  'weekdays': ap.WEEKDAYS})
+                  'weekdays': ap.WEEKDAYS, 'online': pilot().online_peaks(p['id'], nodes if isinstance(nodes, list) else [])[:8]})
 
     @r.post('/api/profiles/{pid}/auto')
     async def auto_save(request):
@@ -2262,6 +2273,65 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         store.set(bm.KEY, json.dumps(c))
         return J({**c, 'stats': bill().stats()})
+
+    # ───────── резервные копии ─────────
+    def backup_state():
+        from . import backup as bk
+        c = bk.cfg(store)
+        return {'on': c['on'], 'key_saved': c['key_saved'], 'error': c['last_error'], 'last_at': c['last_at']}
+
+    def backups_():
+        if backups is None:
+            raise ApiError('Резервные копии недоступны', 503)
+        return backups
+
+    @r.get('/api/backup')
+    async def backup_get(_):
+        return J(backups_().view())
+
+    @r.post('/api/backup')
+    async def backup_save(request):
+        from . import backup as bk
+        b = await body(request)
+        bk.save_cfg(store, {k: b[k] for k in ('on', 'hour', 'tz', 'keep', 'key_saved') if k in b})
+        return J(backups_().view())
+
+    @r.post('/api/backup/now')
+    async def backup_now(request):
+        from . import backup as bk
+        try:
+            res = await backups_().run(to=[uid_of(request)])
+        except bk.BackupError as e:
+            raise ApiError(str(e)) from None
+        return J({**backups_().view(), 'result': res})
+
+    @r.get('/api/backup/key')
+    async def backup_key(request):
+        from . import backup as bk
+        audit.log(store, uid_of(request), 'backup.key', 'Посмотрел пароль резервных копий', who=audit.who_of(request['user']))
+        return J({'key': bk.key_of(store)})
+
+    @r.post('/api/backup/key')
+    async def backup_key_new(request):
+        """Новый пароль: прежние копии открываются только прежним паролем."""
+        from . import backup as bk
+        store.set(bk.SECRET, bk.new_key())
+        bk.save_cfg(store, {'key_saved': False})
+        return J({'key': bk.key_of(store), **backups_().view()})
+
+    # ───────── журнал действий ─────────
+    @r.get('/api/audit')
+    async def audit_list(request):
+        q = request.query
+        def num(k):
+            v = q.get(k, '')
+            return int(v) if v.lstrip('-').isdigit() else None
+        rows = store.audit(uid=num('uid'), pid=num('pid'), q=(q.get('q') or '')[:60], before=num('before'), limit=60)
+        people = {}
+        for u in store.users():
+            people[u['tg_id']] = u.get('first_name') or (u.get('username') and '@' + u['username']) or str(u['tg_id'])
+        return J({'items': audit.view(store, rows), 'more': len(rows) == 60, 'people': [
+            {'id': k, 'name': v} for k, v in sorted(people.items(), key=lambda x: x[1].lower())]})
 
     @r.post('/api/users/{tg}/access')
     async def user_access(request):

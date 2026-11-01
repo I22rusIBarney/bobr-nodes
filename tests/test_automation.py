@@ -195,3 +195,31 @@ def test_versions_and_panel_restart(env):
     assert 'panel.restart' in feed                          # «колокольчик» по умолчанию — в Telegram не уходит
     assert all('перезапустилась' not in t for _, t in bot.sent)
     assert 'node.version' in feed
+
+
+def test_node_fill_by_online(env):
+    store, prof, pilot, pl, bot = env
+    store.save_profile({**prof, 'auto': {'online_max': 100}})
+    t = 1_000_000.0
+    pl.nodes = [{**node('a'), 'usersOnline': 95}]
+    for i in range(4):
+        asyncio.run(pilot.panel_load(now=t + i * 180))
+    assert not [x for _, x in bot.sent if 'Онлайн' in x]          # ~12 минут — ещё не пишем
+    asyncio.run(pilot.panel_load(now=t + 4 * 180))
+    full = [x for _, x in bot.sent if 'Онлайн 95 из 100' in x]
+    assert len(full) == 1 and 'заполняется' in full[0]
+    asyncio.run(pilot.panel_load(now=t + 5 * 180))
+    assert len([x for _, x in bot.sent if 'Онлайн' in x]) == 1     # повторно не пишем
+    pl.nodes = [{**node('a'), 'usersOnline': 60}]
+    asyncio.run(pilot.panel_load(now=t + 6 * 180))
+    assert 'снова свободно' in bot.sent[-1][1]
+    peaks = pilot.online_peaks(prof['id'], pl.nodes, now=t + 6 * 180)
+    assert peaks == [{'uuid': 'a', 'name': 'a', 'country': '', 'now': 60, 'peak': 95}]
+
+
+def test_node_fill_off_by_default(env):
+    store, prof, pilot, pl, bot = env
+    pl.nodes = [{**node('a'), 'usersOnline': 5000}]
+    for i in range(8):
+        asyncio.run(pilot.panel_load(now=1000.0 + i * 180))
+    assert bot.sent == []

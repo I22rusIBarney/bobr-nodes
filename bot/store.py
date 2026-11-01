@@ -23,6 +23,10 @@ CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL
 CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, updated REAL NOT NULL,
     uid INTEGER NOT NULL, pid INTEGER, job_id INTEGER, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
     rating INTEGER, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}');
+-- журнал действий: кто (uid; 0 — сам бот), что (action — код, label — для людей), где (pid), подробности
+CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, uid INTEGER NOT NULL,
+    action TEXT NOT NULL, label TEXT NOT NULL, pid INTEGER, detail TEXT NOT NULL DEFAULT '', who TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS audit_uid ON audit(uid, id);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -278,6 +282,33 @@ class Store:
 
     def unread_events(self, uid: int, after: int) -> int:
         return self._q('SELECT COUNT(*) n FROM events WHERE rcpt LIKE ? AND id > ?', (f'%,{int(uid)},%', int(after)))[0]['n']
+
+    # ── журнал действий ──
+    def add_audit(self, uid: int, action: str, label: str, pid: int | None = None, detail: str = '',
+                  ts: float | None = None, who: str = '') -> int:
+        with self.lock:
+            aid = self.db.execute('INSERT INTO audit(ts, uid, action, label, pid, detail, who) VALUES(?,?,?,?,?,?,?)',
+                                  (ts or time.time(), int(uid or 0), action, label, pid, detail[:600], who[:64])).lastrowid
+            if aid % 500 == 0:  # храним год, не больше 50 000 записей
+                self.db.execute('DELETE FROM audit WHERE ts < ? OR id <= ?', (time.time() - 365 * 86400, aid - 50000))
+            return aid
+
+    def audit(self, uid: int | None = None, pid: int | None = None, q: str = '', before: int | None = None,
+              limit: int = 50) -> list[dict]:
+        sql, args = 'SELECT id, ts, uid, action, label, pid, detail, who FROM audit WHERE 1=1', []
+        if uid is not None:
+            sql += ' AND uid = ?'
+            args.append(int(uid))
+        if pid is not None:
+            sql += ' AND pid = ?'
+            args.append(int(pid))
+        if q:
+            sql += ' AND (label LIKE ? OR detail LIKE ?)'
+            args += [f'%{q}%', f'%{q}%']
+        if before:
+            sql += ' AND id < ?'
+            args.append(int(before))
+        return [dict(r) for r in self._q(sql + ' ORDER BY id DESC LIMIT ?', (*args, int(limit)))]
 
     # ── отзывы и ошибки ──
     @staticmethod

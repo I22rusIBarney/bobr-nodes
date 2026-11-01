@@ -621,3 +621,10 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 
 /* журнал переезда */
 pre.log { margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--hint); max-height: 320px; overflow: auto; }
+
+/* резервные копии: пароль восстановления крупно, чтобы переписать без ошибок */
+.bk-key { margin: var(--s3) var(--s4) 0; padding: 14px 12px; border-radius: 12px; background: var(--accent-soft);
+  font-size: 1.15em; letter-spacing: .06em; text-align: center; user-select: all; -webkit-user-select: all; }
+.bk-key span { display: inline-block; white-space: nowrap; }
+.bk-key-acts { display: flex; gap: 8px; justify-content: center; padding: var(--s3) var(--s4) var(--s4); flex-wrap: wrap; }
+.bk-steps { margin: 0; padding: var(--s3) var(--s4) var(--s3) calc(var(--s4) + 1.2em); display: grid; gap: 8px; line-height: 1.4; }

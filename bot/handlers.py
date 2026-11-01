@@ -479,6 +479,9 @@ async def deploy_go(c: CallbackQuery, state: FSMContext, store: Store, runner: R
         return
     await svc.create_jobs(store, runner, c.message.chat.id, w['pid'], w['cat'], w['loc'], w['idx'], w['period'],
                           w['domains'], custom=w.get('custom'))
+    from . import audit
+    audit.log(store, c.from_user.id, 'deploy', 'Запустил покупку и установку нод', w['pid'],
+              f'из Telegram: {", ".join(w["domains"][:6])}', who=audit.who_of(c.from_user))
 
 
 # ───────────────────────── уже купленные серверы ─────────────────────────
@@ -684,6 +687,8 @@ async def billing_pay(c: CallbackQuery, billing=None, uid: int = 0):
     except Exception:  # noqa: BLE001
         pass
     await c.message.answer(f'✅ <b>Подписка продлена</b> до {billing.date(u["access_until"])}. Всё снова работает.', parse_mode='HTML')
+    from . import audit
+    audit.log(billing.store, uid, 'billing.pay', 'Продлил подписку', detail='из Telegram', who=audit.who_of(c.from_user))
     await c.answer()
 
 
@@ -704,6 +709,9 @@ async def update_button(c: CallbackQuery, store: Store, role: str = 'admin', aut
         msg = 'Новая версия сейчас недоступна — попробуйте позже'
     elif c.data == 'upd:now':
         su.request_now(store, data_dir, rem['sha'])
+        from . import audit
+        audit.log(store, c.from_user.id, 'update', 'Обновил бота', detail=f'из Telegram, версия {rem.get("version") or rem["sha"]}',
+                  who=audit.who_of(c.from_user))
         msg = 'Обновляюсь — перезапуск через минуту, потом напишу, что нового'
     else:
         msg = f'Обновлюсь ночью в {su.request_night(store, rem["sha"])["hour"]:02d}:00'
@@ -712,6 +720,91 @@ async def update_button(c: CallbackQuery, store: Store, role: str = 'admin', aut
     except Exception:  # noqa: BLE001
         pass
     await c.answer(msg, show_alert=True)
+
+
+# ───────────────────────── восстановление из резервной копии ─────────────────────────
+
+class Restore(StatesGroup):
+    key = State()
+    confirm = State()
+
+
+def _data_dir(autopilot=None) -> str:
+    import os
+    return (autopilot.data_dir if autopilot is not None else None) or os.environ.get('DATA_DIR', 'data')
+
+
+@router.message(F.document.file_name.endswith('.bnb'))
+async def restore_file(m: Message, state: FSMContext, role: str = 'admin', autopilot=None):
+    from pathlib import Path
+    if role != 'admin':
+        return await m.answer('Восстановить бота из копии может только администратор.')
+    if (m.document.file_size or 0) > 20 * 1024 * 1024:
+        return await m.answer('Файл больше 20 МБ — Telegram не даёт боту его скачать. Восстановите на сервере вручную.')
+    path = Path(_data_dir(autopilot)) / 'restore-upload.bnb'
+    await m.bot.download(m.document, destination=str(path))
+    await state.set_state(Restore.key)
+    await m.answer('🗄 Это резервная копия BobrNet. Пришлите <b>пароль восстановления</b> — он в панели старого бота: '
+                   'Настройки → «Резервные копии». Сообщение с паролем я сразу удалю.
+
+/cancel — передумали.', parse_mode='HTML')
+
+
+@router.message(Restore.key, F.text)
+async def restore_key(m: Message, state: FSMContext, store: Store, autopilot=None):
+    import asyncio
+    from pathlib import Path
+
+    from . import backup as bk
+    key = m.text or ''
+    try:
+        await m.delete()
+    except Exception:  # noqa: BLE001 — не смогли удалить — не страшно
+        pass
+    path = Path(_data_dir(autopilot)) / 'restore-upload.bnb'
+    try:
+        man = await asyncio.to_thread(lambda: bk.inspect(bk.decrypt(path.read_bytes(), key)))
+    except bk.BadKey as e:
+        return await m.answer(f'❌ {e}. Пришлите пароль ещё раз или /cancel.')
+    except (bk.BackupError, OSError) as e:
+        await state.clear()
+        return await m.answer(f'❌ {html.escape(str(e))}')
+    await state.update_data(key=key)
+    await state.set_state(Restore.confirm)
+    busy = store.active_jobs()
+    warn = f'\n\n⚠️ Сейчас идут задачи ({len(busy)}) — они прервутся.' if busy else ''
+    await m.answer(f'✅ Пароль подошёл: {html.escape(bk.describe(man))}.\n\n'
+                   'Восстановить? Бот заменит свои данные данными из копии и перезапустится (~10 секунд). '
+                   'Нынешние данные этого сервера не удалятся — они останутся в папке <code>data/before-restore-…</code>.' + warn,
+                   parse_mode='HTML', reply_markup=kb([('♻️ Восстановить', 'rs:go'), ('Отмена', 'rs:no')]))
+
+
+@router.callback_query(F.data.in_({'rs:go', 'rs:no'}))
+async def restore_go(c: CallbackQuery, state: FSMContext, store: Store, role: str = 'admin', uid: int = 0, autopilot=None):
+    import asyncio
+    from pathlib import Path
+
+    from . import audit
+    from . import backup as bk
+    from . import migrate
+    key = (await state.get_data()).get('key')
+    await state.clear()
+    path = Path(_data_dir(autopilot)) / 'restore-upload.bnb'
+    if c.data == 'rs:no' or role != 'admin' or not key:
+        path.unlink(missing_ok=True)
+        await c.message.edit_text('Восстановление отменено.')
+        return await c.answer()
+    try:
+        man = await asyncio.to_thread(lambda: bk.stage(bk.decrypt(path.read_bytes(), key), _data_dir(autopilot)))
+    except (bk.BackupError, OSError) as e:
+        return await c.answer(f'Не получилось: {str(e)[:150]}', show_alert=True)
+    path.unlink(missing_ok=True)
+    audit.log(store, uid, 'backup.restore', 'Восстановил бота из резервной копии', detail=bk.describe(man), who=audit.who_of(c.from_user))
+    await c.message.edit_text(f'♻️ Восстанавливаю: {html.escape(bk.describe(man))}. Перезапускаюсь — через ~10 секунд напишу, что готово.')
+    await c.answer()
+    stop = migrate.HOOKS.get('exit')
+    if stop:
+        asyncio.get_running_loop().call_later(2, stop, 0)  # docker сам запустит бота снова, а тот подставит копию
 
 
 # ───────────────────────── автомасштабирование ─────────────────────────
@@ -724,7 +817,8 @@ async def scale_button(c: CallbackQuery, store: Store, autopilot=None, access: A
     pid = autopilot.scale_owner(c.data[5:])
     if pid and not my_profile(store, access, role, uid, username, pid):
         return await c.answer('Нет доступа', show_alert=True)
-    msg = await autopilot.scale_confirm(c.data[5:])
+    from . import audit
+    msg = await autopilot.scale_confirm(c.data[5:], uid, audit.who_of(c.from_user))
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
