@@ -96,6 +96,7 @@ async function load() {
   }
   if (ST.theme) applyTheme(ST.theme);
   UI.nav.refresh();
+  if (ST && !ST.error && !ST._stale && ST.tour_done === false && !TOUR.on && !TOUR.offered) { TOUR.offered = true; setTimeout(tourStart, 700); }
 }
 // ───────── последнее известное состояние: сразу при открытии, потом — свежее ─────────
 const CACHE_KEY = 'bn:cache:' + (((UI.tg && UI.tg.initDataUnsafe && UI.tg.initDataUnsafe.user) || {}).id || 'web');
@@ -403,8 +404,118 @@ function serviceRows() {
     row({ icon: 'globe', color: 'amber', title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ icon: 'sparkle', color: 'violet', title: 'Gemini', status: conn(ok('gemini_key'), ['Не задан', 'quiet']), onClick: () => UI.nav.push(geminiView) }),
     row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) }),
-    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } }),
-    row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } })];
+    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } })];
+}
+// ───────── обучение: экскурсия по разделам с подсветкой ─────────
+const TOUR = { on: false, offered: false, i: 0, steps: [], ui: null, timer: 0, gen: 0 };
+const tourScreen = (key, fn) => { fn.__tour = key; return fn; };
+function tourSteps() {
+  const admin = isAdmin(), g = ST.profiles[0], S = [];
+  S.push({ icon: ['sparkle', 'violet'], title: 'Привет! Это BobrNet',
+    text: 'Бот покупает серверы в Bobr Cloud, ставит на них ноды Remnawave и дальше сам за ними следит. Покажу за минуту, где что лежит.' });
+  S.push({ tab: 'home', sel: '.home-page .hero', icon: ['activity', 'green'], title: 'Состояние одним взглядом',
+    text: 'Если что-то не так — ноды без связи, ошибки в задачах, нехватка ресурсов — это будет написано здесь. Всё хорошо — «Все системы работают».' });
+  S.push({ tab: 'home', sel: '.home-page .stats', icon: ['servers', 'blue'], title: 'Главные цифры',
+    text: 'Сколько у вас нод, групп и пользователей онлайн прямо сейчас — сразу по всем панелям.' });
+  S.push({ tab: 'home', sel: '.home-page .wallet-chip', icon: ['wallet', 'green'], title: 'Баланс Bobr Cloud',
+    text: 'С него покупаются и продлеваются серверы. Нажмите, чтобы пополнить картой или СБП. Если денег скоро не хватит, бот предупредит заранее.' });
+  S.push({ tab: 'home', sel: '.home-page .appbar .round-btn', icon: ['bell', 'amber'], title: 'Колокольчик',
+    text: 'Все события в одном месте: упала нода, панель не отвечает, кончается аренда, установка готова. Число на кнопке — новые события.' });
+  S.push({ tab: 'home', sel: '.home-page .cta', icon: ['plusCircle', 'blue'], title: 'Развернуть ноды',
+    text: 'Главная кнопка. Мастер спросит группу, страну, тариф и количество — а бот сам купит серверы, поставит ноды и добавит их в панель.' +
+      (ST.issues.length ? ' Сейчас она серая: сначала закончите настройку — подсказка чуть выше.' : '') });
+  S.push({ tab: 'home', sel: '.home-page section.group', icon: ['layers', 'violet'], title: 'Группы',
+    text: 'Группа — это одна панель Remnawave со своими нодами, доменами и Cloudflare. Нажмите на группу, чтобы управлять её нодами.' });
+  S.push({ tab: 'home', sel: '.home-page .qa', icon: ['zap', 'amber'], title: 'Быстрые действия',
+    text: 'Самое частое под рукой: мониторинг из России, утренняя сводка, обновление нод' + (admin ? ', пользователи' : '') + ' и оформление.' });
+  S.push({ tab: 'home', sel: '.tabbar [data-k="servers"]', icon: ['servers', 'blue'], title: 'Раздел «Серверы»',
+    text: 'Внизу — четыре раздела. В «Серверах» все группы и их ноды. Заглянем туда.' });
+  S.push({ tab: 'servers', sel: '.servers-page section.group', icon: ['servers', 'blue'], title: 'Все группы',
+    text: 'У каждой группы — число нод и онлайн. Здесь же создаётся новая группа: адрес панели, токен и домен для имён нод.' });
+  if (g) {
+    const gv = tourScreen('group', () => groupView(g.id));
+    S.push({ tab: 'servers', screen: gv, sel: '.group-page .segmented', icon: ['list', 'teal'], title: 'Страница группы',
+      text: 'Вкладки: серверы группы, статистика и пользователи. Нажмите на ноду — откроется её карточка: SSH, смена IP, дополнения, вход через Россию.' });
+    S.push({ tab: 'servers', screen: gv, sel: '.group-page .qa.four', icon: ['gear', 'gray'], title: 'Управление группой',
+      text: 'Обновление нод с проверкой и откатом, автоматизация (автообновление, нагрузка, автомасштабирование, прогноз баланса), аренда серверов и настройки панели.' });
+    S.push({ tab: 'servers', screen: gv, sel: '.group-page .qa.four + .stack', icon: ['shield', 'red'], title: 'Плагины и уборка',
+      text: 'Плагины — блокировка торрентов и фильтры сканеров сразу на всех нодах. Уборка найдёт оплаченные серверы без нод и мёртвые ноды.' });
+  }
+  S.push({ tab: 'tools', sel: '.tools-page section.group', icon: ['activity', 'blue'], title: 'Мониторинг и задачи',
+    text: 'Мониторинг каждые 5 минут проверяет ноды из России и чинит упавшие: смена IP, перезапуск, новая нода. В «Задачах» — ход установок и обновлений.' });
+  S.push({ tab: 'settings', sel: '.settings-page section.group', icon: ['bell', 'amber'], title: 'Настройки для вас',
+    text: 'Баланс, утренняя сводка, оформление и уведомления — что приходит в Telegram, а что только в колокольчик, плюс тихие часы ночью.' });
+  if (admin) S.push({ tab: 'settings', sel: '.settings-page section.group:last-of-type', icon: ['cpu', 'gray'], title: 'Сервер бота',
+    text: 'Подключения (Bobr Cloud, Cloudflare, Gemini), защита и нагрузка сервера, автообновление бота и история версий.' });
+  S.push({ icon: ['checkCircle', 'green'], title: 'Готово!',
+    text: (ST.profiles.length ? 'Начните с кнопки «Развернуть ноды».' : 'Начните с новой группы — подключите свою панель Remnawave.') + ' Обучение всегда можно пройти снова: Настройки → «Обучение».' });
+  return S;
+}
+function tourStart() {
+  if (!ST || ST.error || TOUR.on) return;
+  if (UI.nav._sheetClose) UI.nav._sheetClose();
+  TOUR.on = true; TOUR.i = 0; TOUR.steps = tourSteps();
+  const block = h('div', { class: 'tour-block' }), hole = h('div', { class: 'tour-hole' }), card = h('div', { class: 'tour-card', role: 'dialog', 'aria-modal': 'true', 'aria-live': 'polite' });
+  document.body.append(block, hole, card);
+  TOUR.ui = { block, hole, card };
+  TOUR.timer = setInterval(tourPlace, 300);  // экран перерисовался (подгрузились данные) — подсветка за ним
+  window.addEventListener('resize', tourPlace);
+  tourGo(0);
+}
+function tourEnd(done) {
+  if (!TOUR.on) return;
+  TOUR.on = false; clearInterval(TOUR.timer); window.removeEventListener('resize', tourPlace);
+  const u = TOUR.ui; u.block.remove(); u.hole.remove(); u.card.remove(); TOUR.ui = null;
+  if (ST) ST.tour_done = true;
+  api('tour', 'POST', { done: true }).catch(() => {});
+  UI.nav.stacks = {}; UI.nav.stack = []; UI.nav.setTab('home');
+  if (UI.nav.tab === 'home') UI.nav.reset();
+  if (done) UI.toast('Обучение пройдено');
+}
+const tourWait = ms => new Promise(r => setTimeout(r, ms));
+async function tourGo(i) {
+  const s = TOUR.steps[i], gen = ++TOUR.gen;
+  if (!s) return tourEnd(true);
+  TOUR.i = i;
+  const nav = UI.nav;
+  if (s.tab && nav.tab !== s.tab) nav.setTab(s.tab);
+  const top = nav.stack[nav.stack.length - 1];
+  if (s.screen) { if (!top || top.__tour !== s.screen.__tour) { nav.stack = []; nav.push(s.screen); } }
+  else if (s.tab && nav.stack.length) nav.reset();
+  tourCard(s, i);
+  let el = null;
+  for (let t = 0; s.sel && t < 25 && !el; t++) { el = document.querySelector(s.sel); if (!el) await tourWait(100); }
+  if (gen !== TOUR.gen || !TOUR.on) return;
+  if (el && !el.closest('.tabbar')) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); await tourWait(350); }
+  if (gen !== TOUR.gen || !TOUR.on) return;
+  tourPlace();
+}
+function tourCard(s, i) {
+  const n = TOUR.steps.length, last = i === n - 1;
+  const next = h('button', { class: 'btn', type: 'button', onclick: () => { UI.haptic('light'); tourGo(i + 1); } }, last ? 'Начать работу' : i === 0 ? 'Поехали' : 'Далее');
+  const back = i > 0 && !last ? h('button', { class: 'btn secondary', type: 'button', onclick: () => tourGo(i - 1) }, 'Назад') : null;
+  TOUR.ui.card.replaceChildren(
+    h('div', { class: 'tour-top' }, UI.tile(s.icon[0], s.icon[1]), h('div', { class: 'tour-n' }, `${i + 1} из ${n}`),
+      last ? null : h('button', { class: 'btn plain tour-skip', type: 'button', onclick: () => tourEnd(false) }, 'Пропустить')),
+    h('h3', {}, s.title), h('p', {}, s.text),
+    h('div', { class: 'tour-dots', 'aria-hidden': 'true' }, TOUR.steps.map((_, k) => h('span', { class: k === i ? 'on' : k < i ? 'done' : '' }))),
+    h('div', { class: 'tour-btns' + (back ? '' : ' one') }, back, next));
+  TOUR.ui.card.setAttribute('aria-label', s.title);
+}
+function tourPlace() {
+  if (!TOUR.on) return;
+  const s = TOUR.steps[TOUR.i], { hole, card, block } = TOUR.ui;
+  const el = s.sel ? document.querySelector(s.sel) : null;
+  const r = el ? el.getBoundingClientRect() : null;
+  const vh = window.innerHeight;
+  if (!r || !r.width || r.bottom < 0 || r.top > vh) {  // вступление, итог или элемента нет — карточка по центру
+    hole.classList.remove('show'); block.classList.add('dim'); card.className = 'tour-card mid'; return;
+  }
+  block.classList.remove('dim');
+  const pad = 6;
+  Object.assign(hole.style, { left: r.left - pad + 'px', top: r.top - pad + 'px', width: r.width + pad * 2 + 'px', height: r.height + pad * 2 + 'px' });
+  hole.classList.add('show');
+  card.className = 'tour-card ' + (r.top + r.height / 2 > vh / 2 ? 'top' : 'bottom');
 }
 // ───────── история версий ─────────
 const KIND = { new: ['sparkle', 'violet', 'Новое'], better: ['zap', 'amber', 'Лучше'], fix: ['check', 'green', 'Исправлено'] };
@@ -2669,7 +2780,7 @@ function deployView(pid) {
 
 // ───────── вкладки «Инструменты» и «Настройки» ─────────
 function toolsView() {
-  const v = h('div', {}, ...pageHead('Инструменты'));
+  const v = h('div', { class: 'tools-page' }, ...pageHead('Инструменты'));
   if (!ST || ST.error) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })]))); return v; }
   const admin = isAdmin(), j = ST.jobs;
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Каждый день'), UI.stack([
@@ -2691,7 +2802,9 @@ function settingsTab() {
   v.append(group('Для вас', [
     row({ icon: 'wallet', color: 'green', title: 'Баланс Bobr Cloud', sub: 'пополнить картой или СБП', detail: walletText(), onClick: () => UI.nav.push(walletView) }),
     row({ icon: 'sun', color: 'amber', title: 'Утренняя сводка', sub: 'итог по группам раз в день', onClick: () => { SUM = null; UI.nav.push(summaryView); } }),
-    row({ icon: 'palette', color: 'pink', title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) })],
+    row({ icon: 'palette', color: 'pink', title: 'Оформление', detail: ST.theme && window.FX ? FX.EFFECT_NAMES[ST.theme.effect === 'auto' ? FX.seasonal(new Date()) : ST.theme.effect] : null, onClick: () => UI.nav.push(themeView) }),
+    row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } }),
+    row({ icon: 'sparkle', color: 'violet', title: 'Обучение', sub: 'короткая экскурсия по разделам', onClick: () => tourStart() })],
     admin ? null : 'Серверы покупаются с вашего баланса в Bobr Cloud, домены — вашим токеном Cloudflare.'));
   if (!admin) return v;
   v.append(group('Доступ', [row({ icon: 'users', color: 'green', title: 'Пользователи', sub: 'приглашения и доступ к группам', detail: ST.users ? String(ST.users) : null, onClick: () => { USERS = null; UI.nav.push(usersView); } })]));

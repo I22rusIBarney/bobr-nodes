@@ -582,3 +582,31 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .round-btn .pip.n { width: auto; height: 16px; min-width: 16px; padding: 0 4px; top: 6px; right: 5px; border-radius: 8px;
   font-size: 10px; font-weight: 700; line-height: 16px; color: #fff; text-align: center; }
 .row.is-new { background: var(--accent-soft); }
+
+/* ── обучение: затемнение, подсветка раздела и карточка с пояснением ── */
+.tour-block { position: fixed; inset: 0; z-index: 70; background: transparent; transition: background var(--t-slow) var(--ease); }
+.tour-block.dim { background: rgba(4, 6, 10, .72); }
+.tour-hole { position: fixed; z-index: 71; border-radius: 18px; pointer-events: none; opacity: 0;
+  box-shadow: 0 0 0 2px var(--accent-ring), 0 0 0 9999px rgba(4, 6, 10, .72);
+  transition: left var(--t-slow) var(--ease-out), top var(--t-slow) var(--ease-out), width var(--t-slow) var(--ease-out), height var(--t-slow) var(--ease-out), opacity var(--t) var(--ease); }
+.tour-hole.show { opacity: 1; animation: tour-pulse 1.8s var(--ease) infinite; }
+@keyframes tour-pulse { 0%, 100% { box-shadow: 0 0 0 2px var(--accent-ring), 0 0 0 9999px rgba(4, 6, 10, .72); }
+  50% { box-shadow: 0 0 0 5px var(--accent-soft), 0 0 0 9999px rgba(4, 6, 10, .72); } }
+.tour-card { position: fixed; z-index: 72; left: var(--gutter); right: var(--gutter); max-width: 440px; margin: 0 auto;
+  background: #161B26; border-radius: 20px; padding: 16px 16px 14px; box-shadow: 0 18px 50px rgba(0, 0, 0, .55), inset 0 0 0 1px var(--line-strong);
+  transition: top var(--t-slow) var(--ease-out), bottom var(--t-slow) var(--ease-out), transform var(--t-slow) var(--ease-out); }
+.tour-card.top { top: calc(12px + var(--sat)); }
+.tour-card.bottom { bottom: calc(var(--tabbar) + 24px + var(--sab)); }
+.tour-card.mid { top: 50%; transform: translateY(-50%); }
+.tour-card .tour-top { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.tour-card .tour-n { color: var(--hint); font-size: 13px; font-weight: 500; }
+.tour-card .tour-skip { margin-left: auto; width: auto; min-height: 32px; padding: 0 4px; font-size: 14px; color: var(--hint); }
+.tour-card h3 { margin: 0 0 6px; font-size: 19px; font-weight: 700; letter-spacing: -.01em; }
+.tour-card p { margin: 0 0 12px; color: var(--hint); font-size: 15px; line-height: 1.45; }
+.tour-dots { display: flex; gap: 5px; margin-bottom: 12px; flex-wrap: wrap; }
+.tour-dots span { width: 6px; height: 6px; border-radius: 3px; background: var(--surface-3); transition: width var(--t) var(--ease), background var(--t) var(--ease); }
+.tour-dots span.done { background: var(--accent-ring); }
+.tour-dots span.on { width: 18px; background: var(--accent); }
+.tour-btns { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
+.tour-btns.one { grid-template-columns: 1fr; }
+@media (prefers-reduced-motion: reduce) { .tour-hole.show { animation: none; } }
