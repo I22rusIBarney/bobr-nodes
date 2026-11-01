@@ -134,9 +134,30 @@ def profile_config(listen: int, sni: str, private_key: str, short_id: str, outbo
     }
 
 
-def profile_name(ip: str) -> str:
+def profile_name(ip: str, vision: bool = False) -> str:
     """Название профиля в панели: только латиница, цифры, пробел, _ и - (иначе панель отвечает Validation failed)."""
-    return re.sub(r'[^A-Za-z0-9_ -]', '-', f'Bridge {ip}')[:30]
+    return re.sub(r'[^A-Za-z0-9_ -]', '-', f'Bridge{" V" if vision else ""} {ip}')[:30]
+
+
+def vision_tag(ip: str) -> str:
+    """Тег inbound Vision у моста: в панели теги должны быть уникальны между профилями."""
+    return 'BRIDGE_VISION_' + re.sub(r'[^0-9A-Za-z]', '_', ip)
+
+
+def vision_config(base: dict, domain: str, tag: str, outbound: dict) -> dict:
+    """Профиль моста на Vision TLS: inbound — как ставит встроенный скрипт бота (сертификат через общую ссылку),
+    выход — на ноду-выход. Правила блокировки профиля остаются первыми, дальше — «всё из входа → выход»."""
+    cfg = engine.retag(engine.shared_profile(base, domain), engine.SHARED_TAG, tag)
+    out = {k: v for k, v in outbound.items() if not k.startswith('_')}
+    outs = [o for o in cfg.get('outbounds', []) if o.get('tag') != OUT_TAG]
+    if not any(o.get('protocol') == 'freedom' for o in outs):
+        outs.append({'tag': 'DIRECT', 'protocol': 'freedom'})
+    block = {o.get('tag') for o in outs if o.get('protocol') == 'blackhole'}
+    rules = (cfg.get('routing') or {}).get('rules') or []
+    mine = {'type': 'field', 'inboundTag': [tag], 'outboundTag': OUT_TAG}
+    rules = [r for r in rules if r.get('outboundTag') in block] + [mine] + \
+            [r for r in rules if r.get('outboundTag') not in block and r.get('outboundTag') != OUT_TAG]
+    return {**cfg, 'outbounds': [out, *outs], 'routing': {**(cfg.get('routing') or {}), 'rules': rules}}
 
 
 # ───────── служебный пользователь выхода ─────────
@@ -287,40 +308,48 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     if not uid:
         raise engine.StepError('панель не вернула VLESS UUID служебного пользователя')
     outbound = exit_outbound(panel, pnode, hosts, x['target_port'], uid)
+    vision = x.get('mode') == 'vision'
+    tag = vision_tag(x['ip']) if vision else TAG
     keep = x.get('reality') or {}  # переустановка — те же ключи: у клиентов в подписке ничего не меняется
-    priv = keep.get('private') or reality_keys()[0]
-    sid = keep.get('sid') or secrets.token_hex(4)
-    name = profile_name(x['ip'])
-    cfg = profile_config(x['listen'], x['sni'], priv, sid, outbound)
+    priv = keep.get('private') or ('' if vision else reality_keys()[0])
+    sid = keep.get('sid') or ('' if vision else secrets.token_hex(4))
+    name = profile_name(x['ip'], vision)
+    if vision:
+        cfg = vision_config(x['base_cfg'], x['domain'], tag, outbound)
+    else:
+        cfg = profile_config(x['listen'], x['sni'], priv, sid, outbound)
     profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
     old = next((p for p in profiles if p['name'] == name), None)
+    via = (f'выход на {outbound["settings"]["vnext"][0]["address"]}:{outbound["settings"]["vnext"][0]["port"]} '
+           f'({outbound["streamSettings"]["network"]}, {outbound["streamSettings"]["security"]})')
     if old:
         # переустановка: inbound входа (SNI, ключи — их могли поменять в панели руками) не трогаем, меняем выход
         oc = old.get('config') or {}
-        if any(i.get('tag') == TAG for i in oc.get('inbounds', [])):
+        if not vision and any(i.get('tag') == tag for i in oc.get('inbounds', [])):
             outs = [o for o in oc.get('outbounds', []) if o.get('tag') != OUT_TAG]
             cfg = {**oc, 'outbounds': [cfg['outbounds'][0], *outs], 'routing': oc.get('routing') or cfg['routing']}
             if not any(r.get('outboundTag') == OUT_TAG for r in cfg['routing'].get('rules', [])):
                 cfg['routing'] = {**cfg['routing'], 'rules': [*cfg['routing'].get('rules', []),
-                                                              {'type': 'field', 'inboundTag': [TAG], 'outboundTag': OUT_TAG}]}
+                                                              {'type': 'field', 'inboundTag': [tag], 'outboundTag': OUT_TAG}]}
         panel.call('PATCH', '/api/config-profiles', {'uuid': old['uuid'], 'config': cfg})
         prof = next(p for p in panel.call('GET', '/api/config-profiles')['configProfiles'] if p['uuid'] == old['uuid'])
-        log(f'панель: профиль «{name}» обновлён — выход на {outbound["settings"]["vnext"][0]["address"]}:'
-            f'{outbound["settings"]["vnext"][0]["port"]} ({outbound["streamSettings"]["network"]}, {outbound["streamSettings"]["security"]})')
+        log(f'панель: профиль «{name}» обновлён — {via}')
     else:
         prof = panel.call('POST', '/api/config-profiles', {'name': name, 'config': cfg})
-        log(f'панель: профиль «{name}» создан — REALITY с SNI {x["sni"]}, выход на {outbound["settings"]["vnext"][0]["address"]}')
-    inbound = next(i for i in prof['inbounds'] if i['tag'] == TAG)
-    node = {'ip': x['ip'], 'domain': x.get('address') or x['ip'], 'name': (x.get('remark') or name)[:30],
+        log(f'панель: профиль «{name}» создан — ' + (f'Vision TLS на {x["domain"]}' if vision else f'REALITY с SNI {x["sni"]}') + f', {via}')
+    inbound = next(i for i in prof['inbounds'] if i['tag'] == tag)
+    node = {'ip': x['ip'], 'domain': x['domain'] if vision else (x.get('address') or x['ip']), 'name': (x.get('remark') or name)[:30],
             'country': x.get('country') or '', 'remark': x.get('remark') or name}
-    panel.attach(node, prof, [inbound], squads, int(x.get('node_port') or 2222), log, tls=False)
+    panel.attach(node, prof, [inbound], squads, int(x.get('node_port') or 2222), log, tls=vision)
     entry = next((n for n in panel.call('GET', '/api/nodes') if n['address'] == node['domain']), None)
     hosts_now = [h['uuid'] for h in panel.call('GET', '/api/hosts')
                  if (h.get('inbound') or {}).get('configProfileInboundUuid') == inbound['uuid']]
-    cur_in = next((i for i in (cfg.get('inbounds') or []) if i.get('tag') == TAG), {})
-    sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x['sni']])[0]
-    for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
-        panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
+    sni_now = x['domain'] if vision else ''
+    if not vision:
+        cur_in = next((i for i in (cfg.get('inbounds') or []) if i.get('tag') == tag), {})
+        sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x['sni']])[0]
+        for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
+            panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
             'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'username': bridge_username(pnode['uuid']),
             'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}
@@ -372,3 +401,28 @@ def env_panel_ips(prof: dict) -> list[str]:
     raw = prof.get('outgoing_ips') or ''
     return [x for x in re.split(r'[\s,]+', str(raw)) if x and engine.is_ip(x)]
 
+
+
+# ───────── вход на встроенном скрипте (Vision TLS) ─────────
+def vision_prep_cmd() -> str:
+    """Перед встроенным скриптом: убрать то, что ставил сам бот под другие виды моста (HAProxy, контейнер REALITY).
+    Установку встроенного скрипта (.nuvrion-managed) не трогаем — повторный запуск её продолжит."""
+    return (f': {MARK}; set +e; systemctl disable --now bobr-relay >/dev/null 2>&1; rm -f /etc/systemd/system/bobr-relay.service; '
+            'systemctl daemon-reload; '
+            f'if [ -e {NODE_DIR} ] && [ ! -f {NODE_DIR}/.nuvrion-managed ]; then '
+            f'[ -f {NODE_DIR}/docker-compose.yml ] && (cd {NODE_DIR} && docker compose down >/dev/null 2>&1); '
+            f'docker rm -f remnanode >/dev/null 2>&1; mv {NODE_DIR} "{NODE_DIR}.removed-$(date +%Y%m%d-%H%M%S)"; fi; '
+            'if command -v ufw >/dev/null; then for n in $(ufw status numbered 2>/dev/null | grep -E "bobr-bridge|bobr-relay" | '
+            "sed -E 's/^\\[ *([0-9]+)\\].*/\\1/' | sort -rn); do yes | ufw delete \"$n\" >/dev/null 2>&1; done; fi; echo XB_PREP_OK")
+
+
+def vision_base(r: engine.Remote, domain: str) -> dict:
+    """Профиль, который сделал встроенный скрипт на входе, и общая ссылка на сертификат (как у обычных нод)."""
+    import json
+    _, out = r.run(f'ln -sfn live/{domain} {engine.CERT_LINK} && test -s {engine.CERT_LINK}/fullchain.pem && echo LINK_OK')
+    if 'LINK_OK' not in out:
+        raise engine.StepError(f'не нашёл сертификат /etc/letsencrypt/live/{domain} — скрипт выпустил его?')
+    rc, raw = r.run('cat /opt/remnanode/vision-config-profile.json')
+    if rc != 0 or '{' not in raw:
+        raise engine.StepError('не удалось прочитать vision-config-profile.json на входе')
+    return json.loads(raw[raw.index('{'):])
