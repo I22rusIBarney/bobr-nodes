@@ -173,3 +173,27 @@ def test_fetch_preset_filters_garbage():
             return R('<html>404</html>')
     with pytest.raises(plugins.PluginError):
         plugins.fetch_preset('ru', Empty())
+
+
+def test_autopilot_refreshes_changed_presets(tmp_path, monkeypatch):
+    """Раз в сутки: изменившийся список сканеров уезжает в плагин, ручные адреса остаются."""
+    import asyncio
+    import json
+
+    from bot import autopilot as ap
+    from bot.store import Store
+
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'g', 'panel_url': 'https://p', 'panel_token': 't'})
+    pl = FakePanel([node('a', 'p1')], {'p1': {'name': plugins.NAME, 'pluginConfig': {
+        'ingressFilter': {'enabled': True, 'blockedIps': ['1.1.1.0/24', '9.9.9.9']}}}})
+    store.set(f'plug:{pid}', json.dumps({'ingress': {'ru': ['1.1.1.0/24']}, 'egress': {}}))
+    monkeypatch.setattr(plugins, 'fetch_preset', lambda p: ['2.2.2.0/24'])
+    pilot = ap.Autopilot(store, None, None, None)
+    monkeypatch.setattr(pilot, 'panel', lambda prof: pl)
+    asyncio.run(pilot.refresh_presets())
+    assert pl.plugs['p1']['pluginConfig']['ingressFilter']['blockedIps'] == ['9.9.9.9', '2.2.2.0/24']
+    assert json.loads(store.get(f'plug:{pid}'))['ingress']['ru'] == ['2.2.2.0/24']
+    n = len(pl.calls)
+    asyncio.run(pilot.refresh_presets())  # список не менялся — в панель не пишем
+    assert not any(c[0] == 'PATCH' for c in pl.calls[n:])

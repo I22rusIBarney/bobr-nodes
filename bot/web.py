@@ -1892,33 +1892,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         fresh = await asyncio.to_thread(plugins.fetch_preset, pid_) if kind == 'ingress' and on else None
 
         def run(pl):
-            cfg = plugins.state(pl)['config']
-            mine = mem[kind]
-            old = mine.get(pid_) or []
-            if kind == 'ingress':
-                sec = cfg['ingressFilter']
-                others = {x for k, v in mine.items() if k != pid_ for x in v}
-                manual = set(sec['blockedIps']) - {x for v in mine.values() for x in v}
-                new = fresh if on else []
-                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new, protected=others | manual)
-            elif pid_ == 'mail':
-                sec = cfg['egressFilter']
-                new = presets[pid_]['ports'] if on else []
-                sec['blockedPorts'] = sorted(set(plugins.swap(sec['blockedPorts'], old, new)))
-            else:
-                sec = cfg['egressFilter']
-                new = presets[pid_]['ips'] if on else []
-                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new)
-            if on:
-                sec['enabled'] = True  # пресет без включённого фильтра ничего не делает
-                mine[pid_] = new
-            else:
-                mine.pop(pid_, None)
-            if kind == 'ingress' and not sec['blockedIps']:
-                sec['enabled'] = False
-            if kind == 'egress' and not sec['blockedIps'] and not sec['blockedPorts']:
-                sec['enabled'] = False
-            st = plugins.save(pl, cfg)
+            st = plugins.apply_preset(pl, mem, kind, pid_, on, fresh)
             store.set(f'plug:{p["id"]}', json.dumps(mem))
             return st
         try:

@@ -22,7 +22,7 @@ import time
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
-from . import engine, services as svc, sshaccess, upgrade as up
+from . import engine, plugins, services as svc, sshaccess, upgrade as up
 from .bcloud import BcloudError
 from .pcache import CACHE
 from .runner import bcloud_from, buyer_of
@@ -33,6 +33,7 @@ log = logging.getLogger(__name__)
 LOAD_EVERY = 15 * 60
 PANEL_EVERY = 3 * 60         # нагрузка из панели (Remnawave 2.2+ отдаёт её сама) — без SSH и чаще
 RENT_EVERY = 6 * 3600
+PRESET_EVERY = 24 * 3600     # списки сканеров в фильтре входящих (плагин ноды)
 HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
 HIGH_CYCLES = 3              # подряд высоких замеров до сообщения (~45 минут)
 REALERT = 12 * 3600
@@ -196,6 +197,7 @@ class Autopilot:
         self._load_at = 0.0
         self._pload_at = 0.0
         self._rent_at = 0.0
+        self._preset_at = 0.0
         self._bg: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
@@ -264,6 +266,9 @@ class Autopilot:
         if now - self._rent_at >= RENT_EVERY:
             self._rent_at = now
             self._bg_task(self.check_rent())
+        if now - self._preset_at >= PRESET_EVERY:
+            self._preset_at = now
+            self._bg_task(self.refresh_presets())
 
     # ───────── автообновление ─────────
     async def drive_update(self, prof: dict, now: float) -> None:
@@ -457,6 +462,34 @@ class Autopilot:
             elif r['balance_kop'] < need:
                 out.append({**x, 'why': f'на балансе {r["balance_kop"] // 100} ₽, на продление нужно {need // 100} ₽'})
         return out
+
+    # ───────── списки сканеров в плагине нод ─────────
+    async def refresh_presets(self) -> None:
+        """Раз в сутки — свежие списки включённых пресетов входящих. Меняется список — плагин обновляется
+        и рассылается нодам; не скачался — оставляем прежний и пробуем завтра."""
+        lists: dict[str, list[str] | None] = {}
+        for prof in self.store.profiles():
+            key = f'plug:{prof["id"]}'
+            mem = self.get(key)
+            for pid, old in list((mem.get('ingress') or {}).items()):
+                if pid not in plugins.INGRESS_PRESETS:
+                    continue
+                if pid not in lists:
+                    try:
+                        lists[pid] = await asyncio.to_thread(plugins.fetch_preset, pid)
+                    except plugins.PluginError as e:
+                        log.info('preset %s: %s', pid, e)
+                        lists[pid] = None
+                fresh = lists[pid]
+                if not fresh or set(fresh) == set(old or []):
+                    continue
+                try:
+                    await asyncio.to_thread(plugins.apply_preset, self.panel(prof), mem, 'ingress', pid, True, fresh)
+                except (engine.StepError, plugins.PluginError) as e:
+                    log.info('preset %s group %s: %s', pid, prof['id'], e)
+                    continue
+                self.put(key, mem)
+                log.info('preset %s group %s: %d → %d', pid, prof['id'], len(old or []), len(fresh))
 
     async def check_rent(self) -> None:
         for prof in self.store.profiles():
