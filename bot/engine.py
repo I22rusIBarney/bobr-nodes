@@ -963,13 +963,17 @@ class Panel:
         if existing:
             self.call('PATCH', '/api/nodes', {'uuid': existing['uuid'], 'configProfile': cp})
             log(f'панель: нода «{existing["name"]}» уже была, профиль назначен')
+            if not existing.get('activePluginUuid'):
+                plugins.adopt(self, existing['uuid'], nodes, log)
         else:
             cc = (node.get('country') or '').upper()
             # адрес ноды — домен: при смене IP (бан адреса) достаточно поменять A-запись
             body = {'name': node['name'][:30], 'address': node.get('domain') or node['ip'], 'port': node_port,
                     'countryCode': cc if re.fullmatch(r'[A-Z]{2}', cc) else 'XX', 'configProfile': cp}
-            self.call('POST', '/api/nodes', body)
+            created = self.call('POST', '/api/nodes', body)
             log(f'панель: нода «{node["name"]}» создана')
+            if isinstance(created, dict) and created.get('uuid'):  # блокировка торрентов и фильтры — как у остальных нод
+                plugins.adopt(self, created['uuid'], nodes, log)
 
         opts = node.get('host') or {}
         balancer = opts.get('mode') == 'balancer'
@@ -2015,3 +2019,6 @@ def template_bundle(name: str, raw) -> dict:
         raise StepError('укажите имя шаблона')
     return {'kind': BUNDLE_KIND, 'version': 1, 'profiles': [], 'hosts': [],
             'templates': [{'name': name.strip(), 'templateType': 'XRAY_JSON', 'templateJson': tj}]}
+
+
+from . import plugins  # noqa: E402 — plugins импортирует engine

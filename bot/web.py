@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -17,7 +18,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, relay as rl, scripts as sc, services as svc, upgrade as up
+from . import engine, forms, naming, plugins, relay as rl, scripts as sc, services as svc, upgrade as up
 from .pcache import CACHE as PC
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
@@ -1785,6 +1786,162 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         store.save_profile({**p, 'auto': a})
         return J({'ok': True, **a})
+
+    # ── плагины нод: Torrent Blocker, Ingress / Egress Filter (одна запись плагина на группу) ──
+    def plug_mem(pid: int) -> dict:
+        """Какие записи списков добавлены пресетами — чтобы обновлять и убирать их, не трогая ручные."""
+        try:
+            m = json.loads(store.get(f'plug:{pid}') or '{}')
+        except ValueError:
+            m = {}
+        return {'ingress': m.get('ingress') or {}, 'egress': m.get('egress') or {}}
+
+    def plug_view(p: dict, st: dict) -> dict:
+        mem = plug_mem(p['id'])
+        cfg = st['config']
+        tb, ig, eg = cfg['torrentBlocker'], cfg['ingressFilter'], cfg['egressFilter']
+        preset_ips = {x for v in mem['ingress'].values() for x in v}
+        eg_preset_ips = {x for k, v in mem['egress'].items() if k != 'mail' for x in v}
+        eg_preset_ports = set(mem['egress'].get('mail') or [])
+        return {'exists': bool(st['uuid']), 'name': st['name'], 'bound': st['bound'], 'total': st['total'],
+                'foreign': st['foreign'], 'others': st['others'],
+                'torrent': {'on': plugins.is_on(tb), 'duration': int(tb.get('blockDuration') or 3600),
+                            'ignore_ips': (tb.get('ignoreLists') or {}).get('ip') or []},
+                'ingress': {'on': plugins.is_on(ig), 'count': len(ig.get('blockedIps') or []),
+                            'manual': [x for x in ig.get('blockedIps') or [] if x not in preset_ips],
+                            'presets': [{'id': k, 'title': v['title'], 'sub': v['sub'], 'on': k in mem['ingress'],
+                                         'count': len(mem['ingress'].get(k) or [])} for k, v in plugins.INGRESS_PRESETS.items()]},
+                'egress': {'on': plugins.is_on(eg),
+                           'manual_ips': [x for x in eg.get('blockedIps') or [] if x not in eg_preset_ips],
+                           'manual_ports': [x for x in eg.get('blockedPorts') or [] if x not in eg_preset_ports],
+                           'presets': [{'id': k, 'title': v['title'], 'sub': v['sub'], 'on': k in mem['egress']}
+                                       for k, v in plugins.EGRESS_PRESETS.items()]}}
+
+    async def plug_run(p: dict, fn):
+        try:
+            return await asyncio.to_thread(fn, panel_of(p))
+        except engine.StepError as e:
+            msg = str(e)
+            if '404' in msg and 'node-plugins' in msg:
+                raise ApiError('Панель не знает про плагины нод — обновите Remnawave до 2.2 или новее') from None
+            raise ApiError(f'Панель: {msg}') from None
+        except plugins.PluginError as e:
+            raise ApiError(str(e)) from None
+
+    @r.get('/api/profiles/{pid}/plugins')
+    async def plug_get(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        return J(plug_view(p, await plug_run(p, plugins.state)))
+
+    @r.post('/api/profiles/{pid}/plugins')
+    async def plug_save(request):
+        """Изменения по секциям: torrent {on, duration, ignore_ips}, ingress {on, manual}, egress {on, manual_ips,
+        manual_ports}; bind — заодно перепривязать ноды с чужим плагином. Сохраняется и привязывается ко всем нодам."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        mem = plug_mem(p['id'])
+
+        def run(pl):
+            cfg = plugins.state(pl)['config']
+            tb, ig, eg = cfg['torrentBlocker'], cfg['ingressFilter'], cfg['egressFilter']
+            t, i, e = b.get('torrent') or {}, b.get('ingress') or {}, b.get('egress') or {}
+            if 'on' in t:
+                tb['enabled'] = bool(t['on'])
+            if 'duration' in t:
+                d = int(t['duration'] or 0)
+                if not 60 <= d <= 30 * 86400:
+                    raise ValueError('Время бана: от 1 минуты до 30 дней')
+                tb['blockDuration'] = d
+            if 'ignore_ips' in t:
+                tb['ignoreLists']['ip'] = plugins.clean_ips(t['ignore_ips'], v6=True)
+            if 'on' in i:
+                ig['enabled'] = bool(i['on'])
+            if 'manual' in i:  # ручные записи заменяем, пресетные оставляем как есть
+                pre = {x for v in mem['ingress'].values() for x in v}
+                ig['blockedIps'] = [x for x in ig['blockedIps'] if x in pre] + \
+                    [x for x in plugins.clean_ips(i['manual']) if x not in pre]
+            if 'on' in e:
+                eg['enabled'] = bool(e['on'])
+            if 'manual_ips' in e:
+                pre = {x for k, v in mem['egress'].items() if k != 'mail' for x in v}
+                eg['blockedIps'] = [x for x in eg['blockedIps'] if x in pre] + \
+                    [x for x in plugins.clean_ips(e['manual_ips'], v6=True) if x not in pre]
+            if 'manual_ports' in e:
+                pre = set(mem['egress'].get('mail') or [])
+                eg['blockedPorts'] = sorted({x for x in eg['blockedPorts'] if x in pre} | set(plugins.clean_ports(e['manual_ports'])))
+            if ig['enabled'] and not ig['blockedIps']:
+                raise ValueError('Список входящих пуст — добавьте пресет или адреса, иначе включать нечего')
+            return plugins.save(pl, cfg, take_foreign=bool(b.get('bind')))
+        try:
+            st = await plug_run(p, run)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J(plug_view(p, st))
+
+    @r.post('/api/profiles/{pid}/plugins/preset')
+    async def plug_preset(request):
+        """Пресет списка: kind ingress|egress, id, on. Включение пресета входящих скачивает свежий список
+        (повторное — обновляет его), выключение убирает только его записи."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        kind, pid_, on = b.get('kind'), str(b.get('id') or ''), bool(b.get('on'))
+        presets = plugins.INGRESS_PRESETS if kind == 'ingress' else plugins.EGRESS_PRESETS if kind == 'egress' else None
+        if presets is None or pid_ not in presets:
+            raise ApiError('Нет такого пресета')
+        mem = plug_mem(p['id'])
+        fresh = await asyncio.to_thread(plugins.fetch_preset, pid_) if kind == 'ingress' and on else None
+
+        def run(pl):
+            cfg = plugins.state(pl)['config']
+            mine = mem[kind]
+            old = mine.get(pid_) or []
+            if kind == 'ingress':
+                sec = cfg['ingressFilter']
+                others = {x for k, v in mine.items() if k != pid_ for x in v}
+                manual = set(sec['blockedIps']) - {x for v in mine.values() for x in v}
+                new = fresh if on else []
+                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new, protected=others | manual)
+            elif pid_ == 'mail':
+                sec = cfg['egressFilter']
+                new = presets[pid_]['ports'] if on else []
+                sec['blockedPorts'] = sorted(set(plugins.swap(sec['blockedPorts'], old, new)))
+            else:
+                sec = cfg['egressFilter']
+                new = presets[pid_]['ips'] if on else []
+                sec['blockedIps'] = plugins.swap(sec['blockedIps'], old, new)
+            if on:
+                sec['enabled'] = True  # пресет без включённого фильтра ничего не делает
+                mine[pid_] = new
+            else:
+                mine.pop(pid_, None)
+            if kind == 'ingress' and not sec['blockedIps']:
+                sec['enabled'] = False
+            if kind == 'egress' and not sec['blockedIps'] and not sec['blockedPorts']:
+                sec['enabled'] = False
+            st = plugins.save(pl, cfg)
+            store.set(f'plug:{p["id"]}', json.dumps(mem))
+            return st
+        try:
+            st = await plug_run(p, run)
+        except plugins.PluginError as e:
+            raise ApiError(str(e)) from None
+        return J(plug_view(p, st))
+
+    @r.get('/api/profiles/{pid}/plugins/stats')
+    async def plug_stats(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        return J(await plug_run(p, plugins.stats))
+
+    @r.post('/api/profiles/{pid}/plugins/unblock')
+    async def plug_unblock(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        ip = str((await body(request)).get('ip') or '').strip()
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            raise ApiError('Нужен IP-адрес, например 203.0.113.10') from None
+        await plug_run(p, lambda pl: plugins.unblock(pl, ip))
+        return J({'ok': True, 'message': f'{ip} разблокирован на всех нодах'})
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:
