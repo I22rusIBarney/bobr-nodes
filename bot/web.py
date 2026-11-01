@@ -898,7 +898,17 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if not srv:
                 raise ApiError('Этого сервера нет у покупателя группы в Bobr Cloud')
             if srv['used'] and not srv.get('relay'):
-                raise ApiError('На этом сервере стоит нода — под мост возьмите свободный')
+                nd = srv.get('node')
+                if not nd or not b.get('convert'):
+                    raise ApiError('На этом сервере стоит нода — подтвердите, что её нужно убрать и сделать сервер мостом')
+                nprof = store.profile(int(nd['pid']))
+                if not nprof or not can(request, nprof):
+                    raise ApiError('Нода на этом сервере — из чужой группы')
+                if {nd.get('domain'), nd.get('ip')} & {dom, nip, n['address']} - {None, ''}:
+                    raise ApiError('Это сервер самой ноды — мостом к себе он быть не может')
+                if any(j['status'] in ACTIVE and j['data'].get('server_id') == sid for j in store.active_jobs()):
+                    raise ApiError('По ноде на этом сервере идёт задача — дождитесь её')
+                extra['convert'] = {**nd, 'node_pid': nprof['id']}
             if srv.get('status') != 'active' or not srv.get('ip'):
                 raise ApiError('Сервер ещё не готов в Bobr Cloud — подождите, пока он станет активным')
             ip = srv['ip']
@@ -937,8 +947,18 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
              'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
              'created_by': uid_of(request), 'created_at': int(time.time()), **extra}
         if source != 'buy':
+            pre: list[str] = []
+            if extra.get('convert'):
+                try:
+                    await relay_convert(x, acc, pre.append)
+                except (engine.StepError, OSError) as e:
+                    raise ApiError(f'Не получилось освободить сервер: {e}') from None
             x['id'] = store.save_relay(x)
-            return J(await relay_run(x, p, ip))
+            res = await relay_run(x, p, ip)
+            if pre:
+                res['log'] = pre + res.get('log', [])
+                store.save_relay({**store.relay(x['id']), 'log': (pre + (store.relay(x['id']).get('log') or []))[-24:]})
+            return J(res)
         # новый сервер: покупка сейчас (деньги и ошибки Bobr Cloud — сразу в ответе), проброс — когда сервер создастся
         bc = bcloud_from(store, buyer_of(store, p))
         try:
@@ -951,6 +971,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return J({'id': x['id'], 'ok': True, 'pending': True,
                   'message': f'Купил сервер {x["flag"]} {x["spec"]} за {x["price_kop"] // 100} ₽/мес — поставлю проброс, '
                              'когда Bobr Cloud его создаст (обычно 1–3 минуты)'})
+
+    async def relay_convert(x: dict, acc: dict, log) -> None:
+        """Сервер с нодой → мост: остановить ноду на сервере, убрать её из панели и DNS, отметить задачу удалённой."""
+        from .runner import cf_token_of
+        nd = x['convert']
+        nprof = store.profile(int(nd['node_pid']))
+        r = relay_remote({'ip': x['ip'], 'ssh': acc})
+        log(f'останавливаю ноду {nd.get("domain") or x["ip"]} на сервере')
+        await asyncio.to_thread(rl.convert, r, nd.get('domain') or '', log)
+        if nprof:
+            pconf = {**nprof, 'cf_token': cf_token_of(store, nprof)}
+            try:
+                await asyncio.to_thread(engine.remove_node, pconf, x['ip'], nd.get('domain') or '', log)
+            except engine.StepError as e:
+                log(f'панель: {e} — уберите ноду из панели вручную')
+            PC.drop(nprof['id'])
+        store.patch_job_data(int(nd['job']), removed=True, removed_at=int(time.time()), bridge=True)
+        x['convert'] = {**nd, 'done': int(time.time())}
 
     relay_tasks: dict[int, asyncio.Task] = {}
 
