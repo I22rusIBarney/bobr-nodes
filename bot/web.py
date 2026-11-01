@@ -97,6 +97,8 @@ ADMIN_ONLY = [
     (r'.*', r'/api/host'),
     (r'POST', r'/api/selfupdate'),
     (r'.*', r'/api/migrate(/.*)?'),
+    (r'GET', r'/api/reports'),
+    (r'.*', r'/api/reports/\d+/resolve'),
 ]
 
 
@@ -119,7 +121,7 @@ def client_ip(request) -> str:
 
 def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], public_url: str = '',
               bot_username: str = '', security=None, data_dir: str | Path = 'data', monitor=None,
-              access: Access | None = None, autopilot=None, hostload=None, mover=None) -> web.Application:
+              access: Access | None = None, autopilot=None, hostload=None, mover=None, feedback=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
     NT = notify.Notifier(store, None, access, admins)  # веб: только лента и настройки, без отправки
@@ -348,6 +350,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     def profile_summary(p: dict, jobs: list[dict]) -> dict:
         mine = [j for j in jobs if j['profile_id'] == p['id']]
         return {'id': p['id'], 'name': p['name'], 'panel_url': p['panel_url'], 'base_domain': p.get('base_domain', ''),
+                'created_by': p.get('created_by'), 'owner_tg_id': p.get('owner_tg_id'),
                 'traffic_control': p.get('traffic_control', True), 'owner_label': p.get('owner_label', ''),
                 'name_pattern': p.get('name_pattern') or naming.DEFAULT_PATTERN,
                 'script': ((store.script(p['script_id']) or {}).get('recipe') or {}).get('title') if p.get('script_id') else '',
@@ -396,7 +399,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
                   'notif_unread': NT.unread(uid_of(request)),
                   'tour_done': bool(store.get(f'tour_done:{uid_of(request)}')),
-                  'me': request['user'].get('first_name', '')})
+                  'reports_open': len(store.reports(status='open', limit=1000)) if admin else None,
+                  'me': request['user'].get('first_name', ''), 'me_id': uid_of(request)})
 
     @r.post('/api/settings')
     async def save_settings(request):
@@ -1552,6 +1556,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             out['location'] = d.get('location')
             out['ru_check'], out['ru_note'] = d.get('ru_check') or '', d.get('ru_note') or ''
             out['create_failed'] = bool(d.get('create_failed')) and j['status'] == 'failed'
+            out['report'] = d.get('report') if j['status'] == 'failed' else None
+            out['report_to_admin'] = bool(d.get('report_to_admin'))
+            out['survey'] = d.get('survey') or ''
             path = runner.log_path(j['id'])
             if path.exists():
                 with open(path, 'rb') as f:
@@ -2072,6 +2079,86 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         logging.getLogger(__name__).warning('migration to %s started by %s', t['ip'], uid_of(request))
         return J(m.view())
+
+    # ── аватарки из Telegram: свою — всем, чужие — администратору ──
+    @r.get('/api/avatar/{tg}')
+    async def avatar_get(request):
+        from . import avatars
+        try:
+            tg = int(request.match_info['tg'])
+        except ValueError:
+            raise ApiError('Нет такого пользователя', 404) from None
+        if tg != uid_of(request) and not is_admin(request):
+            raise ApiError('Нет доступа', 403)
+        a = await avatars.avatar(bot_token, tg)
+        if not a:
+            return web.Response(status=404)
+        return web.Response(body=a[0], content_type=a[1], headers={'Cache-Control': 'private, max-age=3600'})
+
+    # ── отзывы и ошибки ──
+    def fb():
+        if feedback is None:
+            raise ApiError('Отзывы выключены', 404)
+        return feedback
+
+    def report_view(r: dict, full: bool = False) -> dict:
+        d = r['data']
+        out = {'id': r['id'], 'ts': r['ts'], 'updated': r['updated'], 'uid': r['uid'], 'who': user_label(r['uid']) if not access.is_admin(r['uid']) else 'администратор',
+               'kind': r['kind'], 'status': r['status'], 'rating': r['rating'], 'text': r['text'], 'job_id': r['job_id'],
+               'group': d.get('group', ''), 'domain': d.get('domain') or ', '.join(d.get('domains') or []), 'error': d.get('error', ''),
+               'stage': d.get('stage', ''), 'what': d.get('kind', ''), 'count': d.get('count', 1), 'replies': d.get('replies') or []}
+        if full:
+            out['log'] = d.get('log', '')
+        return out
+
+    def my_report(request, rid: int) -> dict:
+        r = store.report(rid)
+        if not r or (int(r['uid']) != uid_of(request) and not is_admin(request)):
+            raise ApiError('Отчёт не найден', 404)
+        return r
+
+    @r.get('/api/reports')
+    async def reports_list(request):
+        q = request.query
+        st = q.get('status', '') if q.get('status') in ('open', 'done') else ''
+        kind = q.get('kind', '') if q.get('kind') in ('auto', 'survey', 'user') else ''
+        rows = [x for x in store.reports(st, kind, 200) if not (x['kind'] == 'survey' and x['rating'] == 1 and not kind)]
+        return J({'stats': fb().stats(), 'reports': [report_view(x) for x in rows]})
+
+    @r.get('/api/my/reports')
+    async def my_reports(request):
+        return J({'reports': [report_view(x) for x in store.reports(uid=uid_of(request), limit=50) if x['kind'] != 'survey' or x['rating'] == -1]})
+
+    @r.get('/api/reports/{rid}')
+    async def report_get(request):
+        return J(report_view(my_report(request, int(request.match_info['rid'])), full=is_admin(request)))
+
+    @r.post('/api/reports')
+    async def report_new(request):
+        b = await body(request)
+        pid = b.get('pid')
+        if pid is not None:
+            pid = profile_or_404(pid, request)['id']
+        try:
+            rid = await fb().manual(uid_of(request), str(b.get('text') or ''), pid)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J({'ok': True, 'id': rid, 'message': 'Отправлено администратору — писать ему отдельно не нужно'})
+
+    @r.post('/api/reports/{rid}/comment')
+    async def report_comment(request):
+        r = my_report(request, int(request.match_info['rid']))
+        msg = await fb().comment(uid_of(request), r['id'], str((await body(request)).get('text') or ''))
+        return J({'ok': True, 'message': msg})
+
+    @r.post('/api/reports/{rid}/resolve')
+    async def report_resolve(request):
+        b = await body(request)
+        try:
+            r = await fb().resolve(int(request.match_info['rid']), str(b.get('reply') or ''), bool(b.get('done', True)))
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J(report_view(r, full=True))
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:

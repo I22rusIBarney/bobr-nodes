@@ -118,7 +118,10 @@ def job_kb(job: dict) -> InlineKeyboardMarkup:
         row.append(('🔁 Повторить', f'j:{job["id"]}:retry'))
     if job['status'] in ('done', 'failed'):
         row.append(('🙈 Скрыть', f'j:{job["id"]}:hide'))
-    return kb(row)
+    rows = [row]
+    if job['status'] == 'failed' and job['data'].get('report') and job['data'].get('report_to_admin'):
+        rows.append([('✍️ Добавить подробности', f'fb:c:{job["data"]["report"]}')])
+    return kb(*rows)
 
 
 def rub(kop: int) -> str:
@@ -576,6 +579,68 @@ async def monitor_button(c: CallbackQuery, store: Store, monitor=None, access: A
     except Exception:  # noqa: BLE001
         pass
     await c.answer(msg, show_alert=True)
+
+
+# ───────────────────────── отзывы и ошибки ─────────────────────────
+
+class Feedback(StatesGroup):
+    comment = State()
+
+
+@router.callback_query(F.data.regexp(r'^fb:[yn]:\d+$'))
+async def survey_answer(c: CallbackQuery, state: FSMContext, feedback=None, uid: int = 0):
+    if feedback is None:
+        return await c.answer('Отзывы выключены', show_alert=True)
+    jid = int(c.data.split(':')[2])
+    j = feedback.store.job(jid)
+    if not j or int(j['chat_id']) != int(uid):
+        return await c.answer('Это не ваш опрос', show_alert=True)
+    msg, rid = await feedback.answer(uid, jid, c.data[3] == 'y')
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    if rid:
+        await state.set_state(Feedback.comment)
+        await state.update_data(rid=rid)
+        await c.message.answer(f'📨 {msg}\n\nЧто не так? Опишите в паре слов одним сообщением — это сильно поможет. '
+                               'Или нажмите «Пропустить».', reply_markup=kb([('Пропустить', 'fb:skip')]))
+        return await c.answer()
+    await c.answer(msg, show_alert=True)
+
+
+@router.callback_query(F.data.regexp(r'^fb:c:\d+$'))
+async def report_comment_start(c: CallbackQuery, state: FSMContext, feedback=None, uid: int = 0):
+    if feedback is None:
+        return await c.answer('Отзывы выключены', show_alert=True)
+    rid = int(c.data.split(':')[2])
+    r = feedback.store.report(rid)
+    if not r or int(r['uid']) != int(uid):
+        return await c.answer('Отчёт не найден', show_alert=True)
+    await state.set_state(Feedback.comment)
+    await state.update_data(rid=rid)
+    await c.message.answer(f'✍️ Опишите одним сообщением, что вы делали и что видите — допишу к отчёту #{rid}.',
+                           reply_markup=kb([('Отмена', 'fb:skip')]))
+    await c.answer()
+
+
+@router.callback_query(F.data == 'fb:skip')
+async def report_comment_skip(c: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer('Хорошо, отчёт уже у администратора')
+
+
+@router.message(Feedback.comment, F.text)
+async def report_comment_text(m: Message, state: FSMContext, feedback=None, uid: int = 0):
+    rid = (await state.get_data()).get('rid')
+    await state.clear()
+    if feedback is None or not rid:
+        return
+    await m.answer('📨 ' + await feedback.comment(uid or m.from_user.id, int(rid), m.text or ''))
 
 
 # ───────────────────────── автомасштабирование ─────────────────────────

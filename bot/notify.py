@@ -45,6 +45,9 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'security.brute':   ('security', 'Подбор паролей к серверу бота', TG, False, True),
     'system.host':      ('system', 'Серверу бота не хватает ресурсов', TG, False, True),
     'system.update':    ('system', 'Бот обновился', TG, False, True),
+    'report.new':       ('system', 'Ошибки и отзывы пользователей', TG, False, True),
+    'report.reply':     ('tasks', 'Ответ на ваш отчёт о проблеме', TG, False, False),
+    'survey.ask':       ('tasks', 'Опрос: всё ли работает после установки', TG, False, False),
 }
 MODES = (TG, BELL, OFF)
 QUIET_DEF = {'on': True, 'from': 23, 'to': 8}

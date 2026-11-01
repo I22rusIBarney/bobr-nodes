@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY AUTOINCREMENT, token 
 -- лента уведомлений (колокольчик): кому — список tg id в виде ",1,2,"
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, type TEXT NOT NULL,
     pid INTEGER, text TEXT NOT NULL, rcpt TEXT NOT NULL);
+-- отзывы и ошибки: kind auto (задача упала) | survey (ответ на опрос) | user (сообщил сам); status open | done
+CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, updated REAL NOT NULL,
+    uid INTEGER NOT NULL, pid INTEGER, job_id INTEGER, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+    rating INTEGER, text TEXT NOT NULL DEFAULT '', data TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -274,4 +278,45 @@ class Store:
 
     def unread_events(self, uid: int, after: int) -> int:
         return self._q('SELECT COUNT(*) n FROM events WHERE rcpt LIKE ? AND id > ?', (f'%,{int(uid)},%', int(after)))[0]['n']
+
+    # ── отзывы и ошибки ──
+    @staticmethod
+    def _report(r) -> dict:
+        d = dict(r)
+        d['data'] = json.loads(d['data'] or '{}')
+        return d
+
+    def add_report(self, uid: int, kind: str, pid: int | None = None, job_id: int | None = None, text: str = '',
+                   rating: int | None = None, data: dict | None = None, status: str = 'open') -> int:
+        now = time.time()
+        with self.lock:
+            return self.db.execute(
+                'INSERT INTO reports(ts, updated, uid, pid, job_id, kind, status, rating, text, data) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (now, now, int(uid), pid, job_id, kind, status, rating, text, json.dumps(data or {}, ensure_ascii=False))).lastrowid
+
+    def report(self, rid: int) -> dict | None:
+        rows = self._q('SELECT * FROM reports WHERE id=?', (int(rid),))
+        return self._report(rows[0]) if rows else None
+
+    def report_for_job(self, job_id: int, kind: str = 'auto') -> dict | None:
+        rows = self._q('SELECT * FROM reports WHERE job_id=? AND kind=? ORDER BY id DESC LIMIT 1', (int(job_id), kind))
+        return self._report(rows[0]) if rows else None
+
+    def update_report(self, rid: int, **fields) -> None:
+        if 'data' in fields:
+            fields['data'] = json.dumps(fields['data'], ensure_ascii=False)
+        fields['updated'] = time.time()
+        cols = ', '.join(f'{k}=?' for k in fields)
+        self._q(f'UPDATE reports SET {cols} WHERE id=?', (*fields.values(), int(rid)))
+
+    def reports(self, status: str = '', kind: str = '', limit: int = 100, uid: int | None = None) -> list[dict]:
+        sql, args = 'SELECT * FROM reports WHERE 1=1', []
+        for col, v in (('status', status), ('kind', kind)):
+            if v:
+                sql += f' AND {col}=?'
+                args.append(v)
+        if uid is not None:
+            sql += ' AND uid=?'
+            args.append(int(uid))
+        return [self._report(r) for r in self._q(sql + ' ORDER BY id DESC LIMIT ?', (*args, int(limit)))]
 

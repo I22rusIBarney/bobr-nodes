@@ -113,6 +113,9 @@ def job_text(job: dict, profile_name: str = '', last: str = '') -> str:
         lines.append(f'{ru[0]} Из России: {html.escape(d.get("ru_note") or ru[1])}')
     if job['status'] == 'failed' and job['error']:
         lines += ['', f'<b>Ошибка:</b> {html.escape(job["error"][:600])}']
+        if d.get('report') and d.get('report_to_admin'):
+            lines += ['', f'📨 Отчёт об ошибке #{d["report"]} уже у администратора — писать ему не нужно. '
+                          'Если есть подробности, нажмите «Добавить подробности».']
     elif job['status'] in ('provisioning', 'deploying', 'buying') and last:
         lines += ['', f'<i>{html.escape(last[:160])}</i>']
     elif job['status'] == 'done' and d.get('kind') == 'upgrade' and d.get('result'):
@@ -142,6 +145,7 @@ class Runner:
         self.poll_every = poll_every
         self.ip_timeout = ip_timeout
         self.rebuy_wait = min(5.0, poll_every)
+        self.feedback = None  # отзывы и ошибки: отчёт при падении задачи, опрос после установки (задаётся в main)
         self.after_deploy = None  # (jid) -> None: мониторинг проверяет новую ноду из России  # Bobr Cloud возвращает деньги за несозданный сервер сразу
         self.edit_every = edit_every
         self.tasks: dict[int, asyncio.Task] = {}
@@ -278,6 +282,14 @@ class Runner:
             j = self.store.job(jid)
             if j and j.get('profile_id'):
                 CACHE.drop(j['profile_id'])
+            if self.feedback is not None:
+                try:
+                    if fields['status'] == 'failed':
+                        await self.feedback.job_failed(jid)  # отчёт — до перерисовки: в сообщении будет «отчёт отправлен»
+                    else:
+                        self.feedback.job_done(jid)
+                except Exception:  # noqa: BLE001 — отчёт не должен ломать задачу
+                    log.exception('feedback %s', jid)
         await self.render(jid, force='status' in fields)
 
     def ssh_of(self, pid: int, node_uuid: str) -> dict:
