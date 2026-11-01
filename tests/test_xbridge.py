@@ -239,6 +239,7 @@ def test_bridge_ip_excluded_from_torrent_blocker():
     assert ign['ip'] == ['1.1.1.1', '203.0.113.50'] and ign['userId'] == [77]
     assert ('POST', '/api/node-plugins/executor') in pl.calls          # бан с IP входа снят сразу
     n = len(pl.calls)
+    pl.profiles = [p for p in pl.profiles if p['uuid'] != 'prof-bridge']
     xb.setup_panel(pl, {**RELAY, 'reality': made['reality']}, EXIT_NODE, EXIT_HOSTS, log.append)
     assert pl.plugin['torrentBlocker']['ignoreLists']['ip'].count('203.0.113.50') == 1
     assert ('PATCH', '/api/node-plugins') not in pl.calls[n:]          # уже в исключениях — не трогаем
