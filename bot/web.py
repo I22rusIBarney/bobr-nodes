@@ -96,6 +96,7 @@ ADMIN_ONLY = [
     (r'.*', r'/api/(users|invites)(/.*)?'),
     (r'.*', r'/api/host'),
     (r'POST', r'/api/selfupdate'),
+    (r'.*', r'/api/selfupdate/.+'),
     (r'.*', r'/api/migrate(/.*)?'),
     (r'GET', r'/api/reports'),
     (r'.*', r'/api/reports/\d+/resolve'),
@@ -1957,7 +1958,38 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def selfupdate_get(request):
         from . import selfupdate as su
         c = su.cfg(store)
-        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW, 'changelog': su.changelog()})
+        try:
+            req = json.loads(store.get('self_update_req') or '{}')
+        except ValueError:
+            req = {}
+        return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW, 'changelog': su.changelog(),
+                  'request': req, 'pending': bool(store.get('self_update_pending'))})
+
+    @r.get('/api/selfupdate/check')
+    async def selfupdate_check(request):
+        from . import selfupdate as su
+        return J(await su.check_remote(data_dir or 'data', force=bool(request.query.get('force'))))
+
+    @r.post('/api/selfupdate/now')
+    async def selfupdate_now(request):
+        """Обновить сейчас: сервер запустит обновление в течение минуты; бот перезапустится на ~10 секунд."""
+        from . import selfupdate as su
+        rem = await su.check_remote(data_dir or 'data', force=True)
+        if rem['state'] == 'latest':
+            raise ApiError('У вас уже последняя версия')
+        if rem['state'] != 'ready':
+            raise ApiError({'testing': 'Новая версия ещё проходит тесты — подождите пару минут',
+                            'failed': 'Новая версия не прошла тесты — обновление недоступно'}.get(rem['state'], 'GitHub не ответил — попробуйте позже'))
+        su.request_now(store, data_dir or 'data', rem['sha'])
+        busy = len(store.active_jobs())
+        return J({'ok': True, 'message': 'Обновление начнётся в течение минуты' + (f' — после того как закончатся задачи ({busy})' if busy else '')})
+
+    @r.post('/api/selfupdate/night')
+    async def selfupdate_night(request):
+        from . import selfupdate as su
+        rem = await su.check_remote(data_dir or 'data')
+        c = su.request_night(store, rem.get('sha', ''))
+        return J({'ok': True, 'message': f'Обновлюсь ночью в {c["hour"]:02d}:00'})
 
     @r.post('/api/selfupdate')
     async def selfupdate_save(request):
