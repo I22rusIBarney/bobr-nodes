@@ -120,6 +120,11 @@ def profile_config(listen: int, sni: str, private_key: str, short_id: str, outbo
     }
 
 
+def profile_name(ip: str) -> str:
+    """Название профиля в панели: только латиница, цифры, пробел, _ и - (иначе панель отвечает Validation failed)."""
+    return re.sub(r'[^A-Za-z0-9_ -]', '-', f'Bridge {ip}')[:30]
+
+
 # ───────── служебный пользователь выхода ─────────
 def bridge_username(exit_uuid: str) -> str:
     return 'bridge_' + re.sub(r'[^a-z0-9]', '', exit_uuid.lower())[:12]
@@ -224,7 +229,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     keep = x.get('reality') or {}  # переустановка — те же ключи: у клиентов в подписке ничего не меняется
     priv = keep.get('private') or reality_keys()[0]
     sid = keep.get('sid') or secrets.token_hex(4)
-    name = f'Мост {x["ip"]}'[:30]
+    name = profile_name(x['ip'])
     cfg = profile_config(x['listen'], x['sni'], priv, sid, outbound)
     profiles = panel.call('GET', '/api/config-profiles')['configProfiles']
     old = next((p for p in profiles if p['name'] == name), None)

@@ -595,7 +595,12 @@ class Panel:
             if code == 401:
                 hint = ' (неверный API-токен: Панель → Настройки → API Tokens)'
             msg = data.get('message') or data.get('error') or str(data)
-            raise StepError(f'панель {method} {path}: HTTP {code}{hint}: {str(msg)[:200]}')
+            errs = data.get('errors') if isinstance(data, dict) else None
+            if isinstance(errs, list) and errs:  # подробности проверки: какое поле и что не так
+                msg = f'{msg} — ' + '; '.join(
+                    (f'{".".join(map(str, e.get("path") or []))}: {e.get("message", "")}' if isinstance(e, dict) else str(e))
+                    for e in errs[:4])
+            raise StepError(f'панель {method} {path}: HTTP {code}{hint}: {str(msg)[:300]}')
         return data.get('response', data)
 
     def secret_key(self) -> str:
