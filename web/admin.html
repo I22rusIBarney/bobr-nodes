@@ -2726,6 +2726,26 @@ function relayAddView(pid, uuid) {
   v.append(h('div', { class: 'pad' }, status, go));
   return v;
 }
+// итог проверки моста: звенья цепочки и вывод
+const PROBE = { ok: ['проходит', 'ok'], cert: ['проходит', 'ok'], stall: ['нет ответа — режут', 'bad'], fail: ['сброс', 'bad'] };
+function probeRow(title, sub, r) {
+  if (!r) return row({ title, sub, chevron: false, cls: 'wrap is-dim', status: ['нет данных', ''] });
+  if (r.error) return row({ title, sub: r.error, chevron: false, cls: 'wrap', status: ['ошибка', 'bad'] });
+  const st = r.tcp !== 'ok' && r.tcp !== '?' ? ['порт закрыт', 'bad'] : PROBE[r.tls] || [r.tls, ''];
+  return row({ icon: st[1] === 'ok' ? 'check' : 'close', color: st[1] === 'ok' ? 'green' : 'pink', title, sub, chevron: false, cls: 'wrap', status: st });
+}
+function relayCheckSheet(x, r) {
+  UI.sheet('Проверка моста', () => {
+    const tgt = `${r.target}:${r.target_port}`, ent = `${r.entry}:${r.listen}`;
+    const rows = [probeRow('Вход → нода', `с сервера входа на ${tgt}`, r.from_entry), probeRow('Через вход из-за рубежа', `с сервера бота на ${ent}`, r.from_bot)];
+    const ru = r.checkers.map(c => [probeRow(`${c.name}: вход`, `из России на ${ent}` + (c.region && MON && MON.regions ? ' · ' + (MON.regions[c.region] || '') : ''), c.error ? { error: c.error } : c.entry),
+      probeRow(`${c.name}: нода напрямую`, `из России на ${tgt}`, c.error ? null : c.node)]).flat();
+    return h('div', { style: 'padding-bottom:var(--s5)' },
+      h('div', { class: 'notice ' + (/работает/.test(r.verdict[0]) ? 'ok' : 'bad') }, ...r.verdict.map((t, i) => h('div', { style: i ? 'margin-top:8px' : '' }, t))),
+      group('Звенья', rows, r.sni ? `TLS — с SNI ${r.sni}, как у клиента.` : null),
+      ru.length ? group('Из России (чекеры)', ru) : null);
+  });
+}
 function relayView(pid, uuid, rid) {
   const n = NODE[uuid], x = n && !n.error && (n.relays || []).find(r => r.id === rid);
   if (!x) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Вход убран'));
@@ -2762,6 +2782,11 @@ function relayView(pid, uuid, rid) {
   });
   if (!running) v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
     'Новый доступ сохранится при переустановке и будет у всех входов этого сервера.'), h('div', { class: 'pad' }, re, st));
+  if (x.ip && !running) {
+    const chk = h('button', { class: 'btn', type: 'button' }, icon('activity'), 'Проверить мост');
+    chk.onclick = UI.busy(chk, async () => { const r = await UI.run(() => api(`relays/${rid}/check`, 'POST')); if (r) relayCheckSheet(x, r); });
+    v.insertBefore(h('div', { class: 'pad' }, chk, h('div', { class: 'group-f' }, 'Проверит каждое звено: вход → нода, путь из-за рубежа и из России с ваших чекеров — и скажет, где рвётся.')), v.children[2] || null);
+  }
   v.append(group(null, [row({ title: 'Забыть ключ сервера', onClick: async () => {
     const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на сервере переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
     if (yes) { const r = await UI.run(() => api(`relays/${rid}/forget-hostkey`, 'POST')); if (r) UI.toast(r.message); }
