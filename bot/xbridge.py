@@ -130,23 +130,68 @@ def bridge_username(exit_uuid: str) -> str:
     return 'bridge_' + re.sub(r'[^a-z0-9]', '', exit_uuid.lower())[:12]
 
 
+def _squad_ids(u: dict) -> set:
+    return {s.get('uuid') if isinstance(s, dict) else s for s in (u.get('activeInternalSquads') or [])}
+
+
+def _unwrap(u):
+    if isinstance(u, dict) and isinstance(u.get('user'), dict):
+        return u['user']
+    return u if isinstance(u, dict) else None
+
+
+def find_user(panel: engine.Panel, name: str, scan: bool = False) -> dict | None:
+    """Пользователь по имени. Адрес поиска разный в версиях панели — пробуем известные; scan — перебрать список."""
+    for path in (f'/api/users/by-username/{name}', f'/api/users/get-by/username/{name}'):
+        try:
+            u = _unwrap(panel.call('GET', path))
+        except engine.StepError:
+            continue
+        if u and u.get('username') == name:
+            return u
+    if not scan:
+        return None
+    start = 0
+    while start < 20000:  # по 500 — без лишней нагрузки на панель
+        try:
+            page = panel.call('GET', f'/api/users?start={start}&size=500')
+        except engine.StepError:
+            return None
+        users = page.get('users') if isinstance(page, dict) else page
+        if not users:
+            return None
+        hit = next((x for x in users if x.get('username') == name), None)
+        if hit:
+            return hit
+        start += len(users)
+    return None
+
+
 def ensure_user(panel: engine.Panel, exit_uuid: str, squads: list[str], log) -> dict:
     """Служебный пользователь моста: бессрочный, без лимита трафика, в сквадах выхода."""
     name = bridge_username(exit_uuid)
-    try:
-        u = panel.call('GET', f'/api/users/by-username/{name}')
-    except engine.StepError:
-        u = None
+    u = find_user(panel, name)
     if u and u.get('uuid'):
-        have = {s.get('uuid') if isinstance(s, dict) else s for s in (u.get('activeInternalSquads') or [])}
+        have = _squad_ids(u)
         if not set(squads) <= have:
             u = panel.call('PATCH', '/api/users', {'uuid': u['uuid'], 'activeInternalSquads': sorted(have | set(squads))})
         log(f'панель: служебный пользователь моста {name} уже есть')
         return u
     exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3650)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
-    u = panel.call('POST', '/api/users', {'username': name, 'expireAt': exp, 'trafficLimitBytes': 0,
-                                          'trafficLimitStrategy': 'NO_RESET', 'activeInternalSquads': squads,
-                                          'description': 'Bobr Nodes: мост с серверным роутингом — не удалять'})
+    try:
+        u = panel.call('POST', '/api/users', {'username': name, 'expireAt': exp, 'trafficLimitBytes': 0,
+                                              'trafficLimitStrategy': 'NO_RESET', 'activeInternalSquads': squads,
+                                              'description': 'Bobr Nodes: мост с серверным роутингом — не удалять'})
+    except engine.StepError as e:
+        if 'already exists' not in str(e):
+            raise
+        u = find_user(panel, name, scan=True)  # создан прошлой попыткой, а поиск по имени панель не отдала
+        if not u:
+            raise
+        if not set(squads) <= _squad_ids(u):
+            u = panel.call('PATCH', '/api/users', {'uuid': u['uuid'], 'activeInternalSquads': sorted(_squad_ids(u) | set(squads))})
+        log(f'панель: служебный пользователь моста {name} уже есть')
+        return u
     log(f'панель: создан служебный пользователь моста {name}')
     return u
 

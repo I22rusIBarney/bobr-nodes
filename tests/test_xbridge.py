@@ -32,7 +32,7 @@ class FakePanel:
             return p
         if (method, path) == ('GET', '/api/internal-squads'):
             return {'internalSquads': self.squads}
-        if path.startswith('/api/users/by-username/'):
+        if path.startswith('/api/users/by-username/') or path.startswith('/api/users/get-by/'):
             u = self.users.get(path.rsplit('/', 1)[1])
             if not u:
                 raise engine.StepError('HTTP 404')
@@ -125,3 +125,19 @@ def test_install_command():
     comp = base64.b64decode(re.search(r'echo (\S+) \| base64 -d > /opt/remnanode/docker-compose.yml', c).group(1)).decode()
     assert 'SECRET_KEY=SECRET' in comp and 'NODE_PORT=2222' in comp and 'network_mode: host' in comp
     assert 'XB_STOPPED' in xb.stop_cmd() and 'rm -rf' not in xb.stop_cmd()
+
+
+def test_user_found_when_lookup_path_differs():
+    """Панель без /by-username: создание отвечает «already exists» — находим пользователя перебором списка."""
+    class P(FakePanel):
+        def call(self, method, path, body=None):
+            if path.startswith('/api/users/by-username/') or path.startswith('/api/users/get-by/'):
+                raise engine.StepError('HTTP 404')
+            if (method, path) == ('POST', '/api/users'):
+                raise engine.StepError('панель POST /api/users: HTTP 400: User username already exists')
+            if path.startswith('/api/users?start='):
+                return {'users': [{'uuid': 'u-old', 'username': 'bridge_exitnodeuuid', 'vlessUuid': 'v-old',
+                                   'activeInternalSquads': [{'uuid': 'sq1'}]}], 'total': 1}
+            return super().call(method, path, body)
+    u = xb.ensure_user(P(), EXIT_NODE['uuid'], ['sq1'], lambda t: None)
+    assert u['vlessUuid'] == 'v-old'

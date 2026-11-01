@@ -1107,7 +1107,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         x['hosts'] = await relay_hosts(x, p, say)
             except (engine.StepError, ApiError, OSError) as e:
                 say(f'ошибка: {e}')
-                x.update(status='failed', error=str(e)[:300], log=store.relay(x['id'])['log'])
+                cur = store.relay(x['id']) or {}
+                x.update(status='failed', error=str(e)[:300], log=cur.get('log') or [], stage=cur.get('stage') or x.get('stage'))
+                if x.get('mode') == 'xray' and cur.get('made'):
+                    x['made'] = cur['made']
                 store.save_relay(x)
                 return {'id': x['id'], 'ok': False, 'message': str(e), 'log': lines}
             say('готово' if not res['bad'] else ('мост стоит, но ' + '; '.join(res['bad'])) if x.get('mode') == 'xray'
