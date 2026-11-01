@@ -745,9 +745,7 @@ async def restore_file(m: Message, state: FSMContext, role: str = 'admin', autop
     await m.bot.download(m.document, destination=str(path))
     await state.set_state(Restore.key)
     await m.answer('🗄 Это резервная копия BobrNet. Пришлите <b>пароль восстановления</b> — он в панели старого бота: '
-                   'Настройки → «Резервные копии». Сообщение с паролем я сразу удалю.
-
-/cancel — передумали.', parse_mode='HTML')
+                   'Настройки → «Резервные копии». Сообщение с паролем я сразу удалю.\n\n/cancel — передумали.', parse_mode='HTML')
 
 
 @router.message(Restore.key, F.text)
