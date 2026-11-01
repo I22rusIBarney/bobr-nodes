@@ -25,9 +25,9 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('DELETE', r'/api/profiles/(?P<pid>\d+)', 'group.delete', 'Удалил группу'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/upgrade', 'node.upgrade', 'Запустил обновление нод'),
     ('DELETE', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)', 'node.delete', 'Удалил ноду'),
-    ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/relays', 'relay.create', 'Добавил вход через Россию'),
-    ('POST', r'/api/relays/(?P<rid>\d+)/apply', 'relay.apply', 'Применил вход через Россию'),
-    ('DELETE', r'/api/relays/(?P<rid>\d+)', 'relay.delete', 'Удалил вход через Россию'),
+    ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/relays', 'relay.create', 'Добавил вход (мост) к ноде'),
+    ('POST', r'/api/relays/(?P<rid>\d+)/apply', 'relay.apply', 'Переустановил вход (мост)'),
+    ('DELETE', r'/api/relays/(?P<rid>\d+)', 'relay.delete', 'Убрал вход (мост)'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/ssh', 'node.ssh', 'Изменил SSH-доступ к ноде'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/ip', 'node.ip', 'Сменил IP ноды'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/address-domain', 'node.address', 'Сменил адрес ноды'),
@@ -82,7 +82,7 @@ SHOW = {'name': 'название', 'domain': 'домен', 'domains': 'доме
         'free': 'бесплатно', 'blocked': 'закрыт', 'price_rub': 'цена ₽', 'period_days': 'период, дней', 'scale': 'автомасштабирование',
         'scale_max': 'лимит нод', 'online_max': 'онлайн на ноду', 'update': 'автообновление', 'load': 'нагрузка', 'renew': 'автопродление',
         'autorenew': 'автопродление', 'action': 'действие', 'hour': 'час', 'host': 'хост', 'uuids': 'ноды', 'amount_rub': 'сумма ₽',
-        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
+        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
 
 
 def match(method: str, path: str) -> tuple[str, str, dict] | None:

@@ -2608,12 +2608,13 @@ function nodeView(pid, uuid) {
   } }));
   v.append(group(['Хосты', h('span', { class: 'n' }, n.hosts.length)], hrows));
 
-  // вход через Россию
-  v.append(group(['Вход через Россию', h('span', { class: 'n' }, n.relays.length || '')], [
-    ...n.relays.map(x => row({ flag: '🇷🇺', title: x.remark.replace(/^\p{RI}{2}\s*/u, ''), sub: h('span', { class: 'mono' }, `${mid(x.address, 22)}:${x.listen} → ${mid(x.target, 22)}:${x.target_port}`),
+  // входы (мосты): HAProxy на другом сервере пробрасывает подключения на ноду
+  v.append(group(['Входы и мосты', h('span', { class: 'n' }, n.relays.length || '')], [
+    ...n.relays.map(x => row({ flag: x.flag || '🇷🇺', title: x.remark.replace(/^\p{RI}{2}\s*/u, ''),
+      sub: x.status === 'buying' ? 'покупаю сервер в Bobr Cloud…' : h('span', { class: 'mono' }, `${mid(x.address, 22)}:${x.listen} → ${mid(x.target, 22)}:${x.target_port}`),
       status: RST[x.status] || [x.status, ''], onClick: () => UI.nav.push(() => relayView(pid, uuid, x.id)) })),
     row({ icon: 'plus', title: 'Добавить вход', cls: 'accent', onClick: () => { NEWRL = null; UI.nav.push(() => relayAddView(pid, uuid)); } })],
-    'Сервер в России пробрасывает подключения на ноду как есть; в подписке появятся копии хостов с российским адресом.'));
+    'Клиенты подключаются к другому серверу, а он пробрасывает их на ноду как есть. Вход в России — когда пропускают только российские адреса. Вход в Европе — когда блокируют выходной IP ноды: клиенты подключаются ко входу и не замечают блокировки.'));
 
   // SSH — по запросу
   const F = n.sshForm, sshSt = statusLine();
@@ -2643,7 +2644,7 @@ function nodeView(pid, uuid) {
 }
 
 // ───────── вход через Россию ─────────
-const RST = { new: ['…', ''], installing: ['ставлю', 'run'], ok: ['', 'ok', 'работает'], warn: ['нода не отвечает', 'warn'], failed: ['ошибка', 'bad'] };
+const RST = { new: ['…', ''], buying: ['покупаю', 'run'], installing: ['ставлю', 'run'], ok: ['', 'ok', 'работает'], warn: ['нода не отвечает', 'warn'], failed: ['ошибка', 'bad'] };
 let NEWRL = null;  // форма нового входа — переживает перерисовку
 const RLF = {};    // несохранённый доступ по SSH на странице входа
 async function reloadNode(pid, uuid) {
@@ -2653,44 +2654,86 @@ async function reloadNode(pid, uuid) {
 }
 function relayAddView(pid, uuid) {
   const n = NODE[uuid];
-  if (!n || n.error) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Откройте ноду заново'));
-  if (!NEWRL) NEWRL = { f: { ip: '', listen: '443', address: '', remark: '🇷🇺 ' + n.name, target_port: String(n.relay_port || 443) }, F: sshState({}) };
-  const { f, F } = NEWRL, status = statusLine();
-  const go = h('button', { class: 'btn', type: 'button' }, 'Поставить проброс');
+  if (!n || n.error) return h('div', {}, ...title('Новый вход', 'Нода'), h('div', { class: 'notice' }, 'Откройте ноду заново'));
+  if (!NEWRL) NEWRL = { src: 'buy', f: { ip: '', listen: '443', address: '', remark: '', target_port: String(n.relay_port || 443) }, F: sshState({}),
+    cat: null, loc: null, idx: null, servers: null, sid: null };
+  const R = NEWRL, { f, F } = R, status = statusLine();
+  const v = h('div', { class: 'relay-add' }, ...title('Новый вход', mid(n.name, 18)),
+    h('div', { class: 'subtitle' }, 'На сервере входа бот поставит только HAProxy (служба bobr-relay). Шифрование сквозное: вход видит лишь зашифрованный поток, в интернет трафик выходит с ноды.'));
+  v.append(h('div', { class: 'seg-row', style: 'margin:0 var(--gutter) var(--s4)' }, UI.segmented([{ value: 'buy', label: 'Купить' }, { value: 'server', label: 'Купленный' }, { value: 'ssh', label: 'Свой сервер' }],
+    R.src, x => { R.src = x; UI.nav.refresh(); }, 'fill')));
+  const redraw = () => { if (document.querySelector('#root .relay-add')) UI.nav.refresh(); };
+  if (R.src === 'buy') {
+    if (R.cat === null) { R.cat = undefined; api('catalog?pid=' + pid).then(c => { R.cat = c; const cc = (n.country || '').toLowerCase();
+      R.loc = (c.locations.find(l => l.code === cc) || c.locations[0] || {}).code || null; const L = c.locations.find(l => l.code === R.loc);
+      R.idx = L ? L.offers.slice().sort((a, b) => a.price_kop - b.price_kop)[0].idx : null; redraw(); }).catch(e => { R.cat = { error: e.message }; redraw(); }); }
+    if (!R.cat) v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
+    else if (R.cat.error) v.append(UI.failed(R.cat.error, () => { R.cat = null; redraw(); }));
+    else {
+      const L = R.cat.locations.find(l => l.code === R.loc);
+      v.append(group('Где', [h('div', { class: 'seg-row' }, UI.chips(R.cat.locations.map(l => ({ value: l.code, label: l.name, flag: l.flag })), R.loc, x => {
+        R.loc = x; const L2 = R.cat.locations.find(l => l.code === x); R.idx = L2.offers.slice().sort((a, b) => a.price_kop - b.price_kop)[0].idx; redraw(); }))],
+        (n.country && R.loc === n.country.toLowerCase() ? 'Та же страна, что у ноды, — задержка почти не вырастет. ' : '') + 'Входу хватит самого маленького тарифа: он только пересылает трафик. Важнее канал и трафик без лимита.'));
+      if (L) v.append(group('Тариф', L.offers.slice().sort((a, b) => a.price_kop - b.price_kop).map(o => row({ title: `${o.cpu} vCPU, ${o.ram} ГБ, ${o.disk} ГБ`, sub: o.speed || null, detail: rubK(o.price_kop) + '/мес', chevron: false,
+        icon: o.idx === R.idx ? 'checkCircle' : 'disc', color: o.idx === R.idx ? 'blue' : 'gray', onClick: () => { R.idx = o.idx; redraw(); } })),
+        R.cat.balance_kop != null ? `На балансе ${rubK(R.cat.balance_kop)} (${R.cat.buyer}).` : null));
+    }
+  } else if (R.src === 'server') {
+    if (R.servers === null) { R.servers = undefined; api(`profiles/${pid}/servers`).then(r => { R.servers = r.servers; redraw(); }).catch(e => { R.servers = { error: e.message }; redraw(); }); }
+    if (!R.servers) v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' })])));
+    else if (R.servers.error) v.append(UI.failed(R.servers.error, () => { R.servers = null; redraw(); }));
+    else {
+      const ok = R.servers.filter(x => x.ready || (x.relay && x.status === 'active')), no = R.servers.filter(x => !ok.includes(x));
+      v.append(group('Сервер из Bobr Cloud', ok.length ? ok.map(x => row({ icon: x.id === R.sid ? 'checkCircle' : 'disc', color: x.id === R.sid ? 'blue' : 'gray',
+        title: `${x.flag || ''} ${x.name || x.ip}`.trim(), chevron: false, cls: 'wrap',
+        sub: [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ`, x.relay ? 'уже вход для другой ноды — добавлю порт' : ''].filter(Boolean).join(' · '),
+        onClick: () => { R.sid = x.id; redraw(); } }))
+        : [row({ title: 'Свободных серверов нет', sub: 'на всех стоят ноды — купите новый', cls: 'is-dim wrap', chevron: false })],
+        no.length ? 'Не подходят: ' + no.slice(0, 4).map(x => `${x.name || x.ip} — ${x.why}`).join('; ') + (no.length > 4 ? '…' : '') : 'Пароль root бот возьмёт из Bobr Cloud.'));
+    }
+  } else {
+    v.append(group('Сервер', [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))]),
+      h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, n.bot_key)),
+        h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — чтобы поставить HAProxy и открыть порт.')));
+  }
+  v.append(group(null, UI.fold({ title: 'Порты и название', summary: `вход ${f.listen || 443} → нода ${f.target_port}`, key: 'rl-more', body: () => [
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true)),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста в подписке', h('span', { class: 'opt' }, ' необязательно')), textIn(f.remark, R.src === 'ssh' ? '🇷🇺 ' + n.name : n.name + ' ⇄', x => { f.remark = x; })),
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP входа или entry.example.com', x => { f.address = x.trim(); }, true)),
+    h('div', { class: 'group-f', style: 'padding:0 var(--gutter)' }, `Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол откройте сами — ufw бот откроет.`)] })));
+  const pick = R.src === 'buy' && R.cat && !R.cat.error ? (R.cat.locations.find(l => l.code === R.loc) || { offers: [] }).offers.find(o => o.idx === R.idx) : null;
+  const go = h('button', { class: 'btn', type: 'button', disabled: (R.src === 'buy' && !pick) || (R.src === 'server' && !R.sid) },
+    R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : 'Поставить проброс');
   go.onclick = UI.busy(go, async () => {
+    if (R.src === 'buy' && !await UI.ask({ title: 'Купить сервер под вход?', message: `${rubK(pick.price_kop)} в месяц спишется с баланса Bobr Cloud. Бот поставит на сервер проброс на ноду ${n.name}.`, buttons: [{ id: 'y', text: 'Купить' }] })) return;
     try {
-      showStatus(status, { ok: true, message: 'Ставлю HAProxy на сервер — до пары минут…' });
-      const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', { ...f, ...F });
+      showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : 'Ставлю HAProxy на сервер — до пары минут…' });
+      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid } : {}) };
+      const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', body);
       NEWRL = null; await reloadNode(pid, uuid);
       UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));
-      if (r.ok) UI.toast('Вход работает'); else UI.alert(r.message);
+      if (r.pending) UI.toast(r.message); else if (r.ok) UI.toast('Вход работает'); else UI.alert(r.message);
     } catch (e) { showStatus(status, { ok: false, message: e.message }); }
   });
-  return h('div', {}, ...title('Новый вход', mid(n.name, 18)),
-    h('div', { class: 'subtitle' }, 'На российском сервере бот поставит HAProxy (отдельная служба bobr-relay) — больше ничего. Шифрование сквозное: сервер в России видит только зашифрованный поток.'),
-    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Сервер в России'), h('div', { class: 'list' },
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true)),
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP сервера или ru.example.com', x => { f.address = x.trim(); }, true)),
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста в подписке'), textIn(f.remark, '🇷🇺 Германия', x => { f.remark = x; })),
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true))),
-      h('div', { class: 'group-f' }, `Порт входа должен быть свободен на российском сервере. Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол (группы безопасности) откройте сами — ufw бот откроет.`)),
-    h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, n.bot_key)),
-      h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — чтобы поставить HAProxy и открыть порт.'), status),
-    h('div', { class: 'pad' }, go));
+  v.append(h('div', { class: 'pad' }, status, go));
+  return v;
 }
 function relayView(pid, uuid, rid) {
   const n = NODE[uuid], x = n && !n.error && (n.relays || []).find(r => r.id === rid);
   if (!x) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Вход убран'));
-  const v = h('div', {}, ...title(x.remark, mid(n.name, 18)));
+  const v = h('div', { class: 'relay-page' }, ...title(x.remark, mid(n.name, 18)));
+  if (['buying', 'installing'].includes(x.status)) poll(async () => { if (!document.querySelector('#root .relay-page')) return; await reloadNode(pid, uuid); UI.nav.refresh(); }, 4000);
+  if (x.status === 'buying') v.append(h('div', { class: 'notice info' }, h('b', {}, 'Сервер создаётся в Bobr Cloud. '), 'Как только он получит IP, бот поставит проброс и добавит хосты — обычно 1–3 минуты. Страницу можно закрыть.'));
   if (x.error) v.append(h('div', { class: 'notice bad' }, x.error));
   else if (x.bad.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
   v.append(group(null, [
     row({ title: 'Состояние', status: RST[x.status] || [x.status, ''] }),
-    row({ title: 'Клиенты подключаются', detail: `${mid(x.address, 22)}:${x.listen}`, mono: true, copy: x.address }),
+    x.server_id ? row({ title: 'Сервер', cls: 'wrap', sub: [x.flag, specText(x.spec) || ('Bobr Cloud #' + x.server_id)].filter(Boolean).join(' '), detail: x.price_kop ? rubK(x.price_kop) + '/мес' : null }) : null,
+    x.ip ? row({ title: 'Клиенты подключаются', detail: `${mid(x.address, 22)}:${x.listen}`, mono: true, copy: x.address }) : null,
     row({ title: 'Трафик идёт на', detail: `${mid(x.target, 22)}:${x.target_port}`, mono: true }),
     row({ title: 'Хостов в панели', detail: String(x.hosts) }),
-    row({ title: 'Вход по SSH', detail: x.access })]));
+    row({ title: 'Вход по SSH', detail: x.access })].filter(Boolean)));
   if ((x.log || []).length) v.append(group('Последняя установка', [h('pre', { class: 'code', style: 'white-space:pre-wrap;margin:0;padding:12px var(--gutter);font-size:12.5px' }, x.log.join('\n'))]));
   const F = RLF[rid] || (RLF[rid] = sshState(x.ssh)), st = statusLine();
   const re = h('button', { class: 'btn tinted', type: 'button' }, x.status === 'failed' ? 'Повторить установку' : 'Переустановить');
@@ -2700,18 +2743,24 @@ function relayView(pid, uuid, rid) {
     try { const r = await api(`relays/${rid}/apply`, 'POST', changed ? F : {}); delete RLF[rid]; await reloadNode(pid, uuid); UI.nav.refresh(); showStatus(st, r); }
     catch (e) { showStatus(st, { ok: false, message: e.message }); }
   });
-  v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
+  if (x.status !== 'buying') v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
     'Новый доступ сохранится при переустановке и будет у всех входов этого сервера.'), h('div', { class: 'pad' }, re, st));
   v.append(group(null, [row({ title: 'Забыть ключ сервера', onClick: async () => {
     const yes = await UI.ask({ title: 'Забыть ключ сервера?', message: 'Нужно, только если систему на сервере переустанавливали. Иначе смена ключа — признак подмены сервера.', buttons: [{ id: 'y', text: 'Забыть' }] });
     if (yes) { const r = await UI.run(() => api(`relays/${rid}/forget-hostkey`, 'POST')); if (r) UI.toast(r.message); }
   } }), row({ title: 'Убрать вход', cls: 'destructive', onClick: async () => {
-    const yes = await UI.ask({ title: 'Убрать вход?', message: 'Бот уберёт проброс с российского сервера (другие его входы останутся) и хосты из панели.', buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] });
-    if (!yes) return;
-    const del = async force => { try { return await api(`relays/${rid}` + (force ? '?force=1' : ''), 'DELETE'); } catch (e) { return { ok: false, message: e.message }; } };
+    const shared = (n.relays || []).filter(o => o.id !== x.id && o.ip && o.ip === x.ip).length;
+    let withServer = false;
+    if (x.server_id && !shared) {
+      const ans = await UI.ask({ title: 'Убрать вход?', message: 'Бот уберёт проброс и хосты из панели. Сервер входа больше ничему не нужен — удалить его в Bobr Cloud, чтобы не платить?', buttons: [{ id: 's', text: 'Убрать и удалить сервер', type: 'destructive' }, { id: 'y', text: 'Только убрать' }] });
+      if (!ans) return;
+      withServer = ans === 's';
+    } else if (!await UI.ask({ title: 'Убрать вход?', message: 'Бот уберёт проброс с сервера (другие его входы останутся) и хосты из панели.', buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] })) return;
+    const q = (force, srv) => [force ? 'force=1' : '', srv ? 'server=1' : ''].filter(Boolean).join('&');
+    const del = async force => { try { const qs = q(force, withServer); return await api(`relays/${rid}` + (qs ? '?' + qs : ''), 'DELETE'); } catch (e) { return { ok: false, message: e.message }; } };
     let r = await del(false);
     if (!r.ok && await UI.ask({ title: 'Сервер недоступен', message: r.message + '\n\nУбрать вход только из бота и панели? Проброс на сервере останется.', buttons: [{ id: 'y', text: 'Убрать', type: 'destructive' }] })) r = await del(true);
-    if (r.ok) { UI.toast('Вход убран'); await reloadNode(pid, uuid); UI.nav.back(); }
+    if (r.ok) { UI.toast(r.message || 'Вход убран'); await reloadNode(pid, uuid); UI.nav.back(); }
   } })]));
   return v;
 }
