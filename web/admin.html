@@ -677,7 +677,7 @@ function reportView(id) {
 }
 // ───────── подписка BobrNet ─────────
 let SUB = null, TARIFF = null;
-const billDate = ts => ts ? new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }) : '—';
+const billDate = ts => ts ? new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).replace(/ г\.$/, '') : '—';
 const rubs = kop => Math.round((kop || 0) / 100) + ' ₽';
 async function billPay(after) {
   const r = await UI.run(() => api('billing/pay', 'POST', {}));
