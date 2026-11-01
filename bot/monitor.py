@@ -400,16 +400,19 @@ class Monitor:
         def tally(pick) -> dict:
             data = fail = 0
             up = total = 0
-            for ps in mine_all.values():
+            by = {}  # чекер → [прошло выходов, всего, лучшая задержка мс] — для карты на странице ноды
+            for cid, ps in mine_all.items():
                 got = [p for p in pick(ps) if p.get('lastCheck')]
                 if not got:
                     continue
                 data += 1
                 ok_n = sum(1 for p in got if p.get('online'))
                 fail += 0 if ok_n else 1
+                ms = [int(p['latencyMs']) for p in got if p.get('online') and isinstance(p.get('latencyMs'), (int, float)) and p['latencyMs'] > 0]
+                by[str(cid)] = [ok_n, len(got), min(ms) if ms else None]
                 if len(got) > total:
                     up, total = ok_n, len(got)
-            return {'data': data, 'fail': fail, 'up': up, 'total': total}
+            return {'data': data, 'fail': fail, 'up': up, 'total': total, 'by': by}
 
         out = {}
         for pos, n in enumerate(nodes):
@@ -459,7 +462,8 @@ class Monitor:
             st = self.store.mon(key) or {'status': 'ok', 'fails': 0}
             st.update(uuid=v['uuid'], name=v['name'], addr=v.get('address') or addr, data=v['data'], fail=v['fail'], pos=v['pos'],
                       hosts=v['hosts'], cdn_hosts=v['cdn_hosts'], kind=v['kind'], up=v['up'], total=v['total'],
-                      online_users=v.get('online_users'), connected=v['connected'], country=v['country'], checked_at=int(now))
+                      online_users=v.get('online_users'), connected=v['connected'], country=v['country'], checked_at=int(now),
+                      by=v.get('by') or {})
             down = v['data'] > 0 and v['fail'] * 2 > v['data']
             if v['data'] == 0:  # ни один исправный чекер ноду не видит — нет данных, ничего не решаем
                 self.store.set_mon(key, st)
@@ -815,8 +819,9 @@ class Monitor:
     def view(self) -> dict:
         checkers = []
         for ch in self.store.checkers():
-            checkers.append({**{k: ch.get(k) for k in ('id', 'name', 'ip', 'status', 'error', 'log',
+            checkers.append({**{k: ch.get(k) for k in ('id', 'name', 'ip', 'status', 'error', 'log', 'hoster_url',
                                                        'polled_at', 'poll_error', 'proxies', 'online', 'installed_at')},
+                             'region': ch.get('region') or guess_region(ch.get('name', '')),
                              'ssh': sshaccess.view(ch), 'access': sshaccess.describe(ch)})
         groups = []
         for p in self.store.profiles():
@@ -828,6 +833,34 @@ class Monitor:
                            'buys_today': len(self.buys_today(p['id']))})
         return {'checkers': checkers, 'groups': groups, 'polled_at': int(self.polled_at), 'every': int(self.every),
                 'steps': STEP_LABEL, 'modes': MODES, 'old': OLD, 'buy_last': BUY_LAST}
+
+
+# федеральные округа: код → название. Регион чекера выбирают в его карточке; пока не выбран — угадываем по названию
+REGIONS = {'nw': 'Северо-Запад', 'c': 'Центр', 's': 'Юг', 'nc': 'Северный Кавказ', 'v': 'Поволжье', 'u': 'Урал',
+           'sib': 'Сибирь', 'fe': 'Дальний Восток'}
+_CITY = [
+    ('c', 'москв мск moscow msk подмоск тул рязан тверь калуг владимир ярослав воронеж белгород курск брянск смоленск '
+          'иванов кострома липецк орёл орел тамбов'),
+    ('nw', 'петербург спб питер spb leningrad ленинград мурманск архангельск калининград новгород псков карел петрозавод '
+           'вологд коми сыктывкар череповец'),
+    ('s', 'краснодар ростов сочи волгоград астрахан крым севастопол симферопол адыге калмык'),
+    ('nc', 'дагестан махачкал чечн грозн ставропол нальчик владикавказ осети ингуш черкес'),
+    ('v', 'казан нижн новгород н.новгород самар уф башкир пермь саратов оренбург ижевск удмурт чебоксар пенз ульянов '
+          'киров йошкар мордов саранск тольятти'),
+    ('u', 'екатеринбург екб ural урал челябинск тюмен курган ханты сургут ямал нефтеюган магнитогорск'),
+    ('sib', 'новосибирск нск сибир омск томск барнаул алта кемеров кузбас новокузнец красноярск иркутск тыва кызыл '
+            'хакас абакан'),
+    ('fe', 'владивосток хабаровск дальн якут саха магадан камчат сахалин бурят улан-удэ чит забайк благовещ амур '
+           'чукот биробиджан'),
+]
+
+
+def guess_region(name: str) -> str:
+    n = (name or '').casefold()
+    for code, words in _CITY:
+        if any(w in n for w in words.split()):
+            return code
+    return ''
 
 
 def resolve_all(names: set[str]) -> dict[str, set[str]]:

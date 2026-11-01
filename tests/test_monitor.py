@@ -80,3 +80,20 @@ def test_skip():
     assert M.Monitor.skip_group('🌀 АВТО-ВЫБОР', M.SKIP_DEFAULT) and not M.Monitor.skip_group('Poland', M.SKIP_DEFAULT)
     assert not M.Monitor.skip_group('', M.SKIP_DEFAULT) and not M.Monitor.skip_group('АВТО-ВЫБОР', '')
     assert M.clean_settings({'mon_skip': ' NORMAL ,, авто '}, {}, [])['mon_skip'] == 'NORMAL, авто'
+
+
+def test_votes_per_checker_and_regions(tmp_path):
+    from bot.store import Store
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'g', 'panel_url': 'https://p', 'panel_token': 't'})
+    prof = store.profile(pid)
+    mon = M.Monitor(store, None, None, {1})
+    sub = ck.sub_name(pid)
+    P = lambda ok, ms=None: {'subName': sub, 'server': '201.10.91.118', 'port': 443, 'online': ok, 'lastCheck': 1, 'latencyMs': ms}  # noqa: E731
+    node = {'uuid': 'n1', 'address': '201.10.91.118', 'name': 'Poland', 'isConnected': True, 'configProfile': {'activeInbounds': ['i1']}}
+    host = {'uuid': 'h1', 'address': '201.10.91.118', 'port': 443, 'inbound': {'configProfileInboundUuid': 'i1'}}
+    results = {1: [P(True, 80), P(True, 40)], 2: [P(False), P(False), P(True, 90)], 3: [{'subName': 'other', 'online': True, 'lastCheck': 1}]}
+    v = mon.votes(prof, results, [node], [host], {})['201.10.91.118']
+    assert v['by'] == {'1': [2, 2, 40], '2': [1, 3, 90]} and v['data'] == 2 and v['fail'] == 0
+    assert M.guess_region('Сбер Клауд мск') == 'c' and M.guess_region('Новосибирск') == 'sib'
+    assert M.guess_region('Владивосток') == 'fe' and M.guess_region('Мой чекер') == ''

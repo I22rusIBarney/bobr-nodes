@@ -628,3 +628,21 @@ pre.log { margin: 0; padding: 12px 14px; font-size: 12px; line-height: 1.5; whit
 .bk-key span { display: inline-block; white-space: nowrap; }
 .bk-key-acts { display: flex; gap: 8px; justify-content: center; padding: var(--s3) var(--s4) var(--s4); flex-wrap: wrap; }
 .bk-steps { margin: 0; padding: var(--s3) var(--s4) var(--s3) calc(var(--s4) + 1.2em); display: grid; gap: 8px; line-height: 1.4; }
+
+/* карта России по федеральным округам (мониторинг) */
+.ru-map { padding: var(--s3) var(--s3) var(--s2); }
+.ru-map svg { display: block; width: 100%; height: auto; }
+.rm-cell rect { fill: rgba(127, 127, 127, .08); stroke: rgba(127, 127, 127, .18); stroke-width: 1; }
+.rm-cell.ok rect { fill: var(--ok-soft); stroke: color-mix(in srgb, var(--ok) 45%, transparent); }
+.rm-cell.warn rect { fill: var(--warn-soft); stroke: color-mix(in srgb, var(--warn) 45%, transparent); }
+.rm-cell.bad rect { fill: var(--danger-soft); stroke: color-mix(in srgb, var(--danger) 50%, transparent); }
+.rm-l { fill: var(--hint); font-size: 10.5px; font-weight: 600; }
+.rm-cell.ok .rm-l, .rm-cell.warn .rm-l, .rm-cell.bad .rm-l { fill: var(--text); }
+.rm-v { fill: var(--text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rm-d { fill: var(--hint-2); }
+.rm-d.ok { fill: var(--ok); } .rm-d.warn { fill: var(--warn); } .rm-d.bad { fill: var(--danger); }
+.rm-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 0 var(--s4) var(--s3); font-size: 12px; color: var(--hint); }
+.rm-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rm-legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--hint-2); }
+.rm-legend i.ok { background: var(--ok); } .rm-legend i.warn { background: var(--warn); } .rm-legend i.bad { background: var(--danger); }
+.ck-right { display: inline-flex; align-items: center; gap: 10px; }

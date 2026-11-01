@@ -1667,10 +1667,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             mine = admin or str(raw.get('created_by') or '') == me
             c.update(mine=mine, by=user_label(raw['created_by']) if raw.get('created_by') else ('администратор' if not admin else ''))
             if not mine:  # чужой чекер: только имя и как он проверяет — без адреса, доступа и журнала
-                c = {k: c.get(k) for k in ('id', 'name', 'status', 'polled_at', 'poll_error', 'proxies', 'online', 'mine', 'by')}
+                c = {k: c.get(k) for k in ('id', 'name', 'region', 'status', 'polled_at', 'poll_error', 'proxies', 'online', 'mine', 'by')}
                 c['poll_error'] = 'не отвечает' if c.get('poll_error') else ''
             cks.append(c)
         v['checkers'] = cks
+        from .monitor import REGIONS
+        v['regions'] = REGIONS
         v['bot_key'] = runner.bot_key()[1]
         v['scripts'] = [{'id': x['id'], 'title': x.get('title') or x.get('path')} for x in store.scripts() if x.get('status') == 'approved']
         return J(v)
@@ -1693,6 +1695,32 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                   **({} if is_admin(request) else {'created_by': uid_of(request)})})
         mon().install(cid)
         return J({'id': cid})
+
+    @r.post('/api/checkers/{cid}')
+    async def checker_edit(request):
+        """Название, федеральный округ и ссылка на хостера (панель или сайт, где арендован сервер чекера)."""
+        from .monitor import REGIONS
+        ch = checker_or_404(request.match_info['cid'], request)
+        b = await body(request)
+        patch = {}
+        if 'name' in b:
+            name = ' '.join(str(b['name'] or '').split())[:40]
+            if not name:
+                raise ApiError('Название не может быть пустым')
+            patch['name'] = name
+        if 'region' in b:
+            if b['region'] not in ('', None, *REGIONS):
+                raise ApiError('Неизвестный регион')
+            patch['region'] = b['region'] or ''
+        if 'hoster_url' in b:
+            url = str(b['hoster_url'] or '').strip()[:300]
+            if url and not re.match(r'^https?://', url, re.I):
+                url = 'https://' + url
+            if url and not re.fullmatch(r'https://[^\s/$.?#][^\s]*', url, re.I):
+                raise ApiError('Ссылка на хостера: адрес сайта с https://, например https://cloud.example.com')
+            patch['hoster_url'] = url
+        store.patch_checker(ch['id'], **patch)
+        return J({'ok': True})
 
     @r.post('/api/checkers/{cid}/install')
     async def checker_install(request):

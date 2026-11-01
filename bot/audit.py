@@ -42,6 +42,7 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('DELETE', r'/api/scripts/(?P<sid>\d+)', 'script.delete', 'Удалил скрипт установки'),
     ('POST', r'/api/jobs/(?P<jid>\d+)/retry', 'job.retry', 'Повторил задачу'),
     ('POST', r'/api/checkers', 'checker.create', 'Добавил чекер'),
+    ('POST', r'/api/checkers/(?P<cid>\d+)', 'checker.edit', 'Изменил чекер'),
     ('POST', r'/api/checkers/(?P<cid>\d+)/install', 'checker.install', 'Установил чекер'),
     ('DELETE', r'/api/checkers/(?P<cid>\d+)', 'checker.delete', 'Удалил чекер'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/monitor', 'monitor', 'Изменил мониторинг'),
@@ -81,7 +82,7 @@ SHOW = {'name': 'название', 'domain': 'домен', 'domains': 'доме
         'free': 'бесплатно', 'blocked': 'закрыт', 'price_rub': 'цена ₽', 'period_days': 'период, дней', 'scale': 'автомасштабирование',
         'scale_max': 'лимит нод', 'online_max': 'онлайн на ноду', 'update': 'автообновление', 'load': 'нагрузка', 'renew': 'автопродление',
         'autorenew': 'автопродление', 'action': 'действие', 'hour': 'час', 'host': 'хост', 'uuids': 'ноды', 'amount_rub': 'сумма ₽',
-        'note': 'заметка', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
+        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
 
 
 def match(method: str, path: str) -> tuple[str, str, dict] | None:
