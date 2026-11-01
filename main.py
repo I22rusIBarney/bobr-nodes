@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 from aiohttp import web
 
+from bot import selfupdate
 from bot.access import Access
 from bot.autopilot import Autopilot
 from bot.hostload import HostLoad
@@ -97,6 +98,14 @@ async def main():
     await web_runner.setup()
     await web.TCPSite(web_runner, os.environ.get('WEB_HOST', '0.0.0.0'), int(os.environ.get('WEB_PORT', '8080'))).start()
     logging.info('веб-админка: %s/admin', public_url or 'http://localhost:8080')
+
+    note = selfupdate.take_note(data_dir)  # после автообновления — что нового
+    if note:
+        for uid in admins:
+            try:
+                await bot.send_message(uid, note, disable_web_page_preview=True)
+            except Exception as e:  # noqa: BLE001
+                logging.info('update note %s: %s', uid, e)
 
     resumed = await runner.resume_all()
     if resumed:
