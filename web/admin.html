@@ -2611,7 +2611,7 @@ function nodeView(pid, uuid) {
   // входы (мосты): HAProxy на другом сервере пробрасывает подключения на ноду
   v.append(group(['Входы и мосты', h('span', { class: 'n' }, n.relays.length || '')], [
     ...n.relays.map(x => row({ flag: x.flag || '🇷🇺', title: x.remark.replace(/^\p{RI}{2}\s*/u, ''),
-      sub: x.status === 'buying' ? 'покупаю сервер в Bobr Cloud…' : h('span', { class: 'mono' }, `${mid(x.address, 22)}:${x.listen} → ${mid(x.target, 22)}:${x.target_port}`),
+      sub: x.status === 'buying' ? 'покупаю сервер в Bobr Cloud…' : (x.mode === 'xray' ? 'роутинг · ' : 'проброс · ') + `${mid(x.address, 22)}:${x.listen}`,
       status: RST[x.status] || [x.status, ''], onClick: () => UI.nav.push(() => relayView(pid, uuid, x.id)) })),
     row({ icon: 'plus', title: 'Добавить вход', cls: 'accent', onClick: () => { NEWRL = null; UI.nav.push(() => relayAddView(pid, uuid)); } })],
     'Клиенты подключаются к другому серверу, а он пробрасывает их на ноду как есть. Вход в России — когда пропускают только российские адреса. Вход в Европе — когда блокируют выходной IP ноды: клиенты подключаются ко входу и не замечают блокировки.'));
@@ -2644,6 +2644,7 @@ function nodeView(pid, uuid) {
 }
 
 // ───────── вход через Россию ─────────
+const XB_SNI = ['www.microsoft.com', 'dl.google.com', 'www.apple.com', 'www.amazon.com', 'www.samsung.com'];
 const RST = { new: ['…', ''], buying: ['покупаю', 'run'], installing: ['ставлю', 'run'], ok: ['', 'ok', 'работает'], warn: ['нода не отвечает', 'warn'], failed: ['ошибка', 'bad'] };
 let NEWRL = null;  // форма нового входа — переживает перерисовку
 const RLF = {};    // несохранённый доступ по SSH на странице входа
@@ -2655,11 +2656,16 @@ async function reloadNode(pid, uuid) {
 function relayAddView(pid, uuid) {
   const n = NODE[uuid];
   if (!n || n.error) return h('div', {}, ...title('Новый вход', 'Нода'), h('div', { class: 'notice' }, 'Откройте ноду заново'));
-  if (!NEWRL) NEWRL = { src: 'buy', f: { ip: '', listen: '443', address: '', remark: '', target_port: String(n.relay_port || 443) }, F: sshState({}),
+  if (!NEWRL) NEWRL = { mode: 'xray', sni: XB_SNI[0], src: 'buy', f: { ip: '', listen: '443', address: '', remark: '', target_port: String(n.relay_port || 443) }, F: sshState({}),
     cat: null, loc: null, idx: null, servers: null, sid: null };
   const R = NEWRL, { f, F } = R, status = statusLine();
   const v = h('div', { class: 'relay-add' }, ...title('Новый вход', mid(n.name, 18)),
-    h('div', { class: 'subtitle' }, 'На сервере входа бот поставит только HAProxy (служба bobr-relay). Шифрование сквозное: вход видит лишь зашифрованный поток, в интернет трафик выходит с ноды.'));
+    h('div', { class: 'subtitle' }, 'Клиенты подключаются к серверу входа, а в интернет выходят с этой ноды. Если заблокируют вход — меняется только вход.'));
+  v.append(group('Вид моста', [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'xray', label: 'Роутинг (REALITY)' }, { value: 'haproxy', label: 'Проброс' }], R.mode, x => { R.mode = x; UI.nav.refresh(); }, 'fill')),
+    ...(R.mode === 'xray' ? [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'SNI — какой сайт видит ТСПУ'), UI.chips(XB_SNI.map(x => ({ value: x, label: x })), XB_SNI.includes(R.sni) ? R.sni : undefined, x => { R.sni = x; UI.nav.refresh(); })),
+      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Свой SNI', h('span', { class: 'opt' }, ' необязательно')), textIn(XB_SNI.includes(R.sni) ? '' : R.sni, 'www.example.com', x => { R.sni = x.trim() || XB_SNI[0]; }, true))] : [])],
+    R.mode === 'xray' ? 'На входе своя нода с REALITY: ТСПУ видит обращение к выбранному сайту, а не домен ноды. До ноды трафик идёт внутри Европы, в интернет — с её IP. Нода видит настоящие IP пользователей.'
+      : 'Вход пересылает подключения на ноду как есть: клиент открывает TLS с доменом ноды. Помогает от блокировки IP, но не от блокировки домена.'));
   v.append(h('div', { class: 'seg-row', style: 'margin:0 var(--gutter) var(--s4)' }, UI.segmented([{ value: 'buy', label: 'Купить' }, { value: 'server', label: 'Купленный' }, { value: 'ssh', label: 'Свой сервер' }],
     R.src, x => { R.src = x; UI.nav.refresh(); }, 'fill')));
   const redraw = () => { if (document.querySelector('#root .relay-add')) UI.nav.refresh(); };
@@ -2710,13 +2716,13 @@ function relayAddView(pid, uuid) {
   const pick = R.src === 'buy' && R.cat && !R.cat.error ? (R.cat.locations.find(l => l.code === R.loc) || { offers: [] }).offers.find(o => o.idx === R.idx) : null;
   const conv = R.src === 'server' && R.convert && R.servers && !R.servers.error ? R.servers.find(x => x.id === R.sid) : null;
   const go = h('button', { class: conv ? 'btn danger' : 'btn', type: 'button', disabled: (R.src === 'buy' && !pick) || (R.src === 'server' && !R.sid) },
-    R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : conv ? 'Убрать ноду и поставить мост' : 'Поставить проброс');
+    R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : conv ? 'Убрать ноду и поставить мост' : R.mode === 'xray' ? 'Поставить мост' : 'Поставить проброс');
   go.onclick = UI.busy(go, async () => {
     if (R.src === 'buy' && !await UI.ask({ title: 'Купить сервер под вход?', message: `${rubK(pick.price_kop)} в месяц спишется с баланса Bobr Cloud. Бот поставит на сервер проброс на ноду ${n.name}.`, buttons: [{ id: 'y', text: 'Купить' }] })) return;
     if (conv && !await UI.ask({ title: 'Убрать ноду ' + mid(conv.node.domain || conv.ip, 30) + '?', message: 'Нода на этом сервере перестанет работать и пропадёт из панели и подписок. Сервер станет входом для ' + n.name + '.', buttons: [{ id: 'y', text: 'Убрать и сделать мостом', type: 'destructive' }] })) return;
     try {
       showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : conv ? 'Останавливаю ноду и ставлю HAProxy — до пары минут…' : 'Ставлю HAProxy на сервер — до пары минут…' });
-      const body = { ...f, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}), background: true };
+      const body = { ...f, mode: R.mode, sni: R.mode === 'xray' ? R.sni : undefined, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}), background: true };
       const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', body);
       NEWRL = null; await reloadNode(pid, uuid);
       UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));
@@ -2746,6 +2752,21 @@ function relayCheckSheet(x, r) {
       ru.length ? group('Из России (чекеры)', ru) : null);
   });
 }
+function toXraySheet(pid, uuid, x) {
+  UI.sheet('Серверный роутинг', close => {
+    let sni = XB_SNI[0];
+    const chips = () => UI.chips(XB_SNI.map(s => ({ value: s, label: s })), sni, s => { sni = s; wrap.replaceChildren(chips()); });
+    const wrap = h('div', {}, chips());
+    const go = h('button', { class: 'btn', type: 'button' }, 'Откатить проброс и поставить роутинг');
+    go.onclick = UI.busy(go, async () => {
+      const r = await UI.run(() => api(`relays/${x.id}/to-xray`, 'POST', { sni }));
+      if (r) { close(); await reloadNode(pid, uuid); UI.nav.refresh(); }
+    });
+    return h('div', { style: 'padding-bottom:var(--s5)' }, group('SNI — какой сайт видит ТСПУ', [h('div', { class: 'seg-row' }, wrap)],
+      'Бот уберёт копии хостов проброса и HAProxy, поставит на этот же сервер ноду с REALITY и профиль «вход → ' + x.target + '». Сервер и его оплата не меняются.'),
+      h('div', { class: 'cta' }, go));
+  });
+}
 function relayView(pid, uuid, rid) {
   const n = NODE[uuid], x = n && !n.error && (n.relays || []).find(r => r.id === rid);
   if (!x) return h('div', {}, ...title('Вход через Россию', 'Нода'), h('div', { class: 'notice' }, 'Вход убран'));
@@ -2766,6 +2787,8 @@ function relayView(pid, uuid, rid) {
   else if (x.bad.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
   v.append(group(null, [
     row({ title: 'Состояние', status: RST[x.status] || [x.status, ''] }),
+    row({ title: 'Вид', detail: x.mode === 'xray' ? 'роутинг, REALITY' : 'проброс (HAProxy)' }),
+    x.mode === 'xray' ? row({ title: 'SNI', detail: x.sni, mono: true }) : null,
     x.server_id ? row({ title: 'Сервер', cls: 'wrap', sub: [x.flag, specText(x.spec) || ('Bobr Cloud #' + x.server_id)].filter(Boolean).join(' '), detail: x.price_kop ? rubK(x.price_kop) + '/мес' : null }) : null,
     x.ip ? row({ title: 'Клиенты подключаются', detail: `${mid(x.address, 22)}:${x.listen}`, mono: true, copy: x.address }) : null,
     row({ title: 'Трафик идёт на', detail: `${mid(x.target, 22)}:${x.target_port}`, mono: true }),
@@ -2782,6 +2805,13 @@ function relayView(pid, uuid, rid) {
   });
   if (!running) v.append(group(null, UI.fold({ title: 'Доступ по SSH', summary: x.access, key: 'r-ssh', body: () => sshFields(F, x.ssh, n.bot_key) }),
     'Новый доступ сохранится при переустановке и будет у всех входов этого сервера.'), h('div', { class: 'pad' }, re, st));
+  if (x.ip && !running && x.mode !== 'xray') {
+    const shared = (n.relays || []).filter(o => o.id !== x.id && o.ip === x.ip).length;
+    v.insertBefore(group('Серверный роутинг', [row({ icon: 'route', color: 'violet', title: 'Переделать в серверный роутинг', cls: 'wrap',
+      sub: shared ? 'на сервере есть другие входы — сначала уберите их' : 'проброс откатится, сервер останется — на него встанет нода с REALITY',
+      onClick: shared ? null : () => toXraySheet(pid, uuid, x) })],
+      'Проброс не прячет домен ноды: если ТСПУ режет по SNI, через него не подключиться. Роутинг показывает ТСПУ другой сайт.'), v.children[2] || null);
+  }
   if (x.ip && !running) {
     const chk = h('button', { class: 'btn', type: 'button' }, icon('activity'), 'Проверить мост');
     chk.onclick = UI.busy(chk, async () => { const r = await UI.run(() => api(`relays/${rid}/check`, 'POST')); if (r) relayCheckSheet(x, r); });
