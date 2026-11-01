@@ -97,3 +97,25 @@ def test_votes_per_checker_and_regions(tmp_path):
     assert v['by'] == {'1': [2, 2, 40], '2': [1, 3, 90]} and v['data'] == 2 and v['fail'] == 0
     assert M.guess_region('Сбер Клауд мск') == 'c' and M.guess_region('Новосибирск') == 'sib'
     assert M.guess_region('Владивосток') == 'fe' and M.guess_region('Мой чекер') == ''
+
+
+def test_default_zone_from_old_node(tmp_path, monkeypatch):
+    import asyncio
+
+    from bot import services as svc
+    from bot.store import Store
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'g', 'panel_url': 'https://p', 'panel_token': 't'})
+    mon = M.Monitor(store, None, None, {1})
+
+    class CF:
+        def zone_names(self):
+            return ['example.com', 'bobr-cloud.online', 'cloud.online']
+    monkeypatch.setattr(svc, 'cf_for', lambda store, prof: CF())
+    prof = store.profile(pid)
+    z = lambda addr, bd=None: asyncio.run(mon.default_zone(prof, {'addr': addr}, bd or {}))  # noqa: E731
+    assert z('swe.bobr-cloud.online') == 'bobr-cloud.online'          # самая длинная подходящая зона
+    assert z('203.0.113.5', {'domain': 'de-1.example.com'}) == 'example.com'
+    assert z('203.0.113.5') == '' and z('node.other.net') == ''
+    store.save_profile({**prof, 'base_domain': 'example.com'})
+    assert asyncio.run(mon.default_zone(store.profile(pid), {'addr': 'swe.bobr-cloud.online'}, {})) == 'example.com'

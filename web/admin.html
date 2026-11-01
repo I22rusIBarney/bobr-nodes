@@ -1319,30 +1319,39 @@ function monitorView() {
     + (isAdmin() ? '' : ' Чекеры общие: ваш проверяет и чужие группы, менять его можете только вы.')));
   return v;
 }
-// ───────── карта России по федеральным округам: схема, а не география — читается на телефоне ─────────
-// x, y, w, h — в клетках сетки 13×6; подписи — строками
-const RU_MAP = {
-  nw: [0, 0, 5, 2, ['Северо-Запад']], c: [0, 2, 2, 2, ['Центр']], v: [2, 2, 3, 3, ['Поволжье']],
-  s: [0, 4, 2, 1, ['Юг']], nc: [0, 5, 3, 1, ['Сев. Кавказ']], u: [5, 0, 2, 5, ['Урал']],
-  sib: [7, 0, 3, 5, ['Сибирь']], fe: [10, 0, 3, 6, ['Дальний', 'Восток']],
-};
+// ───────── карта России по федеральным округам ─────────
+// Контуры — Natural Earth 1:10m (общественное достояние), собраны tools/build_ru_map.py: проекция Альберса,
+// заливка по округам, границы между округами, координаты крупных городов. Файл грузится один раз.
 const RU_ORDER = ['c', 'nw', 'v', 's', 'nc', 'u', 'sib', 'fe'];
+const RU_SHORT = { c: 'Центр', nw: 'Северо-Запад', v: 'Поволжье', s: 'Юг', nc: 'Кавказ', u: 'Урал', sib: 'Сибирь', fe: 'Дальний Восток' };
+let RU_GEO = null;
+const ruGeo = () => RU_GEO || (RU_GEO = fetch('/static/ru-map.json').then(r => r.ok ? r.json() : null).catch(() => null));
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// cells: { код: { tone: 'ok'|'bad'|'warn'|'', dots: ['ok'|'bad'|'warn'|'', …], value: 'текст' } }
-function ruMap(cells, aria) {
-  const U = 30, G = 3, W = 13 * U, H = 6 * U;
-  const parts = Object.entries(RU_MAP).map(([k, [x, y, w, hh, label]]) => {
-    const c = cells[k] || {}, X = x * U + G, Y = y * U + G, w2 = w * U - 2 * G, h2 = hh * U - 2 * G;
-    const big = hh >= 2;
-    const lab = label.map((t, i) => `<text x="${X + 8}" y="${Y + 14 + i * 12}" class="rm-l">${esc(t)}</text>`).join('');
-    const dots = (c.dots || []).slice(0, 8).map((d, i) => big
-      ? `<circle cx="${X + 12 + i * 11}" cy="${Y + h2 - 10}" r="4" class="rm-d ${d}"/>`
-      : `<circle cx="${X + w2 - 10 - i * 10}" cy="${Y + h2 / 2}" r="3.5" class="rm-d ${d}"/>`).join('');
-    const val = c.value && big ? `<text x="${X + w2 - 8}" y="${Y + h2 - 7}" class="rm-v" text-anchor="end">${esc(c.value)}</text>` : '';
-    return `<g class="rm-cell ${c.tone || 'none'}"><rect x="${X}" y="${Y}" width="${w2}" height="${h2}" rx="9"/>${lab}${dots}${val}</g>`;
-  }).join('');
-  const box = h('div', { class: 'ru-map', role: 'img', 'aria-label': aria || 'Карта России по федеральным округам' });
-  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${parts}</svg>`;
+// где на карте чекер: город из названия, иначе центр его округа
+function ckPoint(geo, c) {
+  const nm = (c.name || '').toLowerCase();
+  for (const [words, xy] of Object.entries(geo.cities)) if (words.split(' ').some(w => nm.includes(w))) return xy;
+  const d = geo.districts[c.region];
+  return d ? [d.lx, d.ly] : null;
+}
+// cells: { округ: 'ok'|'warn'|'bad'|'' } — заливка; pts: [{ c: чекер, tone, note }] — точки чекеров
+function ruMap(cells, pts, aria) {
+  const box = h('div', { class: 'ru-map', role: 'img', 'aria-label': aria || 'Карта России по федеральным округам' }, h('div', { class: 'skeleton', style: 'aspect-ratio:1000/552' }));
+  ruGeo().then(geo => {
+    if (!geo) { box.remove(); return; }
+    const fills = RU_ORDER.map(k => `<path d="${geo.districts[k].d}" class="rm-d ${cells[k] || ''}"/>`).join('');
+    const labels = RU_ORDER.map(k => { const d = geo.districts[k]; return `<text x="${d.lx}" y="${d.ly}" class="rm-l ${cells[k] ? 'on' : ''}" text-anchor="middle">${esc(RU_SHORT[k])}</text>`; }).join('');
+    const seen = {};
+    const dots = pts.map(p => {
+      const xy = ckPoint(geo, p.c);
+      if (!xy) return '';
+      const key = xy.join(','), i = seen[key] = (seen[key] || 0) + 1;  // несколько чекеров в одном городе — рядом
+      const x = xy[0] + (i - 1) * 26, y = xy[1];
+      return `<g class="rm-p ${p.tone || ''}"><circle cx="${x}" cy="${y}" r="22" class="halo"/><circle cx="${x}" cy="${y}" r="10"/>` +
+        (p.note ? `<text x="${x + 18}" y="${y - 16}" class="rm-n">${esc(p.note)}</text>` : '') + '</g>';
+    }).join('');
+    box.innerHTML = `<svg viewBox="0 0 ${geo.w} ${geo.h}" xmlns="http://www.w3.org/2000/svg">${fills}<path d="${geo.borders}" class="rm-b"/>${labels}${dots}</svg>`;
+  });
   return box;
 }
 const regionName = code => (MON && MON.regions && MON.regions[code]) || 'регион не указан';
@@ -1350,9 +1359,8 @@ const ckOk = c => c.status === 'running' && !c.poll_error;
 // где стоят чекеры: на главной мониторинга
 function checkersMap(cks) {
   const cells = {};
-  cks.forEach(c => { if (!c.region) return; const x = cells[c.region] || (cells[c.region] = { dots: [], n: 0 }); x.dots.push(ckOk(c) ? 'ok' : 'bad'); x.n++; });
-  Object.values(cells).forEach(x => { x.tone = x.dots.every(d => d === 'ok') ? 'ok' : x.dots.some(d => d === 'ok') ? 'warn' : 'bad'; x.value = String(x.n); });
-  return ruMap(cells, 'Чекеры по округам');
+  cks.forEach(c => { if (c.region && (ckOk(c) || !cells[c.region])) cells[c.region] = ckOk(c) ? 'ok' : 'bad'; });
+  return ruMap(cells, cks.map(c => ({ c, tone: ckOk(c) ? 'ok' : 'bad' })), 'Чекеры на карте');
 }
 // итог одного чекера по ноде: [прошло выходов, всего, задержка] или почему нет данных
 function ckVerdict(n, c) {
@@ -1363,20 +1371,46 @@ function ckVerdict(n, c) {
   return { tone: '', text: 'нет данных — нода не в подписке у этого чекера' };
 }
 function nodeMap(n) {
-  const cells = {};
+  const per = {}, pts = [];
   MON.checkers.forEach(c => {
-    if (!c.region) return;
-    const x = cells[c.region] || (cells[c.region] = { dots: [], ms: [] });
     const vd = ckVerdict(n, c), r = (n.by || {})[String(c.id)];
-    x.dots.push(vd.tone);
-    if (r && r[2]) x.ms.push(r[2]);
+    pts.push({ c, tone: vd.tone, note: r && r[2] ? r[2] + ' мс' : '' });
+    if (c.region && vd.tone) (per[c.region] = per[c.region] || []).push(vd.tone);
   });
-  Object.values(cells).forEach(x => {
-    const real = x.dots.filter(Boolean);
-    x.tone = !real.length ? '' : real.every(d => d === 'ok') ? 'ok' : real.every(d => d === 'bad') ? 'bad' : 'warn';
-    x.value = x.ms.length ? Math.min(...x.ms) + ' мс' : '';
+  const cells = {};
+  Object.entries(per).forEach(([k, ts]) => { cells[k] = ts.every(t => t === 'ok') ? 'ok' : ts.every(t => t === 'bad') ? 'bad' : 'warn'; });
+  return ruMap(cells, pts, 'Где нода проходит проверку');
+}
+// «Сразу новая нода»: домен для имени и тариф — перед покупкой, по умолчанию как у старой ноды
+function replaceSheet(n) {
+  UI.sheet('Новая нода вместо ' + (n.name || n.addr), close => {
+    const box = h('div', { style: 'padding:0 0 var(--s5)' }, h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
+    api('monitor/replace-plan?tok=' + encodeURIComponent(n.tok)).then(P => {
+      if (!P.available) { box.replaceChildren(h('div', { class: 'notice bad' }, `Локации «${P.loc || '?'}» сейчас нет в Bobr Cloud — купить ноду там же нельзя.`)); return; }
+      const sel = { zone: P.zone || P.zones[0] || '', idx: P.same ?? (P.offers[0] || {}).idx };
+      const draw = () => {
+        const o = P.offers.find(x => x.idx === sel.idx);
+        const parts = [group(null, [row({ title: 'Где', detail: `${P.flag} ${P.loc_name}`, chevron: false }),
+          row({ title: 'Покупок сегодня осталось', detail: String(P.buys_left), chevron: false, status: P.buys_left ? null : ['лимит', 'bad'] })])];
+        parts.push(P.zones.length
+          ? group('Домен для имени', [h('div', { class: 'seg-row' }, UI.chips(P.zones.map(z => ({ value: z, label: z })), sel.zone, x => { sel.zone = x; draw(); }))])
+          : h('div', { class: 'notice' }, h('b', {}, 'Нет доменов Cloudflare. '), 'Подключите Cloudflare для группы — новой ноде нужно имя.'));
+        parts.push(group('Конфигурация', P.offers.map(x => row({ title: x.label, sub: x.idx === P.same ? 'как у старой ноды' : null, detail: rubK(x.price_kop) + '/мес', chevron: false,
+          icon: x.idx === sel.idx ? 'checkCircle' : 'disc', color: x.idx === sel.idx ? 'blue' : 'gray', onClick: () => { sel.idx = x.idx; draw(); } })),
+          P.same == null ? (P.custom ? 'Старая нода — на своей конфигурации; выберите ближайший тариф.' : 'Старая нода куплена не через бота — выберите тариф.') : null));
+        const go = h('button', { class: 'btn', type: 'button', disabled: !sel.zone || !o || !P.buys_left }, o ? `Купить за ${rubK(o.price_kop)}/мес` : 'Выберите тариф');
+        go.onclick = UI.busy(go, async () => {
+          const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: 'replace', zone: sel.zone, idx: sel.idx }));
+          if (res) { close(); UI.toast(res.message); await loadMon(); UI.nav.refresh(); }
+        });
+        parts.push(h('div', { class: 'cta' }, go), h('div', { class: 'group-f', style: 'margin:0 var(--gutter)' },
+          { panel: 'Когда новая нода заработает, старую бот уберёт из панели.', delete: 'Когда новая нода заработает, старую бот уберёт из панели и удалит сервер.', keep: 'Старая нода останется как есть.' }[P.old] || ''));
+        box.replaceChildren(...parts);
+      };
+      draw();
+    }).catch(e => box.replaceChildren(h('div', { class: 'notice bad' }, e.message)));
+    return box;
   });
-  return ruMap(cells, 'Где нода проходит проверку');
 }
 // страница ноды в мониторинге: карта, чекеры, действия
 function monNodeView(pid, key) {
@@ -1393,10 +1427,10 @@ function monNodeView(pid, key) {
     n.status === 'repairing' && n.step ? row({ title: 'Починка', detail: MON.steps[n.step] }) : null,
     n.connected === false ? row({ title: 'Связь с панелью', status: ['нет', 'bad'] }) : null,
     (n.cdn_hosts || []).length ? row({ title: 'Через CDN', detail: n.cdn_hosts.join(', '), cls: 'wrap' }) : null].filter(Boolean)));
-  const placed = MON.checkers.filter(c => c.region);
+  const placed = MON.checkers.filter(c => c.region);  // без округа чекер на карте не найти, если город не узнали по названию
   v.append(group('Где проходит', [nodeMap(n), h('div', { class: 'rm-legend' },
     h('span', {}, h('i', { class: 'ok' }), 'проходит'), h('span', {}, h('i', { class: 'warn' }), 'частично'), h('span', {}, h('i', { class: 'bad' }), 'не проходит'), h('span', {}, h('i', {}), 'нет данных'))],
-    placed.length < MON.checkers.length ? `Чекеров без региона: ${MON.checkers.length - placed.length} — укажите его в карточке чекера, и он появится на карте.` : 'Справа в округе — лучшая задержка до ноды.'));
+    placed.length < MON.checkers.length ? `Чекеров без региона: ${MON.checkers.length - placed.length} — укажите его в карточке чекера, и он появится на карте.` : 'Точка — чекер, рядом — задержка до ноды. Округ закрашен по его чекерам.'));
   const order = c => c.region ? RU_ORDER.indexOf(c.region) : 99;
   v.append(group('Чекеры', [...MON.checkers].sort((a, b) => order(a) - order(b)).map(c => {
     const vd = ckVerdict(n, c);
@@ -1407,7 +1441,7 @@ function monNodeView(pid, key) {
   const act2 = a => async () => { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } };
   const items = [];
   if (down && !isHost && g.mon_steps.length) items.push(row({ icon: 'tools', color: 'blue', title: 'Чинить по шагам', onClick: act2('fix') }));
-  if (down && !isHost && g.mon_steps.includes('replace')) items.push(row({ icon: 'plusCircle', color: 'green', title: 'Сразу новая нода', onClick: act2('replace') }));
+  if (down && !isHost) items.push(row({ icon: 'plusCircle', color: 'green', title: 'Сразу новая нода', sub: 'выбрать домен и конфигурацию', onClick: () => replaceSheet(n) }));
   if (down && n.status !== 'ignored') items.push(row({ icon: 'eyeOff', color: 'gray', title: isHost ? 'Не напоминать' : 'Не трогать', onClick: act2('ignore') }));
   items.push(nodeMuted(g, n)
     ? row({ icon: 'bell', color: 'amber', title: 'Включить уведомления', sub: 'сообщать, когда нода упадёт и оживёт', onClick: () => monNotify(g, { addr: n.addr, mute: false }, 'Уведомления о ноде включены') })
