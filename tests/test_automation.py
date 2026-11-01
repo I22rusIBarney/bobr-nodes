@@ -19,6 +19,8 @@ class Bot:
 
 
 class Access:
+    admins = {1}
+
     def recipients(self, prof):
         return [1]
 
@@ -36,7 +38,12 @@ class Panel:
         if (method, path) == ('POST', '/api/nodes/bulk-actions/update'):
             self.bound.append(body)
             return {}
-        raise AssertionError(path)
+        if (method, path) == ('GET', '/api/system/stats') and getattr(self, 'uptime', None) is not None:
+            return {'uptime': self.uptime}
+        if path in ('/api/system/metadata',) and getattr(self, 'version', None):
+            return {'version': self.version}
+        from bot import engine
+        raise engine.StepError(f'HTTP 404 {path}')
 
 
 def node(uuid, plugin=None, connected=True, address=None):
@@ -51,6 +58,7 @@ def env(tmp_path, monkeypatch):
     bot = Bot()
     pilot = ap.Autopilot(store, None, bot, Access())
     pl = Panel([])
+    pl.url = f'https://p{tmp_path.name}'
     monkeypatch.setattr(pilot, 'panel', lambda prof: pl)
     return store, store.profile(pid), pilot, pl, bot
 
@@ -124,7 +132,8 @@ def test_offline_tracking_and_cleanup(env, monkeypatch):
     assert sorted((x['uuid'], x['server_id']) for x in c['dead']) == [('dead', None), ('mine', 12)]
     asyncio.run(pilot.report_cleanup(now))
     asyncio.run(pilot.report_cleanup(now + 3600))
-    assert len(bot.sent) == 1 and 'Можно убрать' in bot.sent[0][1]   # тот же список — не чаще раза в неделю
+    clean = [t for _, t in bot.sent if 'Можно убрать' in t]
+    assert len(clean) == 1   # тот же список — не чаще раза в неделю
 
 
 def test_selfupdate_due():
@@ -153,3 +162,36 @@ def test_selfupdate_clean_and_note(tmp_path):
     (tmp_path / 'version.txt').write_text('0123456789abcdef\t01.11.2026 07:00\tКэш\n', encoding='utf-8')
     assert su.version(str(tmp_path)) == {'sha': '0123456', 'date': '01.11.2026 07:00', 'subject': 'Кэш'}
     assert json.loads(json.dumps(su.cfg(type('S', (), {'get': lambda self, k: ''})()))) == {'on': False, 'hour': 4, 'tz': 0, 'last': ''}
+
+
+def test_node_links_debounced_and_batched(env):
+    store, prof, pilot, pl, bot = env
+    t = 1_000_000.0
+    pl.nodes = [node('a', connected=False), node('b', connected=False), node('c')]
+    asyncio.run(pilot.panel_load(now=t))
+    asyncio.run(pilot.panel_load(now=t + 180))
+    assert bot.sent == []                                   # меньше 5 минут — ещё не пишем
+    asyncio.run(pilot.panel_load(now=t + 360))
+    assert len(bot.sent) == 1 and '2 нод потеряли связь' in bot.sent[0][1]
+    asyncio.run(pilot.panel_load(now=t + 540))
+    assert len(bot.sent) == 1                               # повторно не пишем
+    pl.nodes = [node('a'), node('b', connected=False), node('c')]
+    asyncio.run(pilot.panel_load(now=t + 720))
+    assert len(bot.sent) == 2 and 'снова на связи' in bot.sent[1][1] and '<b>a</b>' in bot.sent[1][1]
+    feed = pilot.notify.feed(1)['items']
+    assert [x['type'] for x in feed] == ['node.up', 'node.down']
+
+
+def test_versions_and_panel_restart(env):
+    store, prof, pilot, pl, bot = env
+    n = {**node('a'), 'versions': {'node': '2.2.0', 'xray': '25.1.1'}}
+    pl.nodes, pl.uptime, pl.version = [n], 5000, '2.2.0'
+    asyncio.run(pilot.panel_load(now=1000.0))
+    assert bot.sent == []                                   # первое наблюдение — просто запоминаем
+    pl.nodes = [{**n, 'versions': {'node': '2.2.1', 'xray': '25.1.1'}}]
+    pl.uptime = 30                                          # аптайм стал меньше — перезапуск
+    asyncio.run(pilot.panel_load(now=1200.0))
+    feed = [x['type'] for x in pilot.notify.feed(1)['items']]
+    assert 'panel.restart' in feed                          # «колокольчик» по умолчанию — в Telegram не уходит
+    assert all('перезапустилась' not in t for _, t in bot.sent)
+    assert 'node.version' in feed

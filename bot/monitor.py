@@ -22,6 +22,7 @@ from . import engine
 from . import services as svc
 from . import sshaccess
 from .bcloud import BcloudError
+from .notify import Notifier
 from .pcache import CACHE
 from .runner import cf_token_of
 from .store import ACTIVE, Store
@@ -144,6 +145,7 @@ class Monitor:
     def __init__(self, store: Store, runner, bot, admins: set[int], every: float = ck.INTERVAL, access=None):
         self.store, self.runner, self.bot, self.admins = store, runner, bot, admins
         self.access = access  # кому писать о группе: её пользователю и/или администраторам
+        self.notify = Notifier(store, bot, access, admins)
         self.every = every
         self.results: dict[int, list[dict] | None] = {}  # последний опрос каждого чекера
         self.polled_at = 0.0
@@ -499,14 +501,11 @@ class Monitor:
         cfg = settings_of(prof)
         return cfg['mon_quiet'] or bool(st and (st.get('addr') or '') in cfg['mon_mute'])
 
-    async def say(self, prof: dict, text: str, markup=None, st: dict | None = None) -> None:
-        if self.muted(self.store.profile(prof['id']) or prof, st):
-            return
-        for uid in self.recipients(prof):
-            try:
-                await self.bot.send_message(uid, text, reply_markup=markup, parse_mode='HTML', disable_web_page_preview=True)
-            except Exception as e:  # noqa: BLE001
-                log.info('monitor notify %s: %s', uid, e)
+    async def say(self, prof: dict, text: str, markup=None, st: dict | None = None, type_: str = 'node.repair') -> None:
+        """Событие — в ленту всегда, в Telegram — если нода или группа не заглушена в мониторинге
+        и получатель не выключил этот тип в центре уведомлений."""
+        muted = self.muted(self.store.profile(prof['id']) or prof, st)
+        await self.notify.emit(type_, text, prof, markup, to=self.recipients(prof), tg=not muted)
 
     def head(self, prof: dict, st: dict) -> str:
         return f'<b>{html.escape(st.get("name") or st["addr"])}</b> · {html.escape(prof["name"])}'
@@ -521,26 +520,26 @@ class Monitor:
             if st.get('total'):
                 text += f'\nИз {st["total"]} выходов хоста не прошёл ни один.'
             return await self.say(prof, text + '\n\nЭто хост без ноды (свой xray.json) — бот его не чинит.',
-                                  kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]), st=st)
+                                  kb([('🙈 Не напоминать', f'mon:i:{st["tok"]}')]), st=st, type_='node.ru_down')
         steps = [STEP_LABEL[s] for s in cfg['mon_steps']]
         if cfg['mon_mode'] == 'auto':
             text += '\n\nЧиню по шагам: ' + (', '.join(steps) if steps else 'шагов не выбрано') + '.'
-            return await self.say(prof, text, st=st)
+            return await self.say(prof, text, st=st, type_='node.ru_down')
         if cfg['mon_mode'] == 'ask':
             text += '\n\nШаги починки: ' + (', '.join(steps) if steps else 'не выбраны') + '.'
             rows = [[('🛠 Починить', f'mon:f:{st["tok"]}')]] if steps else []
             if 'replace' in cfg['mon_steps']:
                 rows.append([('🆕 Сразу новая нода', f'mon:r:{st["tok"]}')])
             rows.append([('🙈 Не трогать', f'mon:i:{st["tok"]}')])
-            return await self.say(prof, text, kb(*rows), st=st)
-        await self.say(prof, text, st=st)
+            return await self.say(prof, text, kb(*rows), st=st, type_='node.ru_down')
+        await self.say(prof, text, st=st, type_='node.ru_down')
 
     async def recovered(self, prof: dict, st: dict) -> None:
         if settings_of(prof)['mon_mode'] == 'watch':
             return
         done = st.get('steps_done') or []
         how = f' после шага «{STEP_LABEL[done[-1]]}»' if done and st.get('status') == 'repairing' else ''
-        await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.', st=st)
+        await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.', st=st, type_='node.ru_up')
 
     # ───────── починка ─────────
     def find(self, tok: str) -> tuple[dict, str, dict] | None:

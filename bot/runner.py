@@ -215,13 +215,11 @@ class Runner:
             self.store.patch_job_data(j['id'], removed=True, removed_at=int(time.time()))
             self.store.update_job(j['id'], hidden=1)
             done.append(j['id'])
-            try:
-                await self.bot.send_message(j['chat_id'], (
-                    f'🗑 <b>Сервер {html.escape(d.get("domain") or d.get("name", ""))} удалён в Bobr Cloud</b>\n\n'
-                    f'Из панели «{html.escape(prof.get("name", ""))}» убраны нода и хосты: {res["nodes"]} / {res["hosts"]}'
-                    + (', A-запись в Cloudflare удалена' if res['dns'] else '') + '. Профиль не тронут.'), parse_mode='HTML')
-            except Exception as e:  # noqa: BLE001
-                log.info('notify removed %s: %s', j['id'], e)
+            from .notify import Notifier
+            await Notifier(self.store, self.bot).emit('task.removed', (
+                f'🗑 <b>Сервер {html.escape(d.get("domain") or d.get("name", ""))} удалён в Bobr Cloud</b>\n\n'
+                f'Из панели «{html.escape(prof.get("name", ""))}» убраны нода и хосты: {res["nodes"]} / {res["hosts"]}'
+                + (', A-запись в Cloudflare удалена' if res['dns'] else '') + '. Профиль не тронут.'), prof, to=[j['chat_id']])
         return done
 
     async def sync_loop(self, every: float = 300) -> None:

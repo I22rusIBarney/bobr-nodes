@@ -18,7 +18,7 @@ from urllib.parse import parse_qsl
 
 from aiohttp import web
 
-from . import engine, forms, naming, plugins, relay as rl, scripts as sc, services as svc, upgrade as up
+from . import engine, forms, naming, notify, plugins, relay as rl, scripts as sc, services as svc, upgrade as up
 from .pcache import CACHE as PC
 from .access import INVITE_PREFIX, Access, uname
 from .bcloud import BcloudError
@@ -121,6 +121,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
               access: Access | None = None, autopilot=None, hostload=None) -> web.Application:
     media = Path(data_dir) / 'media'
     access = access or Access(store, admins)
+    NT = notify.Notifier(store, None, access, admins)  # веб: только лента и настройки, без отправки
     fails: dict[str, list[float]] = {}
 
     @web.middleware
@@ -392,6 +393,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'jobs': {'active': sum(1 for j in jobs if j['status'] in ACTIVE),
                            'done': sum(1 for j in jobs if j['status'] == 'done'),
                            'failed': sum(1 for j in jobs if j['status'] == 'failed')},
+                  'notif_unread': NT.unread(uid_of(request)),
                   'me': request['user'].get('first_name', '')})
 
     @r.post('/api/settings')
@@ -1957,6 +1959,43 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e) or 'Неверные данные') from None
         store.set(su.KEY, json.dumps(c))
         return J({**c, 'version': su.version(data_dir or 'data'), 'window': su.WINDOW})
+
+    # ── центр уведомлений: лента (колокольчик) и настройки каждого пользователя ──
+    @r.get('/api/notify/feed')
+    async def notify_feed(request):
+        q = request.query
+        before = int(q['before']) if str(q.get('before', '')).isdigit() else None
+        return J(NT.feed(uid_of(request), q.get('cat', ''), before))
+
+    @r.post('/api/notify/read')
+    async def notify_read(request):
+        NT.mark_read(uid_of(request))
+        return J({'ok': True, 'unread': 0})
+
+    def notify_view(request) -> dict:
+        admin = is_admin(request)
+        cat = [{'type': t, 'cat': d[0], 'title': d[1], 'default': d[2], 'crit': d[3]}
+               for t, d in notify.TYPES.items() if admin or not d[4]]
+        return {**NT.prefs(uid_of(request)), 'catalog': cat,
+                'categories': [{'id': k, 'title': v} for k, v in notify.CATEGORIES.items() if any(x['cat'] == k for x in cat)]}
+
+    @r.get('/api/notify/prefs')
+    async def notify_prefs(request):
+        tz = request.query.get('tz')
+        if tz not in (None, '') and NT.prefs(uid_of(request))['tz'] is None:  # пояс узнаём при первом открытии
+            try:
+                NT.save_prefs(uid_of(request), {'tz': int(tz)})
+            except ValueError:
+                pass
+        return J(notify_view(request))
+
+    @r.post('/api/notify/prefs')
+    async def notify_prefs_save(request):
+        try:
+            NT.save_prefs(uid_of(request), await body(request))
+        except (TypeError, ValueError, KeyError) as e:
+            raise ApiError(str(e) or 'Неверные настройки') from None
+        return J(notify_view(request))
 
     # ── кошелёк: баланс своего аккаунта Bobr Cloud и пополнение ──
     def wallet_tg(request) -> int:
