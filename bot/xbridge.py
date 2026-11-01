@@ -230,7 +230,9 @@ def install_cmd(secret: str, node_port: int, listen: int, panel_ips: list[str]) 
     return (
         f': {MARK}; set +e; export DEBIAN_FRONTEND=noninteractive; '
         'systemctl disable --now bobr-relay >/dev/null 2>&1; rm -f /etc/systemd/system/bobr-relay.service; systemctl daemon-reload; '
-        f'if ss -Hltnp "sport = :{int(listen)}" | grep -v remnanode | grep -v xray | grep -q .; then echo "XB_BUSY"; '
+        # порт держит наша же нода (Xray в контейнере называется rw-core, раньше xray) — это не помеха
+        f'if ss -Hltnp "sport = :{int(listen)}" | grep -vE \'"(rw-core|xray|remnanode)"\' | grep -q . '
+        '&& ! docker ps --format "{{.Names}}" 2>/dev/null | grep -qx remnanode; then echo "XB_BUSY"; '
         f'ss -Hltnp "sport = :{int(listen)}" | head -3; exit 0; fi; '
         'if ! command -v docker >/dev/null; then (apt-get update -qq && apt-get install -y -qq docker.io docker-compose-v2) >/dev/null 2>&1 '
         '|| curl -fsSL https://get.docker.com | sh >/dev/null 2>&1; fi; '

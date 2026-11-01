@@ -119,6 +119,7 @@ def test_setup_and_teardown_panel():
 def test_install_command():
     c = xb.install_cmd('SECRET', 2222, 443, ['198.51.100.7', 'not-ip'])
     assert 'systemctl disable --now bobr-relay' in c and xb.MARK in c
+    assert 'rw-core' in c and 'grep -qx remnanode' in c    # порт держит наша же нода — не «занят другой программой»
     assert 'ufw allow from "$ip" to any port 2222' in c and "198.51.100.7" in c and 'not-ip' not in c
     import base64
     import re
