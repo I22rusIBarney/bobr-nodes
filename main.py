@@ -101,11 +101,7 @@ async def main():
 
     note = selfupdate.take_note(data_dir)  # после автообновления — что нового
     if note:
-        for uid in admins:
-            try:
-                await bot.send_message(uid, note, disable_web_page_preview=True)
-            except Exception as e:  # noqa: BLE001
-                logging.info('update note %s: %s', uid, e)
+        await autopilot.notify.emit('system.update', note)
 
     resumed = await runner.resume_all()
     if resumed:

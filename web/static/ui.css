@@ -577,3 +577,8 @@ html.glass :is(.list, .card, .stack > .row, .stat, .qa button, .chart-card) {
 .brand .logo { width: 30px; height: 30px; border-radius: 8px; flex: none; display: block; }
 .brand { font-size: 19px; font-weight: 700; letter-spacing: -0.025em; gap: 10px; }
 .brand .net { background: linear-gradient(90deg, #3FB4FF, #6E8BFF); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+/* колокольчик: число непрочитанных событий и новые строки ленты */
+.round-btn .pip.n { width: auto; height: 16px; min-width: 16px; padding: 0 4px; top: 6px; right: 5px; border-radius: 8px;
+  font-size: 10px; font-weight: 700; line-height: 16px; color: #fff; text-align: center; }
+.row.is-new { background: var(--accent-soft); }

@@ -63,12 +63,9 @@ class Watch:
         except ValueError:
             return []
 
-    async def _say(self, text: str) -> None:
-        for a in self.admins:
-            try:
-                await self.bot.send_message(a, text, parse_mode='HTML')
-            except Exception as e:  # noqa: BLE001 — админ мог не запускать бота
-                log.info('security notify %s: %s', a, e)
+    async def _say(self, type_: str, text: str) -> None:
+        from .notify import Notifier
+        await Notifier(self.store, self.bot, admins=self.admins).emit(type_, text, to=list(self.admins))
 
     @staticmethod
     def _when(ts: float) -> str:
@@ -89,7 +86,7 @@ class Watch:
                 new = ip not in known
                 self.logins.append({'user': user, 'ip': ip, 'ts': ts, 'new': new})
                 del self.logins[:-20]
-                await self._say('🔐 <b>Вход по SSH на сервер Bobr Nodes</b>' + (' · <b>новый IP</b>' if new else '') +
+                await self._say('security.login', '🔐 <b>Вход по SSH на сервер Bobr Nodes</b>' + (' · <b>новый IP</b>' if new else '') +
                                 f'\n\n👤 {html.escape(user)}\n🌐 <code>{html.escape(ip)}</code>\n🕐 {self._when(ts)}' +
                                 ('\n\nЕсли это были не вы — срочно смените пароль и SSH-ключи сервера: '
                                  'в базе бота root-пароли нод и токены панелей.' if new else ''))
@@ -101,7 +98,7 @@ class Watch:
         recent = sum(1 for t in self.bans if t > now - ATTACK_WINDOW)
         if recent >= ATTACK_BANS and now - self.attack_ts > 3600:
             self.attack_ts = now
-            await self._say(f'⚠️ <b>Подбор паролей к серверу Bobr Nodes</b>\n\nЗа 10 минут fail2ban заблокировал {recent} IP. '
+            await self._say('security.brute', f'⚠️ <b>Подбор паролей к серверу Bobr Nodes</b>\n\nЗа 10 минут fail2ban заблокировал {recent} IP. '
                             'Защита работает, но если атака не стихает — проверьте, что вход по паролю отключён (bnodes security).')
 
     async def run(self) -> None:

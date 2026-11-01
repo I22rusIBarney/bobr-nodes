@@ -24,6 +24,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
 from . import engine, plugins, services as svc, sshaccess, upgrade as up
 from .bcloud import BcloudError
+from .notify import Notifier
 from .pcache import CACHE
 from .runner import bcloud_from, buyer_of
 from .store import ACTIVE, Store
@@ -36,6 +37,7 @@ RENT_EVERY = 6 * 3600
 DEAD_DAYS = 7                 # нода без связи дольше — в отчёт об уборке
 CLEAN_GRACE = 6 * 3600       # свежую покупку не считаем лишней: установка могла ещё идти
 CLEAN_REMIND = 7 * 86400     # тот же список — напоминаем раз в неделю
+NODE_DOWN = 5 * 60            # нода без связи с панелью дольше — пишем
 PANEL_DOWN = 5 * 60           # панель молчит дольше — пишем
 PRESET_EVERY = 24 * 3600     # списки сканеров в фильтре входящих (плагин ноды)
 HIGH = {'cpu': 85, 'mem': 90, 'disk': 90}
@@ -205,6 +207,7 @@ class Autopilot:
         self._bg: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
+        self.notify = Notifier(store, bot, access)
 
     # ── служебное ──
     def get(self, key: str) -> dict:
@@ -226,9 +229,9 @@ class Autopilot:
         return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text='⚙️ Панель управления', web_app=WebAppInfo(url=self.public_url.rstrip('/') + '/admin'))]])
 
-    async def say(self, prof: dict, text: str, markup=None) -> None:
-        for uid in self.access.recipients(prof):
-            await self.send(uid, text, markup)
+    async def say(self, prof: dict, text: str, markup=None, type_: str = 'node.load') -> None:
+        """Событие группы — в ленту и в Telegram по настройкам получателей (см. notify)."""
+        await self.notify.emit(type_, text, prof, markup)
 
     async def send(self, uid: int, text: str, markup=None) -> None:
         try:
@@ -341,7 +344,7 @@ class Autopilot:
         if st.get('stopped'):
             lines.append(f'Остальные ({len(st["stopped"])}) не трогал: после отката новая версия, похоже, не подходит. '
                          'Проверьте версию панели и обновите вручную.')
-        await self.say(prof, '\n'.join(lines))
+        await self.say(prof, '\n'.join(lines), type_='task.autoupdate')
 
     # ───────── нагрузка ─────────
     async def check_load(self) -> None:
@@ -387,10 +390,10 @@ class Autopilot:
             await self.say(prof, f'🔥 <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\n'
                                  f'{load_text(s)} — уже ~{s["high"] * LOAD_EVERY // 60} мин.\n\n'
                                  f'Ноде {why}: возьмите тариф помощнее или поставьте ещё одну ноду в этой стране — '
-                                 'нагрузка разделится.', self.button())
+                                 'нагрузка разделится.', self.button(), type_='node.load')
         elif not h and prev.get('alerted') and prev.get('high', 0) >= HIGH_CYCLES:
             s['alerted'] = 0
-            await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.')
+            await self.say(prof, f'✅ <b>{html.escape(n["name"])}</b> · {html.escape(prof["name"])}\nнагрузка спала: {load_text(s)}.', type_='node.load')
         self.put(key, s)
 
     async def panel_load(self, now: float | None = None) -> None:
@@ -405,6 +408,9 @@ class Autopilot:
             CACHE.put(prof, 'nodes', nodes)  # веб-апп откроет список нод без похода в панель
             await self.panel_up(prof, t)
             self.track_offline(prof, nodes, t)
+            await self.node_links(prof, nodes, t)
+            await self.node_versions(prof, nodes)
+            await self.panel_changes(prof)
             await self.plugin_guard(prof, nodes)
             for n in nodes:
                 smp = panel_sample(n) if isinstance(n, dict) and n.get('uuid') else None
@@ -426,7 +432,7 @@ class Autopilot:
             await self.say(prof, f'🔴 <b>Панель «{html.escape(prof.get("name", ""))}» не отвечает</b> уже {mins} мин\n\n'
                                  f'<code>{html.escape(err[:300])}</code>\n\n'
                                  'Пока панель недоступна, ноды работают, но бот не может их обслуживать. '
-                                 'Напишу, когда она вернётся.', self.button())
+                                 'Напишу, когда она вернётся.', self.button(), type_='panel.down')
         self.put(key, st)
 
     async def panel_up(self, prof: dict, now: float) -> None:
@@ -437,7 +443,7 @@ class Autopilot:
         self.put(key, {})
         if st.get('told'):
             mins = max(1, int((now - st['since']) // 60))
-            await self.say(prof, f'🟢 <b>Панель «{html.escape(prof.get("name", ""))}» снова отвечает</b> — не было связи ~{mins} мин.')
+            await self.say(prof, f'🟢 <b>Панель «{html.escape(prof.get("name", ""))}» снова отвечает</b> — не было связи ~{mins} мин.', type_='panel.up')
 
     # ───────── ноды без плагина ─────────
     async def plugin_guard(self, prof: dict, nodes: list) -> None:
@@ -465,6 +471,85 @@ class Autopilot:
                 cur[n['uuid']] = prev.get(n['uuid']) or now
         if cur != prev:
             self.put(key, cur)
+
+    # ───────── связь нод с панелью ─────────
+    async def node_links(self, prof: dict, nodes: list, now: float) -> None:
+        """Нода без связи с панелью дольше NODE_DOWN — сообщение (все такие ноды группы одним сообщением);
+        вернулась — ещё одно. Ноды, по которым идёт задача бота (обновление, смена IP), не трогаем."""
+        key = f'ap:linktold:{prof["id"]}'
+        told = self.get(key)  # uuid → {name, since}
+        off = self.get(f'ap:off:{prof["id"]}')
+        busy = {j['data'].get('node_uuid') for j in self.store.active_jobs() if j['profile_id'] == prof['id']}
+        by_uuid = {n['uuid']: n for n in plugins.enabled_nodes(nodes)}
+        down = [by_uuid[u] for u, since in off.items()
+                if u in by_uuid and u not in told and u not in busy and now - since >= NODE_DOWN]
+        back = [(u, x) for u, x in told.items() if u not in off]  # снова на связи, выключена или удалена
+        if not down and not back:
+            return
+        for n in down:
+            told[n['uuid']] = {'name': n.get('name', ''), 'since': off[n['uuid']]}
+        for u, _ in back:
+            told.pop(u, None)
+        self.put(key, told)
+        g = html.escape(prof.get('name', ''))
+        if down:
+            names = ', '.join(f'<b>{html.escape(n.get("name", ""))}</b>' for n in down[:15])
+            more = f' и ещё {len(down) - 15}' if len(down) > 15 else ''
+            head = '🔴 Нода потеряла связь с панелью' if len(down) == 1 else f'🔴 {len(down)} нод потеряли связь с панелью'
+            await self.say(prof, f'{head} · {g}\n{names}{more}\n\nБольше {NODE_DOWN // 60} мин без связи: сервер выключен, '
+                                 'завис или до него нет сети. Пользователи этих нод, скорее всего, без VPN.', self.button(),
+                           type_='node.down')
+        if back:
+            parts = []
+            for u, x in back[:15]:
+                state = 'снова на связи' if u in by_uuid and by_uuid[u].get('isConnected') else 'убрана или выключена'
+                parts.append(f'<b>{html.escape(x.get("name", ""))}</b> — {state}, не было ~{max(1, int((now - x["since"]) // 60))} мин')
+            await self.say(prof, f'🟢 Связь с панелью · {g}\n' + '\n'.join(parts), type_='node.up')
+
+    async def node_versions(self, prof: dict, nodes: list) -> None:
+        """Сменилась версия ноды или Xray (обновили руками, ботом или в панели) — одним сообщением на группу."""
+        key = f'ap:ver:{prof["id"]}'
+        prev = self.get(key)
+        cur, changes = {}, []
+        for n in nodes:
+            nv, xv = up.node_version(n), up.xray_version(n)
+            if not nv and not xv:  # нода офлайн — панель версий не знает, прежние помним
+                if n['uuid'] in prev:
+                    cur[n['uuid']] = prev[n['uuid']]
+                continue
+            cur[n['uuid']] = [nv, xv]
+            old = prev.get(n['uuid'])
+            if old and old != [nv, xv]:
+                what = [f'нода {old[0] or "?"} → {nv}' if old[0] != nv else '', f'Xray {old[1] or "?"} → {xv}' if old[1] != xv else '']
+                changes.append(f'<b>{html.escape(n.get("name", ""))}</b>: ' + ', '.join(x for x in what if x))
+        if cur != prev:
+            self.put(key, cur)
+        if changes:
+            await self.say(prof, f'🆕 Новые версии · {html.escape(prof.get("name", ""))}\n' + '\n'.join(changes[:20]),
+                           type_='node.version')
+
+    # ───────── перезапуск и обновление панели ─────────
+    async def panel_changes(self, prof: dict) -> None:
+        """Версия панели сменилась — «панель обновилась»; аптайм стал меньше прежнего — «перезапустилась»."""
+        key = f'ap:panel:{prof["id"]}'
+        prev = self.get(key)
+        pl = self.panel(prof)
+        ver = await asyncio.to_thread(up.panel_version, pl)
+        try:
+            stats = await asyncio.to_thread(pl.call, 'GET', '/api/system/stats')
+            uptime = float(stats.get('uptime')) if isinstance(stats, dict) and stats.get('uptime') is not None else None
+        except (engine.StepError, TypeError, ValueError):
+            uptime = None
+        cur = {'ver': ver or prev.get('ver', ''), 'uptime': uptime, 'at': time.time()}
+        self.put(key, cur)
+        if not prev:
+            return
+        g = html.escape(prof.get('name', ''))
+        if ver and prev.get('ver') and ver != prev['ver']:
+            await self.say(prof, f'⬆️ <b>Панель «{g}» обновилась</b>: {html.escape(prev["ver"])} → {html.escape(ver)}.\n\n'
+                                 'Ноды обновляйте под её ветку — «Обновление нод» в группе подскажет версию.', type_='panel.version')
+        elif uptime is not None and prev.get('uptime') is not None and uptime + 60 < prev['uptime'] + (cur['at'] - prev.get('at', cur['at'])):
+            await self.say(prof, f'🔄 <b>Панель «{g}» перезапустилась</b> — работает {max(1, int(uptime // 60))} мин.', type_='panel.restart')
 
     def load_of(self, pid: int, uuid: str, hist: bool = False) -> dict:
         """Нагрузка ноды: замер по SSH (точный процессор, диск, предупреждения) и/или из панели (чаще, без SSH).
@@ -649,7 +734,7 @@ class Autopilot:
                 lines.append(f'\nНоды без связи больше {DEAD_DAYS} дней:')
                 lines += [f'• {html.escape(x["name"])} — {x["days"]} дн.' for x in c['dead'][:10]]
             lines.append('\nУдалить можно в панели управления: группа → «Уборка».')
-            await self.say(prof, '\n'.join(lines), self.button())
+            await self.say(prof, '\n'.join(lines), self.button(), type_='money.cleanup')
 
     async def check_rent(self) -> None:
         for prof in self.store.profiles():
@@ -677,7 +762,7 @@ class Autopilot:
                 await self.say(prof, f'💳 <b>Скоро конец аренды</b> · {html.escape(prof["name"])}\n'
                                      f'{x["flag"]} {html.escape(x["domain"] or x["name"])} · <code>{x["ip"]}</code> — '
                                      f'осталось {max(0, int(x["days_left"]))} дн.: {html.escape(x["why"])}.\n\n'
-                                     'Продлите в «Аренде» группы или пополните баланс Bobr Cloud.', self.button())
+                                     'Продлите в «Аренде» группы или пополните баланс Bobr Cloud.', self.button(), type_='money.rent')
 
     # ───────── сервер бота ─────────
     def host_line(self) -> str:
@@ -700,10 +785,9 @@ class Autopilot:
         if level != 'bad' or now - last < REALERT:
             return
         self.store.set('host_alerted', str(now))
-        for uid in sorted(self.access.admins):
-            await self.send(uid, f'🔥 <b>Серверу бота не хватает ресурсов</b>\n{html.escape("; ".join(why))}.\n\n'
-                                 'Возьмите VPS помощнее или перенесите соседей (например, Bobr Cloud) на другой сервер. '
-                                 'Подробно — «Нагрузка» в панели управления.', self.button())
+        await self.notify.emit('system.host', f'🔥 <b>Серверу бота не хватает ресурсов</b>\n{html.escape("; ".join(why))}.\n\n'
+                                              'Возьмите VPS помощнее или перенесите соседей (например, Bobr Cloud) на другой сервер. '
+                                              'Подробно — «Нагрузка» в панели управления.', markup=self.button())
 
     # ───────── утренняя сводка ─────────
     async def summaries(self, now: float) -> None:

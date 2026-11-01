@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS mon (key TEXT PRIMARY KEY, data TEXT NOT NULL);  -- �
 CREATE TABLE IF NOT EXISTS relays (id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);  -- входы через Россию (проброс)
 CREATE TABLE IF NOT EXISTS users (tg_id INTEGER PRIMARY KEY, data TEXT NOT NULL);  -- приглашённые пользователи
 CREATE TABLE IF NOT EXISTS invites (id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
+-- лента уведомлений (колокольчик): кому — список tg id в виде ",1,2,"
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, type TEXT NOT NULL,
+    pid INTEGER, text TEXT NOT NULL, rcpt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -248,3 +251,27 @@ class Store:
             if d:
                 out.add(d.lower())
         return out
+
+    # ── лента уведомлений ──
+    def add_event(self, type_: str, pid: int | None, text: str, rcpt: list[int], ts: float | None = None) -> int:
+        to = ',' + ','.join(str(int(x)) for x in rcpt) + ','
+        with self.lock:
+            eid = self.db.execute('INSERT INTO events(ts, type, pid, text, rcpt) VALUES(?,?,?,?,?)',
+                                  (ts or time.time(), type_, pid, text, to)).lastrowid
+            if eid % 200 == 0:  # храним 30 дней, не больше 5000 записей
+                self.db.execute('DELETE FROM events WHERE ts < ? OR id <= ?', (time.time() - 30 * 86400, eid - 5000))
+            return eid
+
+    def events_for(self, uid: int, types: list[str] | None = None, before: int | None = None, limit: int = 50) -> list[dict]:
+        sql, args = 'SELECT id, ts, type, pid, text FROM events WHERE rcpt LIKE ?', [f'%,{int(uid)},%']
+        if types:
+            sql += f' AND type IN ({",".join("?" * len(types))})'
+            args += types
+        if before:
+            sql += ' AND id < ?'
+            args.append(int(before))
+        return [dict(r) for r in self._q(sql + ' ORDER BY id DESC LIMIT ?', (*args, int(limit)))]
+
+    def unread_events(self, uid: int, after: int) -> int:
+        return self._q('SELECT COUNT(*) n FROM events WHERE rcpt LIKE ? AND id > ?', (f'%,{int(uid)},%', int(after)))[0]['n']
+

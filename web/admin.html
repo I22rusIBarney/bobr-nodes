@@ -318,11 +318,76 @@ function statTile(n, label, tone, key) {
   }
   return h('div', { class: 'stat' }, b, h('span', {}, label));
 }
-// колокольчик: задачи; точка — идёт установка (синяя) или есть ошибки (красная)
+// колокольчик: события и задачи; число — непрочитанные события, точка — идёт установка (синяя) или есть ошибки (красная)
 function bellBtn() {
-  const j = (ST && ST.jobs) || {};
-  return h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Задачи' + (j.failed ? `, ошибок ${j.failed}` : j.active ? `, идёт ${j.active}` : ''),
-    onclick: () => { JOBS = null; UI.nav.push(jobsView); } }, icon('bell'), j.failed ? h('span', { class: 'pip' }) : j.active ? h('span', { class: 'pip run' }) : null);
+  const j = (ST && ST.jobs) || {}, n = (ST && ST.notif_unread) || 0;
+  return h('button', { class: 'round-btn', type: 'button', 'aria-label': 'Уведомления' + (n ? `, новых ${n}` : '') + (j.failed ? `, ошибок ${j.failed}` : j.active ? `, идёт ${j.active}` : ''),
+    onclick: () => { BELL.items = null; JOBS = null; UI.nav.push(bellView); } }, icon('bell'),
+    n ? h('span', { class: 'pip n' }, n > 99 ? '99+' : String(n)) : j.failed ? h('span', { class: 'pip' }) : j.active ? h('span', { class: 'pip run' }) : null);
+}
+// ───────── колокольчик: события (лента уведомлений) и задачи ─────────
+const BELL = { tab: 'events', cat: '', items: null, more: false, loading: false };
+const CAT_ICON = { nodes: ['servers', 'blue'], panels: ['layers', 'violet'], tasks: ['list', 'teal'], money: ['wallet', 'green'], security: ['shield', 'red'], system: ['cpu', 'gray'] };
+function bellLoad(more) {
+  if (BELL.loading) return;
+  BELL.loading = true;
+  const last = more && BELL.items && BELL.items.length ? BELL.items[BELL.items.length - 1].id : null;
+  api('notify/feed?cat=' + BELL.cat + (last ? '&before=' + last : '')).then(r => {
+    BELL.items = more ? [...(BELL.items || []), ...r.items] : r.items; BELL.more = r.items.length >= 50;
+    if (!more && r.unread) api('notify/read', 'POST', {}).then(() => { if (ST) ST.notif_unread = 0; }).catch(() => {});
+  }).catch(e => { BELL.items = { error: e.message }; }).then(() => { BELL.loading = false; if (document.querySelector('#root .bell-page')) UI.nav.refresh(); });
+}
+function bellView() {
+  const v = h('div', { class: 'bell-page jobs-page' }, ...pageHead('Уведомления', { menu: [{ text: 'Настроить уведомления', icon: 'sliders', color: 'blue', fn: () => { NP = null; UI.nav.push(notifView); } }] }));
+  v.append(UI.segmented([{ value: 'events', label: 'События' }, { value: 'jobs', label: 'Задачи' }], BELL.tab, x => { BELL.tab = x; UI.nav.refresh(); }, 'tabs'));
+  if (BELL.tab === 'jobs') { v.append(...jobsView(true)); return v; }
+  if (BELL.items === null) bellLoad(false);
+  const cats = [['', 'Все'], ['nodes', 'Ноды'], ['panels', 'Панели'], ['tasks', 'Задачи'], ['money', 'Деньги'], ...(isAdmin() ? [['security', 'Безопасность'], ['system', 'Бот']] : [])];
+  v.append(h('div', { class: 'chips', role: 'group', 'aria-label': 'Категория' }, cats.map(([id, t]) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(BELL.cat === id),
+    onclick: () => { if (BELL.cat !== id) { BELL.cat = id; BELL.items = null; UI.nav.refresh(); } } }, t))));
+  const L = BELL.items;
+  if (!L) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (L.error) { v.append(UI.failed(L.error, () => { BELL.items = null; UI.nav.refresh(); })); return v; }
+  if (!L.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'Пока тихо'), 'Здесь появятся события: ноды, панели, аренда, безопасность.')); return v; }
+  const day = ts => new Date(ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  const groups = [];
+  L.forEach(x => { const d = day(x.ts); if (!groups.length || groups[groups.length - 1][0] !== d) groups.push([d, []]); groups[groups.length - 1][1].push(x); });
+  groups.forEach(([d, xs]) => v.append(group(d, xs.map(x => {
+    const [ic, col] = CAT_ICON[x.cat] || ['bell', 'gray'];
+    const lines = x.text.split('\n').filter(Boolean);
+    return row({ icon: ic, color: col, title: lines[0] || x.title, cls: 'wrap' + (x.unread ? ' is-new' : ''), chevron: false,
+      sub: [lines.slice(1, 4).join(' · '), new Date(x.ts * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })].filter(Boolean).join(' · '),
+      status: x.crit && x.unread ? ['важно', 'bad'] : null,
+      onClick: lines.length > 4 ? () => UI.alert(x.text) : null });
+  }))));
+  if (BELL.more) { const b = h('button', { class: 'btn secondary', type: 'button' }, 'Показать ещё'); b.onclick = () => bellLoad(true); v.append(h('div', { class: 'cta' }, b)); }
+  return v;
+}
+// ───────── центр уведомлений: что приходит в Telegram, тихие часы ─────────
+let NP = null;
+const MODE_OPTS = [{ value: 'tg', label: 'Telegram' }, { value: 'bell', label: 'Колокольчик' }, { value: 'off', label: 'Выкл.' }];
+function notifView() {
+  const v = h('div', { class: 'np-page' }, ...pageHead('Уведомления', { sub: 'что приходит в Telegram, а что только в колокольчик' }));
+  const load = () => { NP = { loading: true }; api('notify/prefs?tz=' + tzNow()).then(r => { NP = r; }).catch(e => { NP = { error: e.message }; }).then(() => { if (document.querySelector('#root .np-page')) UI.nav.refresh(); }); };
+  if (NP === null) load();
+  if (!NP || NP.loading) { v.append(h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })]))); return v; }
+  if (NP.error) { v.append(UI.failed(NP.error, load)); return v; }
+  const save = async patch => { const r = await UI.run(() => api('notify/prefs', 'POST', { ...patch, tz: tzNow() })); if (r) { NP = r; UI.haptic('select'); } UI.nav.refresh(); };
+  const q = NP.quiet;
+  const qRows = [row({ icon: 'clock', color: 'violet', title: 'Тихие часы', cls: 'wrap', sub: 'ночью в Telegram только важное, остальное — в колокольчик', chevron: false, right: UI.toggle(q.on, on => save({ quiet: { on } }), 'Тихие часы') })];
+  if (q.on) qRows.push(row({ title: 'С', chevron: false, right: hourStep(q.from, x => save({ quiet: { from: x } })) }), row({ title: 'До', chevron: false, right: hourStep(q.to, x => save({ quiet: { to: x } })) }));
+  v.append(group('Тихие часы', qRows, 'Важное — нода или панель упала, вход по SSH, конец аренды — приходит всегда.'));
+  NP.categories.forEach(c => {
+    const items = NP.catalog.filter(x => x.cat === c.id);
+    const modes = new Set(items.map(x => NP.types[x.type]));
+    const rows = [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Вся категория'),
+      UI.segmented(MODE_OPTS, modes.size === 1 ? [...modes][0] : null, m => save({ categories: { [c.id]: m } }), 'fill'))];
+    items.forEach(x => rows.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, x.title, x.crit ? h('span', { class: 'badge bad', style: 'margin-left:6px' }, 'важное') : null),
+      UI.segmented(MODE_OPTS, NP.types[x.type], m => { if (m !== NP.types[x.type]) save({ types: { [x.type]: m } }); }, 'fill'))));
+    v.append(group(c.title, rows));
+  });
+  v.append(h('div', { class: 'group-f', style: 'padding:0 var(--s4)' }, 'Уведомления о нодах в мониторинге можно ещё заглушить для группы или одной ноды — на странице мониторинга.'));
+  return v;
 }
 // службы бота: настроено — «В норме», цветом только то, что требует внимания
 function serviceRows() {
@@ -338,7 +403,8 @@ function serviceRows() {
     row({ icon: 'globe', color: 'amber', title: 'Cloudflare', status: conn(ok('cf_token')), onClick: () => UI.nav.push(cfView) }),
     row({ icon: 'sparkle', color: 'violet', title: 'Gemini', status: conn(ok('gemini_key'), ['Не задан', 'quiet']), onClick: () => UI.nav.push(geminiView) }),
     row({ icon: 'terminal', color: 'gray', title: 'SSH-ключ и очередь', detail: 'по ' + (s.parallel.value || 3), onClick: () => UI.nav.push(otherView) }),
-    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } })];
+    row({ icon: 'renew', color: 'teal', title: 'Обновление бота', onClick: () => { SU = null; UI.nav.push(selfUpdateView); } }),
+    row({ icon: 'bell', color: 'amber', title: 'Уведомления', sub: 'Telegram, колокольчик, тихие часы', onClick: () => { NP = null; UI.nav.push(notifView); } })];
 }
 // ───────── автообновление самого бота ─────────
 let SU = null;
@@ -2604,18 +2670,19 @@ function settingsTab() {
 let JOBS = null, jobTimer = null;
 function poll(fn, ms) { clearTimeout(jobTimer); jobTimer = setTimeout(fn, ms); }
 async function loadJobs() { try { JOBS = (await api('jobs')).jobs; } catch (e) { JOBS = { error: e.message }; } }
-function jobsView() {
-  if (JOBS === null) { loadJobs().then(() => UI.nav.refresh()); return h('div', {}, ...title('Задачи'), group(null, [h('div', { class: 'skeleton' })])); }
-  if (JOBS.error) return h('div', {}, ...title('Задачи'), UI.failed(JOBS.error, () => { JOBS = null; UI.nav.refresh(); }));
+function jobsView(embedded) {  // embedded — вкладка «Задачи» в колокольчике: без заголовка, список узлов
+  const wrap = nodes => embedded ? nodes : h('div', { class: 'jobs-page' }, ...title('Задачи'), ...nodes);
+  if (JOBS === null) { loadJobs().then(() => UI.nav.refresh()); return wrap([group(null, [h('div', { class: 'skeleton' })])]); }
+  if (JOBS.error) return wrap([UI.failed(JOBS.error, () => { JOBS = null; UI.nav.refresh(); })]);
   if (JOBS.some(j => ACTIVE_ST.includes(j.status)))
     poll(async () => { if (!document.querySelector('#root .jobs-page')) return; await loadJobs(); UI.nav.refresh(); }, 4000);
-  const v = h('div', { class: 'jobs-page' }, ...title('Задачи'));
-  if (!JOBS.length) { v.append(h('div', { class: 'empty' }, h('b', {}, 'Задач нет'), 'Они появятся после первого развёртывания.')); return v; }
+  if (!JOBS.length) return wrap([h('div', { class: 'empty' }, h('b', {}, 'Задач нет'), 'Они появятся после первого развёртывания.')]);
+  const out = [];
   const act = JOBS.filter(j => ACTIVE_ST.includes(j.status)), bad = JOBS.filter(j => j.status === 'failed'), rest = JOBS.filter(j => !ACTIVE_ST.includes(j.status) && j.status !== 'failed');
-  if (act.length) v.append(group(['Идут сейчас', h('span', { class: 'n' }, act.length)], act.map(jobRow)));
-  if (bad.length) v.append(group(['С ошибкой', h('span', { class: 'n' }, bad.length)], bad.map(jobRow)));
-  if (rest.length) v.append(group(['Готово', h('span', { class: 'n' }, rest.length)], rest.map(jobRow)));
-  return v;
+  if (act.length) out.push(group(['Идут сейчас', h('span', { class: 'n' }, act.length)], act.map(jobRow)));
+  if (bad.length) out.push(group(['С ошибкой', h('span', { class: 'n' }, bad.length)], bad.map(jobRow)));
+  if (rest.length) out.push(group(['Готово', h('span', { class: 'n' }, rest.length)], rest.map(jobRow)));
+  return wrap(out);
 }
 const JOB = {};
 function jobView(id) {
