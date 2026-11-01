@@ -53,7 +53,8 @@ class FakePanel:
         raise AssertionError((method, path))
 
     def attach(self, node, prof, inbounds, squads, node_port, log, tls=True, also=()):
-        assert tls is False and squads == ['sq1'] and node_port == 2222
+        assert squads == ['sq1'] and node_port == 2222
+        self.tls = tls
         self.nodes.append({'uuid': 'node-entry', 'address': node['domain'], 'name': node['name']})
         self.hosts.append({'uuid': 'host-entry', 'address': node['domain'], 'port': inbounds[0]['port'],
                            'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbounds[0]['uuid']}})
@@ -171,3 +172,50 @@ def test_reinstall_keeps_manual_sni():
     again = xb.setup_panel(pl, {**RELAY, 'reality': made['reality']}, EXIT_NODE, EXIT_HOSTS, log.append)
     assert again['sni'] == 'my.own.site'
     assert patched[0]['inbounds'][0]['streamSettings']['realitySettings']['serverNames'] == ['my.own.site']
+
+
+NV_BASE = {'inbounds': [{'tag': 'Vision-TLS', 'port': 443, 'protocol': 'vless', 'streamSettings': {
+    'network': 'tcp', 'security': 'tls', 'tlsSettings': {'certificates': [{
+        'certificateFile': '/etc/letsencrypt/live/de1.example.com/fullchain.pem'}]}}}],
+    'outbounds': [{'tag': 'DIRECT', 'protocol': 'freedom'}, {'tag': 'BLOCK', 'protocol': 'blackhole'}],
+    'routing': {'rules': [{'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'BLOCK'},
+                          {'type': 'field', 'network': 'tcp,udp', 'outboundTag': 'DIRECT'}]}}
+
+
+def test_vision_config_routes_to_exit_after_blocks():
+    import json
+    from bot import engine as en
+    o = xb.exit_outbound(FakePanel(), EXIT_NODE, EXIT_HOSTS, 8443, 'vless-1')
+    tag = xb.vision_tag('203.0.113.50')
+    base = json.loads(json.dumps(NV_BASE).replace('Vision-TLS', en.INBOUND_TAG))
+    c = xb.vision_config(base, 'de1.example.com', tag, o)
+    assert c['inbounds'][0]['tag'] == tag and tag == 'BRIDGE_VISION_203_0_113_50'
+    assert en.CERT_LINK in json.dumps(c) and '/live/de1.example.com/' not in json.dumps(c)
+    assert c['outbounds'][0]['tag'] == xb.OUT_TAG
+    rules = c['routing']['rules']
+    assert rules[0]['outboundTag'] == 'BLOCK' and rules[1] == {'type': 'field', 'inboundTag': [tag], 'outboundTag': xb.OUT_TAG}
+    assert rules[2]['outboundTag'] == 'DIRECT'      # общее «всё напрямую» — после нашего правила
+
+
+def test_setup_panel_vision():
+    import json
+    from bot import engine as en
+    pl, log = FakePanel(), []
+
+    orig = pl.call
+
+    def call(method, path, body=None):  # профиль моста Vision: тег — свой
+        if (method, path) == ('POST', '/api/config-profiles'):
+            p = {'uuid': 'prof-v', 'name': body['name'], 'config': body['config'],
+                 'inbounds': [{'uuid': 'inb-v', 'tag': i['tag'], 'port': i['port']} for i in body['config']['inbounds']]}
+            pl.profiles.append(p)
+            return p
+        return orig(method, path, body)
+    pl.call = call
+    base = json.loads(json.dumps(NV_BASE).replace('Vision-TLS', en.INBOUND_TAG))
+    made = xb.setup_panel(pl, {**RELAY, 'mode': 'vision', 'domain': 'de1.example.com', 'base_cfg': base}, EXIT_NODE,
+                          EXIT_HOSTS, log.append)
+    assert pl.tls is True and made['hosts'] == ['host-entry'] and made['sni'] == 'de1.example.com'
+    assert pl.nodes[0]['address'] == 'de1.example.com'
+    assert any(p['name'] == 'Bridge V 203-0-113-50' for p in pl.profiles)
+    assert not [c for c in pl.calls if c == ('PATCH', '/api/hosts')]   # SNI хоста — домен входа, его ставит attach
