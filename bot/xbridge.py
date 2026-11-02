@@ -23,6 +23,7 @@ from . import engine
 
 TAG = 'BRIDGE_REALITY'
 OUT_TAG = 'to-exit'
+ROUTED = ('xray', 'vision', 'egames')  # мосты с серверным роутингом (нода на входе)
 NODE_DIR = '/opt/remnanode'
 IMAGE = 'remnawave/node:latest'
 MARK = 'BOBR_XBRIDGE'
@@ -134,9 +135,9 @@ def profile_config(listen: int, sni: str, private_key: str, short_id: str, outbo
     }
 
 
-def profile_name(ip: str, vision: bool = False) -> str:
+def profile_name(ip: str, vision: bool = False, eg: bool = False) -> str:
     """Название профиля в панели: только латиница, цифры, пробел, _ и - (иначе панель отвечает Validation failed)."""
-    return re.sub(r'[^A-Za-z0-9_ -]', '-', f'Bridge{" V" if vision else ""} {ip}')[:30]
+    return re.sub(r'[^A-Za-z0-9_ -]', '-', f'Bridge{" V" if vision else " EG" if eg else ""} {ip}')[:30]
 
 
 def vision_tag(ip: str) -> str:
@@ -415,13 +416,19 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         plugins.protect_bridge(panel, x['ip'], user.get('id'), log)
     except engine.StepError as e:
         log(f'Torrent Blocker: исключение для входа не добавилось ({e}) — добавьте IP {x["ip"]} в исключения вручную')
-    vision = x.get('mode') == 'vision'
-    tag = vision_tag(x['ip']) if vision else TAG
+    from . import egames
+    vision, eg = x.get('mode') == 'vision', x.get('mode') == 'egames'
+    tag = vision_tag(x['ip']) if vision else egames.tag_for(x['ip'], bridge=True) if eg else TAG
     keep = x.get('reality') or {}  # переустановка — те же ключи: у клиентов в подписке ничего не меняется
     priv = keep.get('private') or ('' if vision else reality_keys()[0])
-    sid = keep.get('sid') or ('' if vision else secrets.token_hex(4))
-    name = profile_name(x['ip'], vision)
-    if vision:
+    sid = keep.get('sid') or ('' if vision else secrets.token_hex(8 if eg else 4))
+    name = profile_name(x['ip'], vision, eg)
+    if eg:  # вход как нода eGames: REALITY «под себя» на домене входа + выход и маршруты моста
+        base = egames.profile_config(x['domain'], tag, priv, sid)
+        out = {k: v for k, v in outbound.items() if not k.startswith('_')}
+        cfg = {**base, 'outbounds': [out, *base['outbounds']],
+               'routing': {'rules': bridge_rules(base['routing']['rules'], tag, {'BLOCK'}, bool(ss))}}
+    elif vision:
         cfg = vision_config(x['base_cfg'], x['domain'], tag, outbound, ru_direct=bool(ss))
     else:
         cfg = profile_config(x['listen'], x['sni'], priv, sid, outbound)
@@ -437,7 +444,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     if old:
         # переустановка: inbound входа (SNI, ключи — их могли поменять в панели руками) не трогаем, меняем выход
         oc = old.get('config') or {}
-        if not vision and any(i.get('tag') == tag for i in oc.get('inbounds', [])):
+        if x.get('mode', 'xray') == 'xray' and any(i.get('tag') == tag for i in oc.get('inbounds', [])):
             outs = [o for o in oc.get('outbounds', []) if o.get('tag') != OUT_TAG]
             routing = oc.get('routing') or cfg['routing']
             block = {o.get('tag') for o in outs if o.get('protocol') == 'blackhole'}
@@ -448,9 +455,10 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         log(f'панель: профиль «{name}» обновлён — {via}')
     else:
         prof = panel.call('POST', '/api/config-profiles', {'name': name, 'config': cfg})
-        log(f'панель: профиль «{name}» создан — ' + (f'Vision TLS на {x["domain"]}' if vision else f'REALITY с SNI {x["sni"]}') + f', {via}')
+        log(f'панель: профиль «{name}» создан — ' + (f'Vision TLS на {x["domain"]}' if vision else f'REALITY «под себя» на {x["domain"]}, как у eGames'
+                                                    if eg else f'REALITY с SNI {x["sni"]}') + f', {via}')
     inbound = next(i for i in prof['inbounds'] if i['tag'] == tag)
-    node = {'ip': x['ip'], 'domain': x['domain'] if vision else (x.get('address') or x['ip']), 'name': (x.get('remark') or name)[:30],
+    node = {'ip': x['ip'], 'domain': x['domain'] if vision or eg else (x.get('address') or x['ip']), 'name': (x.get('remark') or name)[:30],
             'country': x.get('country') or '', 'remark': x.get('remark') or name}
     panel.attach(node, prof, [inbound], squads, int(x.get('node_port') or 2222), log, tls=vision)
     entry = next((n for n in panel.call('GET', '/api/nodes') if n['address'] == node['domain']), None)
@@ -459,7 +467,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     sni_now = x['domain'] if vision else ''
     if not vision:
         cur_in = next((i for i in (cfg.get('inbounds') or []) if i.get('tag') == tag), {})
-        sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x['sni']])[0]
+        sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x.get('sni') or x.get('domain')])[0]
         for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
             panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',

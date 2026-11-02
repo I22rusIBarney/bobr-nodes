@@ -84,7 +84,7 @@ SHOW = {'name': 'название', 'domain': 'домен', 'domains': 'доме
         'free': 'бесплатно', 'blocked': 'закрыт', 'price_rub': 'цена ₽', 'period_days': 'период, дней', 'scale': 'автомасштабирование',
         'scale_max': 'лимит нод', 'online_max': 'онлайн на ноду', 'update': 'автообновление', 'load': 'нагрузка', 'renew': 'автопродление',
         'autorenew': 'автопродление', 'action': 'действие', 'hour': 'час', 'host': 'хост', 'uuids': 'ноды', 'amount_rub': 'сумма ₽',
-        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
+        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'exit_egames': 'переустановить выход', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
 
 
 def match(method: str, path: str) -> tuple[str, str, dict] | None:
