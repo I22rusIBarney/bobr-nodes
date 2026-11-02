@@ -810,7 +810,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 'source': x.get('source', 'ssh'), 'server_id': x.get('server_id'), 'bought': bool(x.get('bought')),
                 'stage': x.get('stage', ''), 'stages': relay_stages(x), 'mode': x.get('mode', 'haproxy'), 'sni': x.get('sni', ''),
                 'hop': x.get('hop') or 'vless', 'hop_port': ((x.get('made') or {}).get('ss') or {}).get('port'),
-                'domain': x.get('domain', ''),
+                'domain': x.get('domain', ''), 'exit_egames': bool(x.get('exit_egames')),
                 'flag': x.get('flag', ''), 'spec': x.get('spec', ''), 'price_kop': x.get('price_kop'),
                 'target': x['target'], 'target_port': x['target_port'], 'remark': x.get('remark', ''),
                 'status': x.get('status', 'new'), 'error': x.get('error', ''), 'bad': x.get('bad') or [],
@@ -824,7 +824,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         out.append({'code': 'ssh', 'title': 'Вход по SSH'})
         if x.get('convert'):
             out.append({'code': 'convert', 'title': 'Остановка ноды на сервере'})
-        if x.get('mode') == 'vision':
+        if x.get('mode') == 'egames':
+            if x.get('exit_egames'):
+                out.append({'code': 'exit', 'title': 'Выход: нода как в eGames'})
+            out += [{'code': 'node', 'title': 'Вход: нода как в eGames (домен, сертификат, заглушка)'},
+                    {'code': 'panel', 'title': 'Профиль моста, Shadowsocks до выхода, хост'}, {'code': 'check', 'title': 'Вход на связи и проверен'}]
+        elif x.get('mode') == 'vision':
             out += [{'code': 'node', 'title': 'Встроенный скрипт: домен, сертификат, Vision TLS'},
                     {'code': 'panel', 'title': 'Профиль моста, выход и хост в панели'}, {'code': 'check', 'title': 'Вход на связи и проверен'}]
         elif x.get('mode') == 'xray':
@@ -860,7 +865,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     async def relay_sync(ip: str, log, closed: list[int] = ()) -> dict:
         """Конфиг HAProxy на сервере — по всем его входам; входов нет — проброс с сервера убираем."""
-        mine = [x for x in store.relays() if x['ip'] == ip and x.get('mode') != 'xray']
+        mine = [x for x in store.relays() if x['ip'] == ip and x.get('mode') not in xb.ROUTED]
         if not mine:
             return {'bad': []}
         return await asyncio.to_thread(rl.apply, relay_remote(mine[-1]), mine, log, closed)
@@ -894,8 +899,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if source not in ('ssh', 'server', 'buy'):
             raise ApiError('Откуда сервер: свой, купленный или новый')
         mode = b.get('mode') or 'haproxy'
-        if mode not in ('haproxy', 'xray', 'vision'):
-            raise ApiError('Вид моста: проброс, роутинг REALITY или роутинг Vision TLS')
+        if mode not in ('haproxy', *xb.ROUTED):
+            raise ApiError('Вид моста: проброс, роутинг REALITY, Vision TLS или eGames')
         try:
             pl, n, hosts, nip, dom = await asyncio.to_thread(node_ctx, p, uuid)
         except engine.StepError as e:
@@ -969,18 +974,28 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if not (p.get('outgoing_ips') and p.get('email')):
                 raise ApiError('Встроенному скрипту нужны IP панели и e-mail для сертификата — заполните их в настройках группы')
             extra.update(mode='vision', sni='', node_port=int(p.get('node_port') or 2222), country=(extra.get('loc') or '')[:2].upper())
+        if mode == 'egames':
+            if not p.get('email'):
+                raise ApiError("Сертификату Let's Encrypt нужен e-mail — укажите его в настройках группы")
+            extra.update(mode='egames', hop='ss', sni='', node_port=int(p.get('node_port') or 2222),
+                         country=(extra.get('loc') or '')[:2].upper(), exit_egames=bool(b.get('exit_egames')))
+            if extra['exit_egames']:
+                if not dom:
+                    raise ApiError('У ноды-выхода в панели адрес — IP, а ноде eGames нужен домен: задайте его на странице ноды')
+                if not node_ssh(p['id'], uuid, n['address']):
+                    raise ApiError('Чтобы переустановить выход, нужен доступ по SSH к нему — укажите его на странице ноды')
         if mode == 'xray':
             try:
                 extra.update(mode='xray', sni=xb.clean_sni(b.get('sni') or xb.SNI_SUGGEST[0]), node_port=int(p.get('node_port') or 2222),
                              country=(extra.get('loc') or '')[:2].upper())
             except ValueError as e:
                 raise ApiError(str(e)) from None
-        if mode in ('xray', 'vision'):
+        if mode in xb.ROUTED:
             if others:
                 raise ApiError('На этом сервере уже есть входы — серверному роутингу нужен сервер целиком (свой Xray на порту входа)')
             if acc.get('user') != 'root' and not acc.get('sudo_password'):
                 raise ApiError('Серверному роутингу нужен root или пользователь с sudo — бот ставит Docker')
-        elif any(o.get('mode') in ('xray', 'vision') for o in others):
+        elif any(o.get('mode') in xb.ROUTED for o in others):
             raise ApiError('На этом сервере стоит мост с серверным роутингом — проброс туда не добавить')
         remark = str(b.get('remark') or '').strip()[:90] or (f'🇷🇺 {n["name"]}' if source == 'ssh' and mode == 'haproxy' else f'{n["name"]} ⇄')
         x = {'pid': p['id'], 'node_uuid': uuid, 'node_name': n['name'], 'ip': ip, 'address': address, 'listen': listen,
@@ -1107,7 +1122,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     relay_say(x['id'], stage='convert')
                     await relay_convert(x, x['ssh'], say)
                     store.save_relay({**store.relay(x['id']), 'convert': x['convert']})
-                if x.get('mode') == 'vision':
+                if x.get('mode') == 'egames':
+                    res = await eg_run(x, p, say)
+                elif x.get('mode') == 'vision':
                     res = await vision_run(x, p, say)
                 elif x.get('mode') == 'xray':
                     res = await xray_run(x, p, say)
@@ -1121,16 +1138,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 say(f'ошибка: {e}')
                 cur = store.relay(x['id']) or {}
                 x.update(status='failed', error=str(e)[:300], log=cur.get('log') or [], stage=cur.get('stage') or x.get('stage'))
-                if x.get('mode') == 'xray' and cur.get('made'):
+                if x.get('mode') in xb.ROUTED and cur.get('made'):
                     x['made'] = cur['made']
                 store.save_relay(x)
                 return {'id': x['id'], 'ok': False, 'message': str(e), 'log': lines}
-            say('готово' if not res['bad'] else ('мост стоит, но ' + '; '.join(res['bad'])) if x.get('mode') == 'xray'
+            say('готово' if not res['bad'] else ('мост стоит, но ' + '; '.join(res['bad'])) if x.get('mode') in xb.ROUTED
                 else 'проброс стоит, но нода с сервера не открывается')
             x.update(status='ok' if not res['bad'] else 'warn', error='', bad=res['bad'], stage='done', log=store.relay(x['id'])['log'])
             store.save_relay(x)
         msg = (f'Готово: клиенты подключаются к {x.get("address") or ip}:{x["listen"]}, трафик идёт на {x["target"]}:{x["target_port"]}'
-               if not res['bad'] else f'Мост стоит, но: {"; ".join(res["bad"])}' if x.get('mode') == 'xray'
+               if not res['bad'] else f'Мост стоит, но: {"; ".join(res["bad"])}' if x.get('mode') in xb.ROUTED
                else f'Проброс стоит, но с сервера входа не открывается {", ".join(res["bad"])} — проверьте ноду')
         return {'id': x['id'], 'ok': not res['bad'], 'message': msg, 'log': lines}
 
@@ -1163,6 +1180,119 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             say('нода входа на связи с панелью')
         return {'bad': bad}
 
+    async def relay_domain(x: dict, p: dict, say) -> None:
+        """Имя входа — на домене группы (или зоне домена ноды-выхода), как у новых нод."""
+        if x.get('domain'):
+            return
+        base = p.get('base_domain') or ''
+        if not base:
+            try:
+                zones = await asyncio.to_thread(lambda: svc.cf_for(store, p).zone_names())
+            except engine.StepError:
+                zones = []
+            hit = [z for z in zones if x['target'] == z or x['target'].endswith('.' + z)]
+            base = max(hit, key=len) if hit else ''
+        if not base:
+            raise engine.StepError('не знаю, на каком домене назвать вход: задайте «домен для имён нод» в настройках группы')
+        x['domain'] = (await svc.auto_domains(store, p, (x.get('loc') or x.get('country') or 'br').lower()[:2], 1, base=base))[0]
+        x['address'] = x['domain']
+        store.save_relay({**store.relay(x['id']), 'domain': x['domain'], 'address': x['domain']})
+        say(f'имя входа: {x["domain"]}')
+
+    async def eg_site_check(r: engine.Remote, domain: str, say, tries: int = 6) -> bool:
+        from . import egames as egm
+        for _ in range(tries):
+            _, o = await asyncio.to_thread(r.run, egm.check_cmd(domain), 40)
+            if 'EG_SITE_OK' in o:
+                say(f'заглушка {domain} открывается через REALITY ✓')
+                return True
+            await asyncio.sleep(15)
+        return False
+
+    async def eg_exit(x: dict, p: dict, say) -> None:
+        """Выход (нода моста) — на чистый сервер как в eGames: сервер, профиль, хост, сквады."""
+        from . import egames as egm
+        from . import sshaccess
+        pl, n, _hosts, nip, dom = await asyncio.to_thread(node_ctx, p, x['node_uuid'])
+        if not dom or not nip:
+            raise engine.StepError('у ноды-выхода нет домена или IP — не знаю, на что выпускать сертификат')
+        ssh = node_ssh(p['id'], x['node_uuid'], n['address'])
+        if not ssh:
+            raise engine.StepError('нет доступа по SSH к ноде-выходу — укажите его на её странице')
+        r = engine.Remote({'ip': nip, **sshaccess.to_node(ssh, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}, None)
+        cf = svc.cf_for(store, p)
+        await asyncio.to_thread(cf.upsert_a, dom, nip, say)
+        await asyncio.to_thread(engine.wait_dns, dom, nip, say, 600, 15, cf)
+        secret = await asyncio.to_thread(pl.secret_key)
+        await asyncio.to_thread(egm.install, r, dom, p['email'], secret, int(p.get('node_port') or 2222), xb.env_panel_ips(p), say,
+                                [xb.SS_PORT])
+
+        def setup():
+            with engine.PANEL_LOCK:
+                return egm.setup_exit(pl, n, nip, dom, int(p.get('node_port') or 2222), x.get('exit_reality'), say)
+        made = await asyncio.to_thread(setup)
+        store.save_relay({**store.relay(x['id']), 'exit_reality': made['reality']})
+        x['exit_reality'] = made['reality']
+        PC.drop(p['id'])
+        say('жду, пока выход выйдет на связь с панелью')
+        if not await asyncio.to_thread(xb.wait_connected, pl, x['node_uuid'], 240):
+            raise engine.StepError('выход не вышел на связь с панелью за 4 минуты — откройте его в панели')
+        if not await eg_site_check(r, dom, say):
+            say('выход на связи, но заглушка через REALITY пока не открылась — проверьте ноду в панели')
+        say('выход готов')
+
+    async def eg_run(x: dict, p: dict, say) -> dict:
+        """Мост «как в eGames»: (выход — нода eGames), вход — нода eGames с REALITY «под себя» на своём домене,
+        до выхода — Shadowsocks на отдельный inbound, российские сайты — со входа напрямую."""
+        from . import egames as egm
+        if x.get('exit_egames') and not x.get('exit_done'):
+            relay_say(x['id'], 'выход: ставлю ноду как в eGames', stage='exit')
+            await eg_exit(x, p, say)
+            x['exit_done'] = True
+            store.save_relay({**store.relay(x['id']), 'exit_done': True})
+        await relay_domain(x, p, say)
+        relay_say(x['id'], stage='node')
+
+        def ctx():
+            pl, n, hosts, _nip, _dom = node_ctx(p, x['node_uuid'])
+            return pl, n, hosts
+        pl, n, hosts = await asyncio.to_thread(ctx)
+        cf = svc.cf_for(store, p)
+        await asyncio.to_thread(cf.upsert_a, x['domain'], x['ip'], say)
+        await asyncio.to_thread(engine.wait_dns, x['domain'], x['ip'], say, 600, 15, cf)
+        secret = await asyncio.to_thread(pl.secret_key)
+        r = relay_remote(x)
+        await asyncio.to_thread(egm.install, r, x['domain'], p['email'], secret, int(x.get('node_port') or 2222),
+                                xb.env_panel_ips(p), say)
+        relay_say(x['id'], 'панель: профиль моста, Shadowsocks до выхода, служебный пользователь, нода входа, хост', stage='panel')
+
+        def setup():
+            with engine.PANEL_LOCK:
+                return xb.setup_panel(pl, {**x, 'sni': x['domain'], 'hop': x.get('hop') or 'ss'}, n, hosts, say)
+        made = await asyncio.to_thread(setup)
+        x['reality'] = made.pop('reality')
+        made.pop('sni', None)
+        x.update(made=made, hosts=made['hosts'], sni=x['domain'], hop=x.get('hop') or 'ss')
+        store.save_relay({**store.relay(x['id']), 'made': made, 'hosts': made['hosts'], 'reality': x['reality'],
+                          'sni': x['domain'], 'hop': x['hop']})
+        PC.drop(p['id'])
+        relay_say(x['id'], 'жду, пока вход выйдет на связь с панелью', stage='check')
+        ok = await asyncio.to_thread(xb.wait_connected, pl, made['node'], 240) if made.get('node') else False
+        bad = [] if ok else ['нода входа не вышла на связь с панелью за 4 минуты — откройте её в панели']
+        if ok:
+            say('вход на связи с панелью')
+            if not await eg_site_check(r, x['domain'], say):
+                bad.append('вход на связи, но заглушка через REALITY не открылась — посмотрите ноду входа')
+            ss = made.get('ss') or {}
+            if ss.get('address') and ss.get('port'):
+                _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/{ss['address']}/{int(ss['port'])}' "
+                                                      '&& echo SS_OPEN || echo SS_CLOSED', 30)
+                if 'SS_OPEN' in o:
+                    say(f'порт Shadowsocks {ss["port"]} на выходе открыт со входа ✓')
+                else:
+                    bad.append(f'со входа не открывается порт {ss["port"]} на выходе ({ss["address"]}) — откройте его на выходе')
+        return {'bad': bad}
+
     async def vision_run(x: dict, p: dict, say) -> dict:
         """Вход на встроенном скрипте бота: домен в Cloudflare, VLESS TCP TLS Vision с сертификатом, затем профиль
         моста (этот же inbound + выход на ноду) и нода входа в панели."""
@@ -1173,21 +1303,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             pl, n, hosts, _nip, _dom = node_ctx(p, x['node_uuid'])
             return pl, n, hosts
         pl, n, hosts = await asyncio.to_thread(ctx)
-        if not x.get('domain'):  # имя входа — на домене группы (или зоне домена ноды-выхода), как у новых нод
-            base = p.get('base_domain') or ''
-            if not base:
-                try:
-                    zones = await asyncio.to_thread(lambda: svc.cf_for(store, p).zone_names())
-                except engine.StepError:
-                    zones = []
-                hit = [z for z in zones if x['target'] == z or x['target'].endswith('.' + z)]
-                base = max(hit, key=len) if hit else ''
-            if not base:
-                raise engine.StepError('не знаю, на каком домене назвать вход: задайте «домен для имён нод» в настройках группы')
-            x['domain'] = (await svc.auto_domains(store, p, (x.get('loc') or x.get('country') or 'br').lower()[:2], 1, base=base))[0]
-            x['address'] = x['domain']
-            store.save_relay({**store.relay(x['id']), 'domain': x['domain'], 'address': x['domain']})
-            say(f'имя входа: {x["domain"]}')
+        await relay_domain(x, p, say)
         relay_say(x['id'], stage='node')
         r = relay_remote(x)
         _, out = await asyncio.to_thread(r.run, xb.vision_prep_cmd(), 120)
@@ -1231,7 +1347,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def xray_remove(x: dict, p: dict | None, log) -> None:
         """Убрать мост с роутингом: панель (хосты, нода, профиль, сквады, служебный пользователь) и контейнер на входе."""
         if p and x.get('made'):
-            in_use = any(o['id'] != x['id'] and o.get('mode') in ('xray', 'vision') and o.get('node_uuid') == x['node_uuid']
+            in_use = any(o['id'] != x['id'] and o.get('mode') in xb.ROUTED and o.get('node_uuid') == x['node_uuid']
                          and o.get('pid') == x['pid'] for o in store.relays())
 
             def td():
@@ -1239,7 +1355,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     xb.teardown_panel(panel_of(p), x['made'], in_use, log)
             await asyncio.to_thread(td)
             PC.drop(p['id'])
-        if x.get('ip') and x.get('mode') == 'vision':
+        if x.get('ip') and x.get('mode') == 'egames':
+            _, out = await asyncio.to_thread(relay_remote(x).run, xb.stop_cmd(), 120)
+            log('нода на входе остановлена' if 'XB_STOPPED' in out else 'сервер входа: ' + engine.strip_ansi(out).strip()[-160:])
+            if p and x.get('domain'):
+                try:
+                    await asyncio.to_thread(svc.cf_for(store, p).delete_a, x['domain'], x['ip'], log)
+                except engine.StepError as e:
+                    log(f'Cloudflare: {e}')
+        elif x.get('ip') and x.get('mode') == 'vision':
             await asyncio.to_thread(rl.convert, relay_remote(x), x.get('domain') or '', log)
             if p and x.get('domain'):
                 from .runner import cf_token_of
@@ -1291,7 +1415,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not x.get('ip'):
             raise ApiError('Сервер входа ещё создаётся')
         sni = x['target'] if not engine.is_ip(x['target']) else ''
-        esni = x.get('sni') if x.get('mode') in ('xray', 'vision') else sni   # что видит ТСПУ у входа: SNI самого входа
+        esni = x.get('sni') if x.get('mode') in xb.ROUTED else sni   # что видит ТСПУ у входа: SNI самого входа
         items_entry = [('node', x['target'], int(x['target_port']), sni)]
         items_ru = [('entry', x['ip'], int(x['listen']), esni), ('node', x['target'], int(x['target_port']), sni)]
         out: dict = {'sni': sni, 'entry_sni': esni, 'mode': x.get('mode', 'haproxy'), 'entry': x.get('address') or x['ip'], 'listen': x['listen'], 'target': x['target'],
@@ -1340,7 +1464,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         x = relay_or_404(request.match_info['rid'], request)
         b = await body(request)
         target = b.get('mode') or 'xray'
-        if target not in ('xray', 'vision') or x.get('mode') == target:
+        if target not in xb.ROUTED or x.get('mode') == target:
             raise ApiError('Мост уже такого вида')
         p = store.profile(x['pid'])
         sni = ''
@@ -1349,12 +1473,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 sni = xb.clean_sni(b.get('sni') or xb.SNI_SUGGEST[0])
             except ValueError as e:
                 raise ApiError(str(e)) from None
-        elif not (p.get('outgoing_ips') and p.get('email')):
+        elif target == 'egames' and not p.get('email'):
+            raise ApiError("Сертификату Let's Encrypt нужен e-mail — укажите его в настройках группы")
+        elif target == 'vision' and not (p.get('outgoing_ips') and p.get('email')):
             raise ApiError('Встроенному скрипту нужны IP панели и e-mail для сертификата — заполните их в настройках группы')
         if any(o['id'] != x['id'] and o['ip'] == x['ip'] for o in store.relays()):
             raise ApiError('На этом сервере есть и другие входы — уберите их сначала: серверному роутингу нужен сервер целиком')
         lines: list[str] = []
-        if x.get('mode') in ('xray', 'vision') and x.get('made') and p:  # прежний мост с роутингом — убрать из панели
+        if x.get('mode') in xb.ROUTED and x.get('made') and p:  # прежний мост с роутингом — убрать из панели
             try:
                 await asyncio.to_thread(xb.teardown_panel, panel_of(p), x['made'], True, lines.append)
             except engine.StepError as e:
@@ -1367,6 +1493,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             except engine.StepError as e:
                 raise ApiError(f'Панель: {e}') from None
         stamp = time.strftime('%H:%M:%S ')
+        if target == 'egames':
+            x['hop'] = 'ss'
         x.update(mode=target, sni=sni, node_port=int(p.get('node_port') or 2222), hosts=[], status='installing', stage='ssh',
                  error='', bad=[], country=(x.get('loc') or '')[:2].upper(),
                  remark=x['remark'].replace('🇷🇺 ', '') if x.get('remark', '').startswith('🇷🇺') else x.get('remark', ''),
@@ -1384,7 +1512,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         hop = b.get('hop')
         if hop not in ('ss', 'vless'):
             raise ApiError('Связь: ss или vless')
-        if x.get('mode') not in ('xray', 'vision') or not x.get('made') or x.get('status') != 'ok':
+        if x.get('mode') not in xb.ROUTED or not x.get('made') or x.get('status') not in ('ok', 'warn'):
             raise ApiError('Связь с выходом меняется у готового моста с роутингом')
         if (x.get('hop') or 'vless') == hop:
             raise ApiError('Мост уже так связан с выходом')
@@ -1416,6 +1544,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def relay_forget(request):
         x = relay_or_404(request.match_info['rid'], request)
         engine.forget_host(runner.known_hosts(), x['ip'], int((x.get('ssh') or {}).get('port') or 22))
+        if x.get('exit_egames') and not x.get('exit_done'):  # выход тоже переустанавливают — и его ключ
+            for hh in {x['target'], resolve(x['target']) if not engine.is_ip(x['target']) else ''} - {''}:
+                engine.forget_host(runner.known_hosts(), hh)
         return J({'ok': True, 'message': 'Ключ забыт — при следующем входе бот запомнит новый'})
 
     @r.delete('/api/relays/{rid}')
@@ -1437,7 +1568,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     lines.append(f'Bobr Cloud: {e}')
             return J({'ok': True, 'message': 'Вход убран', 'log': lines})
         lock = relay_locks.setdefault(x['ip'], asyncio.Lock())
-        if x.get('mode') in ('xray', 'vision'):
+        if x.get('mode') in xb.ROUTED:
             async with lock:
                 store.delete_relay(x['id'])
                 try:
