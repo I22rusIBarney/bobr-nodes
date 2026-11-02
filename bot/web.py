@@ -825,8 +825,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if x.get('convert'):
             out.append({'code': 'convert', 'title': 'Остановка ноды на сервере'})
         if x.get('mode') == 'egames':
-            if x.get('exit_egames'):
-                out.append({'code': 'exit', 'title': 'Выход: нода как в eGames'})
+            out.append({'code': 'exit', 'title': 'Выход: на связи или ставлю ноду как в eGames'})
             out += [{'code': 'node', 'title': 'Вход: нода как в eGames (домен, сертификат, заглушка)'},
                     {'code': 'panel', 'title': 'Профиль моста, Shadowsocks до выхода, хост'}, {'code': 'check', 'title': 'Вход на связи и проверен'}]
         elif x.get('mode') == 'vision':
@@ -1275,11 +1274,19 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         """Мост «как в eGames»: (выход — нода eGames), вход — нода eGames с REALITY «под себя» на своём домене,
         до выхода — Shadowsocks на отдельный inbound, российские сайты — со входа напрямую."""
         from . import egames as egm
-        if x.get('exit_egames') and not x.get('exit_done'):
+        _pl0, n0, _h0, _nip0, _dom0 = await asyncio.to_thread(node_ctx, p, x['node_uuid'])
+        down = not n0.get('isConnected')
+        if down or (x.get('exit_egames') and not x.get('exit_done')):
+            if down:  # выход не на связи (сервер переустановили начисто) — ставим его сами, без отдельной кнопки
+                say(f'выход {n0["name"]} не на связи с панелью — ставлю на него ноду как в eGames')
+                x['exit_egames'] = True
+                store.save_relay({**store.relay(x['id']), 'exit_egames': True})
             relay_say(x['id'], 'выход: ставлю ноду как в eGames', stage='exit')
             await eg_exit(x, p, say)
             x['exit_done'] = True
             store.save_relay({**store.relay(x['id']), 'exit_done': True})
+        else:
+            say(f'выход {n0["name"]} на связи с панелью — его не трогаю')
         await relay_domain(x, p, say)
         relay_say(x['id'], stage='node')
 
@@ -1315,8 +1322,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 bad.append('вход на связи, но заглушка через REALITY не открылась — посмотрите ноду входа')
             ss = made.get('ss') or {}
             if ss.get('address') and ss.get('port'):
-                _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/{ss['address']}/{int(ss['port'])}' "
-                                                      '&& echo SS_OPEN || echo SS_CLOSED', 30)
+                o = ''
+                for _ in range(6):  # выход перезапускает Xray с новым inbound — даём ему до минуты
+                    _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/{ss['address']}/{int(ss['port'])}' "
+                                                          '&& echo SS_OPEN || echo SS_CLOSED', 30)
+                    if 'SS_OPEN' in o:
+                        break
+                    await asyncio.sleep(10)
                 if 'SS_OPEN' in o:
                     say(f'порт Shadowsocks {ss["port"]} на выходе открыт со входа ✓')
                 else:
