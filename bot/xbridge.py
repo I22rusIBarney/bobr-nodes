@@ -175,6 +175,14 @@ def ensure_ss_exit(panel: engine.Panel, pnode: dict, log, port: int = SS_PORT) -
     if inb:
         port = int(inb.get('port') or port)
     else:
+        # тег уникален во всей панели: прежний вход моста мог остаться в старом профиле выхода
+        # (выход переставили на новый профиль) — переносим, убрав его оттуда
+        for op in profiles:
+            oc = op.get('config') or {}
+            if op['uuid'] != prof['uuid'] and any(i.get('tag') == tag for i in oc.get('inbounds', [])):
+                panel.call('PATCH', '/api/config-profiles', {'uuid': op['uuid'], 'config': {
+                    **oc, 'inbounds': [i for i in oc.get('inbounds', []) if i.get('tag') != tag]}})
+                log(f'панель: прежний Shadowsocks-вход моста убран из профиля «{op.get("name", "")}»')
         used = {int(i.get('port') or 0) for i in cfg.get('inbounds', [])}
         while port in used:
             port += 1

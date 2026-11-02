@@ -328,3 +328,35 @@ def test_user_without_uuid_panel3():
     assert patch[2] == {'username': 'bridge_exitnodeuuid', 'activeInternalSquads': ['sq-ss', 'sq1']}
     assert u['ssPassword'] == 'pw' and xb.user_key(u) == '5'
     assert not any(c[:2] == ('POST', '/api/users') for c in calls)
+
+
+def test_ss_inbound_moves_from_old_exit_profile():
+    """Выход переставили на новый профиль, а вход моста (тот же тег) остался в старом — переносим, а не 409."""
+    tag = xb.ss_tag('exit-node-uuid-1234')
+    profiles = [{'uuid': 'p-old', 'name': 'Old', 'inbounds': [], 'config': {'inbounds': [{'tag': tag, 'port': 9999}]}},
+                {'uuid': 'p-new', 'name': 'eGames', 'inbounds': [{'uuid': 'i-eg', 'tag': 'STEAL'}],
+                 'config': {'inbounds': [{'tag': 'STEAL', 'port': 443}]}}]
+    calls, squads = [], [{'uuid': 'sq-ss', 'name': xb.ss_squad_name('exit-node-uuid-1234'), 'inbounds': [{'uuid': 'gone'}]}]
+
+    class P:
+        def call(self, method, path, body=None):
+            calls.append((method, path, body))
+            if (method, path) == ('GET', '/api/config-profiles'):
+                return {'configProfiles': profiles}
+            if (method, path) == ('PATCH', '/api/config-profiles'):
+                pr = next(p for p in profiles if p['uuid'] == body['uuid'])
+                tags = [i['tag'] for i in body['config']['inbounds']]
+                assert not any(tag in [i['tag'] for i in o['config']['inbounds']] for o in profiles if o is not pr) or tag not in tags
+                pr['config'] = body['config']
+                pr['inbounds'] = [{'uuid': 'i-' + t, 'tag': t} for t in tags]
+                return pr
+            if (method, path) == ('PATCH', '/api/nodes') or (method, path) == ('PATCH', '/api/internal-squads'):
+                return {}
+            if (method, path) == ('GET', '/api/internal-squads'):
+                return {'internalSquads': squads}
+            raise AssertionError((method, path))
+    node = {'uuid': 'exit-node-uuid-1234', 'address': 'swe.example.com',
+            'configProfile': {'activeConfigProfileUuid': 'p-new', 'activeInbounds': [{'uuid': 'i-eg'}]}}
+    ss = xb.ensure_ss_exit(P(), node, lambda t: None)
+    assert profiles[0]['config']['inbounds'] == [] and ss['port'] == 9999 and ss['inbound'] == 'i-' + tag
+    assert ('PATCH', '/api/internal-squads', {'uuid': 'sq-ss', 'inbounds': ['i-' + tag]}) in calls
