@@ -976,7 +976,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if mode == 'egames':
             if not p.get('email'):
                 raise ApiError("Сертификату Let's Encrypt нужен e-mail — укажите его в настройках группы")
-            extra.update(mode='egames', hop='ss', sni='', node_port=int(p.get('node_port') or 2222),
+            try:
+                fm = engine.final_mask(b.get('final_mask_json') or None) if b.get('final_mask', True) else False
+            except engine.StepError as e:
+                raise ApiError(str(e)) from None
+            extra.update(mode='egames', hop='ss', sni='', node_port=int(p.get('node_port') or 2222), final_mask=fm,
                          country=(extra.get('loc') or '')[:2].upper(), exit_egames=bool(b.get('exit_egames')))
             if extra['exit_egames']:
                 if not dom:
@@ -1219,10 +1223,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         srv = next((s for s in srvs if (server_id and int(s['id']) == int(server_id)) or (ip and s.get('ip') == ip)), None)
         return (srv or {}).get('root_password') or ''
 
-    async def eg_site_check(r: engine.Remote, domain: str, say, tries: int = 6) -> bool:
+    async def eg_site_check(r: engine.Remote, domain: str, say, tries: int = 6, port: int = 443) -> bool:
         from . import egames as egm
         for _ in range(tries):
-            _, o = await asyncio.to_thread(r.run, egm.check_cmd(domain), 40)
+            _, o = await asyncio.to_thread(r.run, egm.check_cmd(domain, port), 40)
             if 'EG_SITE_OK' in o:
                 say(f'заглушка {domain} открывается через REALITY ✓')
                 return True
@@ -1300,7 +1304,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         secret = await asyncio.to_thread(pl.secret_key)
         r = relay_remote(x)
         await asyncio.to_thread(egm.install, r, x['domain'], p['email'], secret, int(x.get('node_port') or 2222),
-                                xb.env_panel_ips(p), say)
+                                xb.env_panel_ips(p), say, (), int(x.get('listen') or 443))
         relay_say(x['id'], 'панель: профиль моста, Shadowsocks до выхода, служебный пользователь, нода входа, хост', stage='panel')
 
         def setup():
@@ -1318,7 +1322,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         bad = [] if ok else ['нода входа не вышла на связь с панелью за 4 минуты — откройте её в панели']
         if ok:
             say('вход на связи с панелью')
-            if not await eg_site_check(r, x['domain'], say):
+            if not await eg_site_check(r, x['domain'], say, port=int(x.get('listen') or 443)):
                 bad.append('вход на связи, но заглушка через REALITY не открылась — посмотрите ноду входа')
             ss = made.get('ss') or {}
             if ss.get('address') and ss.get('port'):

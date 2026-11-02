@@ -64,7 +64,7 @@ class FakePanel:
 
     def attach(self, node, prof, inbounds, squads, node_port, log, tls=True, also=()):
         assert squads == ['sq1'] and node_port == 2222
-        self.tls = tls
+        self.tls, self.attached_node = tls, node
         self.nodes.append({'uuid': 'node-entry', 'address': node['domain'], 'name': node['name']})
         self.hosts.append({'uuid': 'host-entry', 'address': node['domain'], 'port': inbounds[0]['port'],
                            'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbounds[0]['uuid']}})

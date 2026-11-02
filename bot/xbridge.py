@@ -453,7 +453,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     sid = keep.get('sid') or ('' if vision else secrets.token_hex(8 if eg else 4))
     name = profile_name(x['ip'], vision, eg)
     if eg:  # вход как нода eGames: REALITY «под себя» на домене входа + выход и маршруты моста
-        base = egames.profile_config(x['domain'], tag, priv, sid)
+        base = egames.profile_config(x['domain'], tag, priv, sid, int(x.get('listen') or 443))
         out = {k: v for k, v in outbound.items() if not k.startswith('_')}
         cfg = {**base, 'outbounds': [out, *base['outbounds']],
                'routing': {'rules': bridge_rules(base['routing']['rules'], tag, {'BLOCK'}, bool(ss))}}
@@ -487,7 +487,11 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         log(f'панель: профиль «{name}» создан — ' + (f'Vision TLS на {x["domain"]}' if vision else f'REALITY «под себя» на {x["domain"]}, как у eGames'
                                                     if eg else f'REALITY с SNI {x["sni"]}') + f', {via}')
     inbound = next(i for i in prof['inbounds'] if i['tag'] == tag)
-    node = {'ip': x['ip'], 'domain': x['domain'] if vision or eg else (x.get('address') or x['ip']), 'name': (x.get('remark') or name)[:30],
+    mask = x.get('final_mask')
+    if eg and mask is None:  # вход eGames — с Final Mask (фрагментация ClientHello), если явно не выключили
+        mask = engine.final_mask(None)
+    node = {'host': {'final_mask': mask} if mask else {},
+            'ip': x['ip'], 'domain': x['domain'] if vision or eg else (x.get('address') or x['ip']), 'name': (x.get('remark') or name)[:30],
             'country': x.get('country') or '', 'remark': x.get('remark') or name}
     panel.attach(node, prof, [inbound], squads, int(x.get('node_port') or 2222), log, tls=vision)
     entry = next((n for n in panel.call('GET', '/api/nodes') if n['address'] == node['domain']), None)
@@ -497,8 +501,9 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
     if not vision:
         cur_in = next((i for i in (cfg.get('inbounds') or []) if i.get('tag') == tag), {})
         sni_now = (((cur_in.get('streamSettings') or {}).get('realitySettings') or {}).get('serverNames') or [x.get('sni') or x.get('domain')])[0]
-        for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
-            panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
+        for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP); Final Mask — и на прежнем хосте
+            panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome',
+                                               **({'finalMask': mask} if mask else {})})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
             'hosts': hosts_now, 'squads': squads, 'user': user_key(user), 'user_id': user.get('id'), 'ip': x['ip'], 'ss': ss, 'username': bridge_username(pnode['uuid']),
             'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}

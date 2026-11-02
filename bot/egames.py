@@ -35,8 +35,8 @@ def profile_name(ip: str) -> str:
     return re.sub(r'[^A-Za-z0-9_ -]', '-', f'eGames {ip}')[:30]
 
 
-def inbound(domain: str, tag: str, private_key: str, short_id: str) -> dict:
-    return {'tag': tag, 'port': 443, 'listen': '0.0.0.0', 'protocol': 'vless',
+def inbound(domain: str, tag: str, private_key: str, short_id: str, port: int = 443) -> dict:
+    return {'tag': tag, 'port': int(port), 'listen': '0.0.0.0', 'protocol': 'vless',
             'settings': {'clients': [], 'decryption': 'none'},
             'sniffing': {'enabled': True, 'destOverride': ['http', 'tls', 'quic']},
             'streamSettings': {'network': 'tcp', 'security': 'reality',
@@ -45,11 +45,11 @@ def inbound(domain: str, tag: str, private_key: str, short_id: str) -> dict:
                                                    'privateKey': private_key, 'serverNames': [domain]}}}
 
 
-def profile_config(domain: str, tag: str, private_key: str, short_id: str) -> dict:
+def profile_config(domain: str, tag: str, private_key: str, short_id: str, port: int = 443) -> dict:
     """Профиль ноды точь-в-точь как у eGames (create_config_profile)."""
     return {'log': {'loglevel': 'warning'},
             'dns': {'queryStrategy': 'UseIPv4', 'servers': [{'address': 'https://dns.google/dns-query', 'skipFallback': False}]},
-            'inbounds': [inbound(domain, tag, private_key, short_id)],
+            'inbounds': [inbound(domain, tag, private_key, short_id, port)],
             'outbounds': [{'tag': 'DIRECT', 'protocol': 'freedom'}, {'tag': 'BLOCK', 'protocol': 'blackhole'}],
             'routing': {'rules': [{'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'BLOCK'},
                                   {'type': 'field', 'protocol': ['bittorrent'], 'outboundTag': 'BLOCK'}]}}
@@ -146,7 +146,8 @@ FALLBACK_HTML = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><me
                  'construction. Please check back later.</p></body></html>')
 
 
-def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips: list[str], extra_ports: list[int] = ()) -> str:
+def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips: list[str], extra_ports: list[int] = (),
+                port: int = 443) -> str:
     """Сервер ноды «как у eGames». Старую ноду (бота, Nuvrion, eGames) в /opt/remnanode останавливает и откладывает."""
     b64 = lambda t: base64.b64encode(t.encode()).decode()  # noqa: E731
     d = shlex.quote(domain)
@@ -160,7 +161,7 @@ def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips:
         f'if [ -f {NODE_DIR}/docker-compose.yml ] && ! grep -q remnawave-nginx {NODE_DIR}/docker-compose.yml; then '
         f'(cd {NODE_DIR} && docker compose down >/dev/null 2>&1); mv {NODE_DIR} "{NODE_DIR}.before-egames-$(date +%Y%m%d-%H%M%S)"; '
         'echo "EG_MOVED старая нода отложена"; fi; '
-        'for p in 443 80; do if ss -Hltnp "sport = :$p" | grep -vE \'"(rw-core|xray|nginx|docker-proxy)"\' | grep -q .; then '
+        f'for p in {int(port)} 80; do if ss -Hltnp "sport = :$p" | grep -vE \'"(rw-core|xray|nginx|docker-proxy)"\' | grep -q .; then '
         'echo "EG_BUSY $p"; ss -Hltnp "sport = :$p" | head -2; exit 0; fi; done; '
         '(apt-get update -qq; apt-get install -y -qq curl ca-certificates unzip certbot ufw >/dev/null) >/dev/null 2>&1; '
         'if ! command -v docker >/dev/null; then curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || '
@@ -183,7 +184,7 @@ def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips:
         f'echo {b64(FALLBACK_HTML)} | base64 -d > /var/www/html/index.html; fi; rm -rf "$T"; fi; '
         f'mkdir -p {NODE_DIR} && cd {NODE_DIR} && echo {b64(compose_text(secret, node_port))} | base64 -d > docker-compose.yml '
         f'&& chmod 600 docker-compose.yml && echo {b64(nginx_conf(domain))} | base64 -d > nginx.conf; '
-        'if [ $UFW = 1 ]; then ufw allow 443/tcp comment bobr-egames >/dev/null; '
+        f'if [ $UFW = 1 ]; then ufw allow {int(port)}/tcp comment bobr-egames >/dev/null; '
         + ''.join(f'ufw allow {int(pt)} comment bobr-egames >/dev/null; ' for pt in extra_ports) +
         (f'for ip in {ips}; do ufw allow from "$ip" to any port {int(node_port)} proto tcp comment bobr-egames >/dev/null; done; '
          if ips else f'ufw allow {int(node_port)}/tcp comment bobr-egames >/dev/null; ') + 'fi; '
@@ -195,9 +196,10 @@ def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips:
 
 
 def install(r: engine.Remote, domain: str, email: str, secret: str, node_port: int, panel_ips: list[str], log,
-            extra_ports: list[int] = ()) -> None:
-    log(f'ставлю ноду как в eGames на {domain}: Docker, сертификат, NGINX-заглушка, remnawave/node (до 5 минут)')
-    rc, out = r.run(install_cmd(domain, email, secret, node_port, panel_ips, extra_ports), 1200)
+            extra_ports: list[int] = (), port: int = 443) -> None:
+    log(f'ставлю ноду как в eGames на {domain}' + (f' (порт {port})' if int(port) != 443 else '') +
+        ': Docker, сертификат, NGINX-заглушка, remnawave/node (до 5 минут)')
+    rc, out = r.run(install_cmd(domain, email, secret, node_port, panel_ips, extra_ports, port), 1200)
     out = engine.strip_ansi(out)
     if 'EG_MOVED' in out:
         log('старая нода на сервере остановлена и отложена в /opt/remnanode.before-egames-…')
@@ -215,9 +217,10 @@ def install(r: engine.Remote, domain: str, email: str, secret: str, node_port: i
     log('NGINX-заглушка и remnawave/node запущены')
 
 
-def check_cmd(domain: str) -> str:
-    """Сайт-заглушка открывается через Xray (443 → REALITY → сокет NGINX): так проверяет и скрипт eGames."""
-    return (f'curl -s --max-time 10 --resolve {shlex.quote(domain)}:443:127.0.0.1 https://{shlex.quote(domain)} | '
+def check_cmd(domain: str, port: int = 443) -> str:
+    """Сайт-заглушка открывается через Xray (порт → REALITY → сокет NGINX): так проверяет и скрипт eGames."""
+    d = shlex.quote(domain)
+    return (f'curl -s --max-time 10 --resolve {d}:{int(port)}:127.0.0.1 https://{d}:{int(port)} | '
             'grep -qi "<html" && echo EG_SITE_OK || echo EG_SITE_NO')
 
 

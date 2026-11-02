@@ -2661,15 +2661,18 @@ function relayAddView(pid, uuid) {
   const R = NEWRL, { f, F } = R, status = statusLine();
   const v = h('div', { class: 'relay-add' }, ...title('Новый вход', mid(n.name, 18)),
     h('div', { class: 'subtitle' }, 'Клиенты подключаются к серверу входа, а в интернет выходят с этой ноды. Если заблокируют вход — меняется только вход.'));
-  v.append(group('Вид моста', [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'egames', label: 'eGames' }, { value: 'vision', label: 'Vision' }, { value: 'xray', label: 'REALITY' }, { value: 'haproxy', label: 'Проброс' }], R.mode, x => { R.mode = x; UI.nav.refresh(); }, 'fill')),
-    ...(R.mode === 'egames' ? [row({ title: 'Переустановить и выход', sub: `${mid(n.name, 20)} — тоже нодой как в eGames (для чистого сервера; нужен его SSH)`, cls: 'wrap', chevron: false,
-      right: UI.toggle(!!R.exitEg, on => { R.exitEg = on; }, 'Выход') })] : []),
-    ...(R.mode === 'xray' ? [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'SNI — какой сайт видит ТСПУ'), UI.chips(XB_SNI.map(x => ({ value: x, label: x })), XB_SNI.includes(R.sni) ? R.sni : undefined, x => { R.sni = x; UI.nav.refresh(); })),
-      h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Свой SNI', h('span', { class: 'opt' }, ' необязательно')), textIn(XB_SNI.includes(R.sni) ? '' : R.sni, 'www.example.com', x => { R.sni = x.trim() || XB_SNI[0]; }, true))] : [])],
-    R.mode === 'egames' ? 'Как в скриптах eGames: на входе нода с REALITY «под себя» — свой домен на вашем Cloudflare, сертификат и сайт-заглушка за NGINX. До выхода — Shadowsocks на отдельный вход только для моста, российские сайты открываются со входа напрямую. Включите «Переустановить и выход», если сервер выхода чистый.'
-      : R.mode === 'vision' ? 'На вход бот ставит свой встроенный скрипт, как на обычную ноду: домен на вашем Cloudflare, сертификат, VLESS TCP TLS Vision. Дальше — выход на эту ноду внутри Европы, в интернет — с её IP. Нода видит настоящие IP пользователей.'
-      : R.mode === 'xray' ? 'На входе своя нода с REALITY: ТСПУ видит обращение к выбранному сайту, а не домен ноды. До ноды трафик идёт внутри Европы, в интернет — с её IP. Нода видит настоящие IP пользователей.'
-      : 'Вход пересылает подключения на ноду как есть: клиент открывает TLS с доменом ноды. Помогает от блокировки IP, но не от блокировки домена.'));
+  R.mode = 'egames';
+  const portRow = [h('div', { class: 'seg-row' }, UI.segmented([{ value: 'std', label: 'Стандартный 443' }, { value: 'custom', label: 'Свой порт' }],
+      R.portMode || 'std', x => { R.portMode = x; f.listen = x === 'std' ? '443' : (R.customPort || lsGet('port', '8443')); UI.nav.refresh(); }, 'fill'))];
+  if (R.portMode === 'custom') portRow.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт'),
+    textIn(f.listen, '8443', x => { f.listen = x.replace(/\D/g, ''); R.customPort = f.listen; }, true, 'right')));
+  v.append(group('Мост как в eGames', [
+    row({ title: 'Переустановить и выход', sub: `${mid(n.name, 20)} — тоже нодой как в eGames (бот и сам поставит выход, если он не на связи)`, cls: 'wrap', chevron: false,
+      right: UI.toggle(!!R.exitEg, on => { R.exitEg = on; }, 'Выход') }),
+    row({ title: 'Final Mask', sub: 'фрагментация ClientHello на хосте входа — помогает, когда ТСПУ режет тяжёлые соединения', cls: 'wrap', chevron: false,
+      right: UI.toggle(R.mask !== false, on => { R.mask = on; }, 'Final Mask') })],
+    'На входе нода с REALITY «под себя»: свой домен на вашем Cloudflare, сертификат и сайт-заглушка за NGINX. До выхода — Shadowsocks на отдельный вход только для моста, российские сайты открываются со входа напрямую.'));
+  v.append(group('Порт входа', portRow, R.portMode === 'custom' ? 'Нестандартный порт: Xray входа слушает его, 443 на сервере остаётся свободным. Облачный фаервол откройте сами — ufw бот откроет.' : 'Клиенты подключаются к 443 — как к обычному сайту.'));
   v.append(h('div', { class: 'seg-row', style: 'margin:0 var(--gutter) var(--s4)' }, UI.segmented([{ value: 'buy', label: 'Купить' }, { value: 'server', label: 'Купленный' }, { value: 'ssh', label: 'Свой сервер' }],
     R.src, x => { R.src = x; UI.nav.refresh(); }, 'fill')));
   const redraw = () => { if (document.querySelector('#root .relay-add')) UI.nav.refresh(); };
@@ -2703,31 +2706,27 @@ function relayAddView(pid, uuid) {
         : [row({ title: 'Свободных серверов нет', sub: conv.length ? 'можно переделать сервер с нодой — ниже' : 'купите новый', cls: 'is-dim wrap', chevron: false })],
         'Пароль root бот возьмёт из Bobr Cloud.'));
       if (conv.length) v.append(group('С нодой — переделать в мост', conv.map(x => pickRow(x, [x.ip, 'нода ' + (x.node.domain || x.ip) + ' будет убрана'].join(' · '))),
-        'Бот остановит ноду на сервере, уберёт её и её хосты из панели и A-запись из Cloudflare, затем поставит проброс. Файлы ноды не удаляются — остаются в /opt/remnanode.bridge-… на сервере. Пользователи этой ноды переключатся на другие ноды подписки.'));
+        'Бот остановит ноду на сервере, уберёт её и её хосты из панели и A-запись из Cloudflare, затем поставит мост. Файлы ноды не удаляются — остаются в /opt/remnanode.bridge-… на сервере. Пользователи этой ноды переключатся на другие ноды подписки.'));
       if (no.length) v.append(h('div', { class: 'group-f', style: 'margin:0 var(--gutter) var(--s4)' }, 'Не подходят: ' + no.slice(0, 4).map(x => `${x.name || x.ip} — ${x.why}`).join('; ') + (no.length > 4 ? '…' : '')));
     }
   } else {
     v.append(group('Сервер', [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'IP сервера'), textIn(f.ip, '203.0.113.10', x => { f.ip = x.trim(); }, true))]),
       h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Доступ по SSH'), h('div', { class: 'list' }, sshFields(F, {}, n.bot_key)),
-        h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — чтобы поставить HAProxy и открыть порт.')));
+        h('div', { class: 'group-f' }, 'Нужен root или пользователь с sudo — бот ставит Docker, сертификат и ноду.')));
   }
-  v.append(group(null, UI.fold({ title: 'Порты и название', summary: `вход ${f.listen || 443} → нода ${f.target_port}`, key: 'rl-more', body: () => [
-    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт входа'), textIn(f.listen, '443', x => { f.listen = x.replace(/\D/g, ''); }, true)),
-    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Порт ноды'), textIn(f.target_port, '443', x => { f.target_port = x.replace(/\D/g, ''); }, true)),
-    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста в подписке', h('span', { class: 'opt' }, ' необязательно')), textIn(f.remark, R.src === 'ssh' ? '🇷🇺 ' + n.name : n.name + ' ⇄', x => { f.remark = x; })),
-    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Адрес для клиентов', h('span', { class: 'opt' }, ' необязательно')), textIn(f.address, 'IP входа или entry.example.com', x => { f.address = x.trim(); }, true)),
-    h('div', { class: 'group-f', style: 'padding:0 var(--gutter)' }, `Порт ноды — порт её хостов (${n.relay_port || 443}); копируются хосты на этом порту. Облачный фаервол откройте сами — ufw бот откроет.`)] })));
+  v.append(group(null, UI.fold({ title: 'Название', summary: f.remark || n.name + ' ⇄', key: 'rl-more', body: () => [
+    h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Название хоста в подписке', h('span', { class: 'opt' }, ' необязательно')), textIn(f.remark, n.name + ' ⇄', x => { f.remark = x; }))] })));
   const pick = R.src === 'buy' && R.cat && !R.cat.error ? (R.cat.locations.find(l => l.code === R.loc) || { offers: [] }).offers.find(o => o.idx === R.idx) : null;
   const conv = R.src === 'server' && R.convert && R.servers && !R.servers.error ? R.servers.find(x => x.id === R.sid) : null;
   const go = h('button', { class: conv ? 'btn danger' : 'btn', type: 'button', disabled: (R.src === 'buy' && !pick) || (R.src === 'server' && !R.sid) },
     R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : conv ? 'Убрать ноду и поставить мост' : R.mode === 'haproxy' ? 'Поставить проброс' : 'Поставить мост');
   go.onclick = UI.busy(go, async () => {
-    if (R.src === 'buy' && !await UI.ask({ title: 'Купить сервер под вход?', message: `${rubK(pick.price_kop)} в месяц спишется с баланса Bobr Cloud. Бот поставит на сервер проброс на ноду ${n.name}.`, buttons: [{ id: 'y', text: 'Купить' }] })) return;
+    if (R.src === 'buy' && !await UI.ask({ title: 'Купить сервер под вход?', message: `${rubK(pick.price_kop)} в месяц спишется с баланса Bobr Cloud. Бот поставит на сервер мост к ноде ${n.name}.`, buttons: [{ id: 'y', text: 'Купить' }] })) return;
     if (conv && !await UI.ask({ title: 'Убрать ноду ' + mid(conv.node.domain || conv.ip, 30) + '?', message: 'Нода на этом сервере перестанет работать и пропадёт из панели и подписок. Сервер станет входом для ' + n.name + '.', buttons: [{ id: 'y', text: 'Убрать и сделать мостом', type: 'destructive' }] })) return;
     try {
       const what = R.mode === 'haproxy' ? 'HAProxy' : 'мост';
       showStatus(status, { ok: true, message: R.src === 'buy' ? 'Покупаю сервер…' : conv ? `Останавливаю ноду и ставлю ${what}…` : `Начинаю ставить ${what}…` });
-      const body = { ...f, mode: R.mode, sni: R.mode === 'xray' ? R.sni : undefined, exit_egames: R.mode === 'egames' ? !!R.exitEg : undefined, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}), background: true };
+      const body = { ...f, mode: R.mode, sni: R.mode === 'xray' ? R.sni : undefined, exit_egames: !!R.exitEg, final_mask: R.mask !== false, final_mask_json: R.mask !== false ? lsGet('final_mask_json', MASK_DEF) : undefined, source: R.src, ...(R.src === 'ssh' ? F : {}), ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : {}), ...(R.src === 'server' ? { server_id: R.sid, convert: !!conv } : {}), background: true };
       const r = await api(`profiles/${pid}/nodes/${uuid}/relays`, 'POST', body);
       NEWRL = null; await reloadNode(pid, uuid);
       UI.nav.back(); UI.nav.push(() => relayView(pid, uuid, r.id));
@@ -2914,12 +2913,6 @@ function relayView(pid, uuid, rid) {
     if (x.mode !== 'egames') rows.push(row({ icon: 'shield', color: 'amber', title: 'Переделать как в eGames', cls: 'wrap',
       sub: shared ? 'на сервере есть другие входы — сначала уберите их' : 'REALITY «под себя» на своём домене, до выхода — Shadowsocks',
       onClick: shared ? null : () => toEgamesSheet(pid, uuid, x, n) }));
-    if (x.mode !== 'vision') rows.push(row({ icon: 'shield', color: 'green', title: 'Переделать на Vision TLS', cls: 'wrap',
-      sub: shared ? 'на сервере есть другие входы — сначала уберите их' : 'встроенный скрипт бота, как на обычных нодах: свой домен и сертификат',
-      onClick: shared ? null : () => toVision(pid, uuid, x) }));
-    if (x.mode !== 'xray') rows.push(row({ icon: 'route', color: 'violet', title: 'Переделать на REALITY', cls: 'wrap',
-      sub: shared ? 'на сервере есть другие входы — сначала уберите их' : 'нода с REALITY и SNI популярного сайта',
-      onClick: shared ? null : () => toXraySheet(pid, uuid, x) }));
     v.insertBefore(group('Переделать мост', rows, 'Сервер и его оплата не меняются. Прежний мост убирается из панели и с сервера, клиентам нужно обновить подписку.'), v.children[2] || null);
   }
   if (x.ip && !running) {
