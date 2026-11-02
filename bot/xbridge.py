@@ -303,14 +303,24 @@ def find_user(panel: engine.Panel, name: str, scan: bool = False) -> dict | None
     return None
 
 
+def user_ref(u: dict) -> dict:
+    """Чем указать пользователя в PATCH /api/users: uuid, а в панели 3.x у пользователя его может не быть — тогда username."""
+    return {'uuid': u['uuid']} if u.get('uuid') else {'username': u['username']}
+
+
+def user_key(u: dict) -> str:
+    """Для DELETE /api/users/{…}: uuid, в панели 3.x — числовой id."""
+    return str(u.get('uuid') or u.get('id') or '')
+
+
 def ensure_user(panel: engine.Panel, exit_uuid: str, squads: list[str], log) -> dict:
     """Служебный пользователь моста: бессрочный, без лимита трафика, в сквадах выхода."""
     name = bridge_username(exit_uuid)
     u = find_user(panel, name)
-    if u and u.get('uuid'):
+    if u and u.get('username'):
         have = _squad_ids(u)
         if not set(squads) <= have:
-            u = panel.call('PATCH', '/api/users', {'uuid': u['uuid'], 'activeInternalSquads': sorted(have | set(squads))})
+            u = _merge(u, panel.call('PATCH', '/api/users', {**user_ref(u), 'activeInternalSquads': sorted(have | set(squads))}))
         log(f'панель: служебный пользователь моста {name} уже есть')
         return u
     exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3650)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
@@ -325,11 +335,17 @@ def ensure_user(panel: engine.Panel, exit_uuid: str, squads: list[str], log) -> 
         if not u:
             raise
         if not set(squads) <= _squad_ids(u):
-            u = panel.call('PATCH', '/api/users', {'uuid': u['uuid'], 'activeInternalSquads': sorted(_squad_ids(u) | set(squads))})
+            u = _merge(u, panel.call('PATCH', '/api/users', {**user_ref(u), 'activeInternalSquads': sorted(_squad_ids(u) | set(squads))}))
         log(f'панель: служебный пользователь моста {name} уже есть')
         return u
     log(f'панель: создан служебный пользователь моста {name}')
     return u
+
+
+def _merge(u: dict, resp) -> dict:
+    """Ответ PATCH — пользователь целиком; если панель вернула не его, оставляем прежнего."""
+    r = _unwrap(resp)
+    return {**u, **r} if r and r.get('username') == u.get('username') else u
 
 
 def squads_with(panel: engine.Panel, inbound_uuid: str) -> list[str]:
@@ -476,7 +492,7 @@ def setup_panel(panel: engine.Panel, x: dict, pnode: dict, hosts: list[dict], lo
         for hu in hosts_now:  # SNI хоста — как у REALITY (панель подставила бы адрес-IP)
             panel.call('PATCH', '/api/hosts', {'uuid': hu, 'sni': sni_now, 'fingerprint': 'chrome'})
     return {'profile': prof['uuid'], 'inbound': inbound['uuid'], 'node': entry['uuid'] if entry else '',
-            'hosts': hosts_now, 'squads': squads, 'user': user.get('uuid'), 'user_id': user.get('id'), 'ip': x['ip'], 'ss': ss, 'username': bridge_username(pnode['uuid']),
+            'hosts': hosts_now, 'squads': squads, 'user': user_key(user), 'user_id': user.get('id'), 'ip': x['ip'], 'ss': ss, 'username': bridge_username(pnode['uuid']),
             'reality': {'private': priv, 'sid': sid}, 'sni': sni_now}
 
 

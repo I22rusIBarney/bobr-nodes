@@ -308,3 +308,23 @@ def test_bridge_rules_replace_previous():
     assert [r.get('outboundTag') for r in out] == ['BLOCK', xb.OUT_TAG, 'DIRECT']
     out = xb.bridge_rules(out, 'T', {'BLOCK'}, True)
     assert sum(1 for r in out if r.get('ip') == ['geoip:ru']) == 1
+
+
+def test_user_without_uuid_panel3():
+    """Панель 3.x: у пользователя нет uuid (есть id и username) — находим и обновляем по имени."""
+    calls = []
+
+    class P:
+        def call(self, method, path, body=None):
+            calls.append((method, path, body))
+            if path.startswith('/api/users/by-username/'):
+                return {'id': 5, 'username': path.rsplit('/', 1)[1], 'vlessUuid': 'v', 'ssPassword': 'pw',
+                        'activeInternalSquads': [{'uuid': 'sq1'}]}
+            if (method, path) == ('PATCH', '/api/users'):
+                return {'id': 5, 'username': body['username'], 'activeInternalSquads': [{'uuid': s} for s in body['activeInternalSquads']]}
+            raise AssertionError((method, path))
+    u = xb.ensure_user(P(), 'exit-node-uuid-1234', ['sq1', 'sq-ss'], lambda t: None)
+    patch = next(c for c in calls if c[0] == 'PATCH')
+    assert patch[2] == {'username': 'bridge_exitnodeuuid', 'activeInternalSquads': ['sq-ss', 'sq1']}
+    assert u['ssPassword'] == 'pw' and xb.user_key(u) == '5'
+    assert not any(c[:2] == ('POST', '/api/users') for c in calls)
