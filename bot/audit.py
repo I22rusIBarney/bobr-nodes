@@ -28,6 +28,7 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/relays', 'relay.create', 'Добавил вход (мост) к ноде'),
     ('POST', r'/api/relays/(?P<rid>\d+)/apply', 'relay.apply', 'Переустановил вход (мост)'),
     ('DELETE', r'/api/relays/(?P<rid>\d+)', 'relay.delete', 'Убрал вход (мост)'),
+    ('POST', r'/api/relays/(?P<rid>\d+)/ssh-retry', 'relay.ssh', 'Сменил пароль SSH входа (моста)'),
     ('POST', r'/api/relays/(?P<rid>\d+)/hop', 'relay.hop', 'Сменил связь моста с выходом'),
     ('POST', r'/api/relays/(?P<rid>\d+)/to-xray', 'relay.to_xray', 'Переделал проброс в серверный роутинг'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/ssh', 'node.ssh', 'Изменил SSH-доступ к ноде'),

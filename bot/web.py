@@ -1115,6 +1115,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     store.save_relay({**o, 'ssh': x['ssh']})
             x['log'] = (store.relay(x['id']) or {}).get('log') or []
             store.save_relay({**x, 'status': 'installing', 'error': '', 'stage': 'ssh'})
+            if x.get('server_id') and (x.get('ssh') or {}).get('user', 'root') == 'root':
+                pw = await bcloud_password(p, ip, x['server_id'])
+                if pw and pw != x['ssh'].get('password'):
+                    x['ssh'] = {**x['ssh'], 'password': pw}
+                    store.save_relay({**store.relay(x['id']), 'ssh': x['ssh']})
+                    say('пароль root взят из Bobr Cloud (сервер переустанавливали — он новый)')
             try:
                 if wait:
                     say('жду, пока на сервере поднимется SSH')
@@ -1200,6 +1206,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.save_relay({**store.relay(x['id']), 'domain': x['domain'], 'address': x['domain']})
         say(f'имя входа: {x["domain"]}')
 
+    async def bcloud_password(p: dict, ip: str = '', server_id=None) -> str:
+        """Текущий пароль root сервера из Bobr Cloud (после переустановки он новый). Нет сервера или связи — ''."""
+        try:
+            srvs = await svc.own_servers(store, p)
+        except Exception:  # noqa: BLE001 — Bobr Cloud не ответил: работаем с тем, что есть
+            return ''
+        srv = next((s for s in srvs if (server_id and int(s['id']) == int(server_id)) or (ip and s.get('ip') == ip)), None)
+        return (srv or {}).get('root_password') or ''
+
     async def eg_site_check(r: engine.Remote, domain: str, say, tries: int = 6) -> bool:
         from . import egames as egm
         for _ in range(tries):
@@ -1218,6 +1233,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not dom or not nip:
             raise engine.StepError('у ноды-выхода нет домена или IP — не знаю, на что выпускать сертификат')
         ssh = node_ssh(p['id'], x['node_uuid'], n['address'])
+        pw = await bcloud_password(p, nip)
+        if pw and (not ssh or ((ssh.get('user') or 'root') == 'root' and ssh.get('password') != pw)):
+            ssh = {'user': 'root', 'port': int((ssh or {}).get('port') or 22), 'password': pw, 'key': (ssh or {}).get('key', ''),
+                   'key_file': (ssh or {}).get('key_file', ''), 'sudo_password': ''}
+            store.set(f'node_ssh:{p["id"]}:{x["node_uuid"]}', json.dumps(ssh))
+            say('выход: пароль root взят из Bobr Cloud (сервер переустанавливали — он новый)')
         if not ssh:
             raise engine.StepError('нет доступа по SSH к ноде-выходу — укажите его на её странице')
         r = engine.Remote({'ip': nip, **sshaccess.to_node(ssh, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}, None)
@@ -1225,8 +1246,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         await asyncio.to_thread(cf.upsert_a, dom, nip, say)
         await asyncio.to_thread(engine.wait_dns, dom, nip, say, 600, 15, cf)
         secret = await asyncio.to_thread(pl.secret_key)
-        await asyncio.to_thread(egm.install, r, dom, p['email'], secret, int(p.get('node_port') or 2222), xb.env_panel_ips(p), say,
-                                [xb.SS_PORT])
+        try:
+            await asyncio.to_thread(egm.install, r, dom, p['email'], secret, int(p.get('node_port') or 2222), xb.env_panel_ips(p), say,
+                                    [xb.SS_PORT])
+        except engine.StepError as e:  # «выход:» — страница моста по этой метке спросит пароль именно выхода
+            raise engine.StepError(f'выход {dom}: {e}') from None
 
         def setup():
             with engine.PANEL_LOCK:
@@ -1405,6 +1429,38 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             relay_start(x, store.profile(x['pid']))
             return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю — ход на этой странице'})
         return J(await relay_run(x, store.profile(x['pid']), x['ip']))
+
+    @r.post('/api/relays/{rid}/ssh-retry')
+    async def relay_ssh_retry(request):
+        """Новый пароль SSH сервера входа: проверить вход и, если пускает, продолжить установку."""
+        from . import sshaccess
+        x = relay_or_404(request.match_info['rid'], request)
+        b = await body(request)
+        if not str(b.get('password') or '').strip():
+            raise ApiError('Введите пароль')
+        try:
+            new = sshaccess.clean({'user': b.get('user'), 'port': b.get('port'), 'password': b['password']}, x.get('ssh'), runner.keydir)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        if b.get('forget'):
+            engine.forget_host(runner.known_hosts(), x['ip'], int(new.get('port') or 22))
+
+        def check():
+            rc, out = relay_remote({'ip': x['ip'], 'ssh': new}).run('id -u', 25)
+            return rc == 0
+        try:
+            if not await asyncio.to_thread(check):
+                return J({'ok': False, 'message': 'Вход есть, но команды не выполняются — нужен root'})
+        except engine.StepError as e:
+            return J({'ok': False, 'message': f'SSH: {e}'})
+        x['ssh'] = new
+        for o in store.relays():  # доступ общий у всех входов сервера
+            if o['ip'] == x['ip'] and o['id'] != x['id']:
+                store.save_relay({**o, 'ssh': new})
+        store.save_relay({**x, 'status': 'installing', 'stage': 'ssh', 'error': '',
+                          'log': (x.get('log') or [])[-20:] + [time.strftime('%H:%M:%S ') + 'новый пароль SSH принят — продолжаю']})
+        relay_start(x, store.profile(x['pid']))
+        return J({'ok': True, 'pending': True, 'message': 'Пароль подошёл — продолжаю установку'})
 
     @r.post('/api/relays/{rid}/check')
     async def relay_check(request):
