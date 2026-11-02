@@ -2780,6 +2780,36 @@ function hopSheet(pid, uuid, x) {
       h('div', { class: 'cta' }, go));
   });
 }
+const SSH_AUTH = /SSH не принял пароль|SSH спрашивает пароль/;
+const PWASKED = new Set();
+// пароль SSH не подошёл (сервер переустановили) — спросить новый; подошёл — установка продолжается сама
+function sshPwSheet(pid, uuid, x, n, exit) {
+  UI.sheet('Новый пароль SSH', close => {
+    const st = statusLine();
+    const pw = h('input', { type: 'password', class: 'code', autocomplete: 'new-password', placeholder: 'пароль root' });
+    let forget = true;
+    const go = h('button', { class: 'btn', type: 'button' }, 'Проверить и продолжить');
+    go.onclick = UI.busy(go, async () => {
+      if (!pw.value.trim()) { showStatus(st, { ok: false, message: 'Введите пароль' }); return; }
+      try {
+        let r;
+        if (exit) {
+          if (forget) await api(`profiles/${pid}/nodes/${uuid}/forget-hostkey`, 'POST', { ip: n.address }).catch(() => null);
+          r = await api(`profiles/${pid}/nodes/${uuid}/ssh`, 'POST', { user: 'root', port: (n.ssh && n.ssh.port) || 22, password: pw.value, ip: n.address });
+          if (r.ok) await api(`relays/${x.id}/apply`, 'POST', { background: true });
+        } else r = await api(`relays/${x.id}/ssh-retry`, 'POST', { password: pw.value, forget });
+        if (!r.ok) { showStatus(st, r); return; }
+        close(); UI.toast('Пароль подошёл — продолжаю установку'); await reloadNode(pid, uuid); UI.nav.refresh();
+      } catch (e) { showStatus(st, { ok: false, message: e.message }); }
+    });
+    setTimeout(() => pw.focus(), 300);
+    return h('div', { style: 'padding-bottom:var(--s5)' },
+      group(null, [h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, exit ? `Пароль root выхода ${mid(n.name, 20)}` : `Пароль root ${x.ip}`), pw),
+        row({ title: 'Сервер переустанавливали', sub: 'забыть его прежний ключ SSH', cls: 'wrap', chevron: false, right: UI.toggle(true, on => { forget = on; }, 'Ключ') })],
+        (exit ? 'Сервер выхода' : 'Сервер входа') + ' не пустил со старым паролем. Бот проверит вход с новым и, если пустит, продолжит установку с того же места.'),
+      h('div', { class: 'pad' }, st, go));
+  });
+}
 function toEgamesSheet(pid, uuid, x, n) {
   UI.sheet('Как в eGames', close => {
     let ex = false;
@@ -2819,6 +2849,13 @@ function relayView(pid, uuid, rid) {
   if (x.status === 'buying') v.append(h('div', { class: 'notice info' }, h('b', {}, 'Сервер создаётся в Bobr Cloud. '), 'Как только он получит IP, бот поставит проброс и добавит хосты — обычно 2–4 минуты. Страницу можно закрыть: ход сохранится.'));
   if (x.error) {
     const err = h('div', { class: 'notice bad' }, x.error);
+    if (x.status === 'failed' && SSH_AUTH.test(x.error)) {
+      const exit = /^выход/.test(x.error);
+      const ask = () => sshPwSheet(pid, uuid, x, n, exit);
+      err.append(h('div', {}, h('button', { class: 'btn tinted', type: 'button', style: 'margin-top:10px', onclick: ask }, 'Ввести новый пароль')));
+      const once = rid + '|' + (x.log || []).slice(-1)[0];
+      if (!PWASKED.has(once)) { PWASKED.add(once); setTimeout(ask, 50); }
+    }
     if (/ключ SSH|host key|REMOTE HOST IDENTIFICATION/i.test(x.error)) {
       const fx = h('button', { class: 'btn tinted', type: 'button', style: 'margin-top:10px' }, 'Забыть ключ и повторить');
       fx.onclick = UI.busy(fx, async () => {
