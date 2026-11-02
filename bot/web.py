@@ -1320,7 +1320,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 if 'SS_OPEN' in o:
                     say(f'порт Shadowsocks {ss["port"]} на выходе открыт со входа ✓')
                 else:
-                    bad.append(f'со входа не открывается порт {ss["port"]} на выходе ({ss["address"]}) — откройте его на выходе')
+                    bad.append(f'со входа не открывается порт {ss["port"]} на выходе ({ss["address"]}) — нода-выход не запущена или порт закрыт; '
+                               'если сервер выхода чистый — «Переустановить выход как в eGames»')
         return {'bad': bad}
 
     async def vision_run(x: dict, p: dict, say) -> dict:
