@@ -54,6 +54,7 @@ def test_bridge_entry_egames_with_ss():
     assert [r.get('outboundTag') for r in rules] == ['BLOCK', 'BLOCK', 'DIRECT', 'DIRECT', xb.OUT_TAG]
     assert pl.nodes[-1]['address'] == 'de1.example.com' and pl.tls is False
     assert made['sni'] == 'de1.example.com' and made['reality']['private'] and len(made['reality']['sid']) == 16
+    assert pl.attached_node['host']['final_mask']['tcp'][0]['type'] == 'fragment'   # Final Mask по умолчанию
 
 
 class ExitPanel:
@@ -101,3 +102,10 @@ def test_setup_exit_switches_node_and_disables_old_hosts():
     assert ('PATCH', '/api/hosts', {'uuid': 'h-other', 'isDisabled': True}) not in pl.calls   # чужая нода того же профиля
     assert ('PATCH', '/api/hosts', {'uuid': 'h-eg', 'sni': 'swe.example.com', 'fingerprint': 'chrome'}) in pl.calls
     assert made['inbound'] == 'i-eg' and made['reality']['private']
+
+
+def test_custom_port_and_final_mask():
+    c = eg.install_cmd('n1.example.com', 'a@b.c', 'S', 2222, [], (), 8443)
+    assert 'for p in 8443 80' in c and 'ufw allow 8443/tcp' in c
+    assert eg.profile_config('n1.example.com', 'T', 'k', 's', 8443)['inbounds'][0]['port'] == 8443
+    assert ':8443:127.0.0.1 https://n1.example.com:8443' in eg.check_cmd('n1.example.com', 8443)
