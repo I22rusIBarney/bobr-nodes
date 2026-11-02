@@ -992,7 +992,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 raise ApiError(str(e)) from None
         if mode in xb.ROUTED:
             if others:
-                raise ApiError('На этом сервере уже есть входы — серверному роутингу нужен сервер целиком (свой Xray на порту входа)')
+                raise ApiError('На этом сервере уже есть вход: ' + ', '.join(o.get('remark') or o.get('node_name') or '' for o in others)[:80]
+                           + '. Откройте его страницу и нажмите «Переделать как в eGames» (или уберите его) — мосту с роутингом нужен сервер целиком')
             if acc.get('user') != 'root' and not acc.get('sudo_password'):
                 raise ApiError('Серверному роутингу нужен root или пользователь с sudo — бот ставит Docker')
         elif any(o.get('mode') in xb.ROUTED for o in others):
@@ -1495,6 +1496,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         stamp = time.strftime('%H:%M:%S ')
         if target == 'egames':
             x['hop'] = 'ss'
+            x['exit_egames'] = bool(b.get('exit_egames'))
+            x.pop('exit_done', None)
+            if x['exit_egames']:
+                _pl, _n, _h, _nip, _dom = await asyncio.to_thread(node_ctx, p, x['node_uuid'])
+                if not _dom:
+                    raise ApiError('У ноды-выхода в панели адрес — IP, а ноде eGames нужен домен: задайте его на странице ноды')
+                if not node_ssh(p['id'], x['node_uuid'], _n['address']):
+                    raise ApiError('Чтобы переустановить выход, нужен доступ по SSH к нему — укажите его на странице ноды')
         x.update(mode=target, sni=sni, node_port=int(p.get('node_port') or 2222), hosts=[], status='installing', stage='ssh',
                  error='', bad=[], country=(x.get('loc') or '')[:2].upper(),
                  remark=x['remark'].replace('🇷🇺 ', '') if x.get('remark', '').startswith('🇷🇺') else x.get('remark', ''),
