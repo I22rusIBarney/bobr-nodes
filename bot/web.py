@@ -1115,6 +1115,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     store.save_relay({**o, 'ssh': x['ssh']})
             x['log'] = (store.relay(x['id']) or {}).get('log') or []
             store.save_relay({**x, 'status': 'installing', 'error': '', 'stage': 'ssh'})
+            if x.get('server_id') and (x.get('ssh') or {}).get('user', 'root') == 'root':
+                pw = await bcloud_password(p, ip, x['server_id'])
+                if pw and pw != x['ssh'].get('password'):
+                    x['ssh'] = {**x['ssh'], 'password': pw}
+                    store.save_relay({**store.relay(x['id']), 'ssh': x['ssh']})
+                    say('пароль root взят из Bobr Cloud (сервер переустанавливали — он новый)')
             try:
                 if wait:
                     say('жду, пока на сервере поднимется SSH')
@@ -1200,6 +1206,15 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.save_relay({**store.relay(x['id']), 'domain': x['domain'], 'address': x['domain']})
         say(f'имя входа: {x["domain"]}')
 
+    async def bcloud_password(p: dict, ip: str = '', server_id=None) -> str:
+        """Текущий пароль root сервера из Bobr Cloud (после переустановки он новый). Нет сервера или связи — ''."""
+        try:
+            srvs = await svc.own_servers(store, p)
+        except Exception:  # noqa: BLE001 — Bobr Cloud не ответил: работаем с тем, что есть
+            return ''
+        srv = next((s for s in srvs if (server_id and int(s['id']) == int(server_id)) or (ip and s.get('ip') == ip)), None)
+        return (srv or {}).get('root_password') or ''
+
     async def eg_site_check(r: engine.Remote, domain: str, say, tries: int = 6) -> bool:
         from . import egames as egm
         for _ in range(tries):
@@ -1218,6 +1233,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not dom or not nip:
             raise engine.StepError('у ноды-выхода нет домена или IP — не знаю, на что выпускать сертификат')
         ssh = node_ssh(p['id'], x['node_uuid'], n['address'])
+        pw = await bcloud_password(p, nip)
+        if pw and (not ssh or ((ssh.get('user') or 'root') == 'root' and ssh.get('password') != pw)):
+            ssh = {'user': 'root', 'port': int((ssh or {}).get('port') or 22), 'password': pw, 'key': (ssh or {}).get('key', ''),
+                   'key_file': (ssh or {}).get('key_file', ''), 'sudo_password': ''}
+            store.set(f'node_ssh:{p["id"]}:{x["node_uuid"]}', json.dumps(ssh))
+            say('выход: пароль root взят из Bobr Cloud (сервер переустанавливали — он новый)')
         if not ssh:
             raise engine.StepError('нет доступа по SSH к ноде-выходу — укажите его на её странице')
         r = engine.Remote({'ip': nip, **sshaccess.to_node(ssh, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}, None)
