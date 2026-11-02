@@ -198,7 +198,12 @@ def ensure_ss_exit(panel: engine.Panel, pnode: dict, log, port: int = SS_PORT) -
     sqs = panel.call('GET', '/api/internal-squads')['internalSquads']
     sq = next((q for q in sqs if q.get('name') == name), None)
     if not sq:
-        sq = panel.call('POST', '/api/internal-squads', {'name': name, 'inbounds': [inb_uuid]})
+        made = panel.call('POST', '/api/internal-squads', {'name': name, 'inbounds': [inb_uuid]})
+        # ответ на создание у версий панели разный — сквад берём из списка
+        sq = made if isinstance(made, dict) and made.get('uuid') else next(
+            (q for q in panel.call('GET', '/api/internal-squads')['internalSquads'] if q.get('name') == name), None)
+        if not sq:
+            raise engine.StepError(f'панель не создала сквад «{name}»')
         log(f'панель: создан сквад «{name}» — в нём только вход моста на выход')
     elif [i.get('uuid') for i in sq.get('inbounds', [])] != [inb_uuid]:
         panel.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': [inb_uuid]})

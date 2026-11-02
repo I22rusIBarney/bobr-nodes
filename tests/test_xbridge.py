@@ -266,10 +266,10 @@ def test_ss_hop_like_egames():
             patched.append(body)
             pnode['configProfile'] = {**body['configProfile'], 'activeInbounds': [{'uuid': u} for u in body['configProfile']['activeInbounds']]}
             return {}
-        if (method, path) == ('POST', '/api/internal-squads'):
+        if (method, path) == ('POST', '/api/internal-squads'):  # как панель 3.x: без uuid в ответе
             sq = {'uuid': 'sq-ss', 'name': body['name'], 'inbounds': [{'uuid': u} for u in body['inbounds']]}
             pl.squads.append(sq)
-            return sq
+            return {'isCreated': True}
         if (method, path) == ('POST', '/api/users'):
             u = orig(method, path, body)
             u['ssPassword'] = 'ss-pass-1'
