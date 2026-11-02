@@ -1430,6 +1430,25 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю — ход на этой странице'})
         return J(await relay_run(x, store.profile(x['pid']), x['ip']))
 
+    @r.post('/api/relays/{rid}/exit-egames')
+    async def relay_exit_egames(request):
+        """Переустановить и выход моста нодой как в eGames (сервер выхода чистый), затем повторить установку входа."""
+        x = relay_or_404(request.match_info['rid'], request)
+        if x.get('mode') != 'egames':
+            raise ApiError('Сначала переделайте мост «как в eGames»')
+        p = store.profile(x['pid'])
+        _pl, n, _h, _nip, dom = await asyncio.to_thread(node_ctx, p, x['node_uuid'])
+        if not dom:
+            raise ApiError('У ноды-выхода в панели адрес — IP, а ноде eGames нужен домен: задайте его на странице ноды')
+        if not p.get('email'):
+            raise ApiError("Сертификату Let's Encrypt нужен e-mail — укажите его в настройках группы")
+        x.update(exit_egames=True, status='installing', stage='ssh', error='',
+                 log=(x.get('log') or [])[-20:] + [time.strftime('%H:%M:%S ') + 'переустановка выхода и входа'])
+        x.pop('exit_done', None)
+        store.save_relay(x)
+        relay_start(x, p)
+        return J({'id': x['id'], 'ok': True, 'pending': True, 'message': 'Ставлю выход, потом вход — ход на этой странице'})
+
     @r.post('/api/relays/{rid}/ssh-retry')
     async def relay_ssh_retry(request):
         """Новый пароль SSH сервера входа: проверить вход и, если пускает, продолжить установку."""

@@ -2902,6 +2902,13 @@ function relayView(pid, uuid, rid) {
   if (x.ip && !running) {
     const shared = (n.relays || []).filter(o => o.id !== x.id && o.ip === x.ip).length;
     const rows = [];
+    if (x.mode === 'egames') rows.push(row({ icon: 'restart', color: 'amber', title: 'Переустановить выход как в eGames', cls: 'wrap',
+      sub: `${mid(n.name, 20)} — для чистого сервера выхода; потом бот повторит установку входа`,
+      onClick: async () => {
+        if (!await UI.ask({ title: 'Переустановить выход?', message: `На сервер ${n.name} встанет нода как в eGames: сертификат, заглушка, свой профиль; прежние хосты этой ноды выключатся. Клиентам ноды нужно обновить подписку.`, buttons: [{ id: 'y', text: 'Переустановить' }] })) return;
+        const r = await UI.run(() => api(`relays/${x.id}/exit-egames`, 'POST'));
+        if (r) { await reloadNode(pid, uuid); UI.nav.refresh(); }
+      } }));
     if (x.mode !== 'egames') rows.push(row({ icon: 'shield', color: 'amber', title: 'Переделать как в eGames', cls: 'wrap',
       sub: shared ? 'на сервере есть другие входы — сначала уберите их' : 'REALITY «под себя» на своём домене, до выхода — Shadowsocks',
       onClick: shared ? null : () => toEgamesSheet(pid, uuid, x, n) }));
