@@ -1141,7 +1141,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     if not x.get('hosts'):
                         relay_say(x['id'], stage='hosts')
                         x['hosts'] = await relay_hosts(x, p, say)
-            except (engine.StepError, ApiError, OSError) as e:
+            except Exception as e:  # noqa: BLE001 — любая ошибка: показать, где именно, а не голое 'uuid'
+                if not isinstance(e, (engine.StepError, ApiError, OSError)):
+                    import traceback
+                    logging.getLogger(__name__).exception('relay %s', x['id'])
+                    fr = traceback.extract_tb(e.__traceback__)[-1]
+                    e = engine.StepError(f'{type(e).__name__}: {e} ({Path(fr.filename).name}:{fr.lineno}, {fr.name})')
                 say(f'ошибка: {e}')
                 cur = store.relay(x['id']) or {}
                 x.update(status='failed', error=str(e)[:300], log=cur.get('log') or [], stage=cur.get('stage') or x.get('stage'))
