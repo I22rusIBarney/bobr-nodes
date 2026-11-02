@@ -2876,7 +2876,9 @@ function relayView(pid, uuid, rid) {
         title: st.title, chevron: false, cls: k ? '' : 'is-dim', status: k === 'run' ? ['идёт', 'run'] : null });
     })));
   }
-  else if (x.bad.length) v.append(h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
+  else if (x.bad.length) v.append(['xray', 'vision', 'egames'].includes(x.mode)
+    ? h('div', { class: 'notice' }, h('b', {}, 'Мост стоит, но: '), x.bad.join('; ') + '.')
+    : h('div', { class: 'notice' }, h('b', {}, 'С российского сервера не открывается нода. '), x.bad.join(', ') + ' — проверьте, что нода на связи и её порт не закрыт.'));
   v.append(group(null, [
     row({ title: 'Состояние', status: RST[x.status] || [x.status, ''] }),
     row({ title: 'Вид', detail: x.mode === 'egames' ? 'роутинг, как в eGames' : x.mode === 'vision' ? 'роутинг, Vision TLS' : x.mode === 'xray' ? 'роутинг, REALITY' : 'проброс (HAProxy)' }),
