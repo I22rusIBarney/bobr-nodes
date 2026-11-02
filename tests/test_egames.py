@@ -62,6 +62,8 @@ class ExitPanel:
         self.profiles = [{'uuid': 'p-old', 'name': 'NV', 'inbounds': [{'uuid': 'i-old', 'tag': 'Vision'}], 'config': {}}]
         self.squads = [{'uuid': 'sq1', 'name': 'Default-Squad', 'inbounds': [{'uuid': 'i-old'}]}]
         self.hosts = [{'uuid': 'h-old', 'remark': 'Sweden', 'address': 'swe.example.com',
+                       'inbound': {'configProfileUuid': 'p-old', 'configProfileInboundUuid': 'i-old'}},
+                      {'uuid': 'h-other', 'remark': 'Other node', 'address': 'nl.example.com',
                        'inbound': {'configProfileUuid': 'p-old', 'configProfileInboundUuid': 'i-old'}}]
         self.calls, self.attached = [], None
 
@@ -96,5 +98,6 @@ def test_setup_exit_switches_node_and_disables_old_hosts():
     node, prof, inbs, squads, tls = pl.attached
     assert prof == 'p-eg' and inbs == ['i-eg'] and squads == ['sq1'] and tls is False and node['domain'] == 'swe.example.com'
     assert ('PATCH', '/api/hosts', {'uuid': 'h-old', 'isDisabled': True}) in pl.calls
+    assert ('PATCH', '/api/hosts', {'uuid': 'h-other', 'isDisabled': True}) not in pl.calls   # чужая нода того же профиля
     assert ('PATCH', '/api/hosts', {'uuid': 'h-eg', 'sni': 'swe.example.com', 'fingerprint': 'chrome'}) in pl.calls
     assert made['inbound'] == 'i-eg' and made['reality']['private']

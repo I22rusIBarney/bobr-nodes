@@ -1229,7 +1229,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
         def setup():
             with engine.PANEL_LOCK:
-                return egm.setup_exit(pl, n, nip, dom, int(p.get('node_port') or 2222), x.get('exit_reality'), say)
+                return egm.setup_exit(pl, n, nip, dom, int(p.get('node_port') or 2222), x.get('exit_reality'), say, _hosts)
         made = await asyncio.to_thread(setup)
         store.save_relay({**store.relay(x['id']), 'exit_reality': made['reality']})
         x['exit_reality'] = made['reality']

@@ -222,7 +222,8 @@ def check_cmd(domain: str) -> str:
 
 
 # ───────── панель: выход (обычная нода) ─────────
-def setup_exit(panel: engine.Panel, pnode: dict, ip: str, domain: str, node_port: int, keep: dict | None, log) -> dict:
+def setup_exit(panel: engine.Panel, pnode: dict, ip: str, domain: str, node_port: int, keep: dict | None, log,
+               node_hosts: list[dict] | None = None) -> dict:
     """Нода-выход на eGames: свой профиль, нода переводится на него, хост REALITY, inbound — в те же сквады,
     где были её прежние inbound'ы; прежние хосты ноды выключаются (сервер их больше не обслуживает)."""
     old_active = engine.active_inbounds(pnode)
@@ -247,8 +248,12 @@ def setup_exit(panel: engine.Panel, pnode: dict, ip: str, domain: str, node_port
         log(f'панель: профиль «{name}» создан — REALITY на {domain}, как у eGames')
     inb = next(i for i in prof['inbounds'] if i['tag'] == tag)
     keep_on = [i for i in prof['inbounds'] if i['tag'] != tag and i['uuid'] in old_active]
-    old_hosts = [h for h in panel.call('GET', '/api/hosts') if (h.get('inbound') or {}).get('configProfileInboundUuid') in old_active
-                 and (h.get('inbound') or {}).get('configProfileUuid') != prof['uuid']]
+    # прежние хосты именно этой ноды (профиль мог стоять и на других нодах — их хосты не трогаем)
+    mine = {h['uuid'] for h in node_hosts} if node_hosts is not None else None
+    old_hosts = [h for h in panel.call('GET', '/api/hosts')
+                 if (h.get('inbound') or {}).get('configProfileInboundUuid') in old_active
+                 and (h.get('inbound') or {}).get('configProfileUuid') != prof['uuid']
+                 and (h['uuid'] in mine if mine is not None else h.get('address') in (domain, ip))]
     node = {'ip': ip, 'domain': domain, 'name': pnode['name'], 'remark': pnode['name'], 'country': pnode.get('countryCode') or ''}
     panel.attach(node, prof, [inb], squads, node_port, log, tls=False, also=keep_on)
     for h in panel.call('GET', '/api/hosts'):
