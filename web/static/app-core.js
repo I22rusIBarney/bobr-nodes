@@ -18,6 +18,12 @@ function h(tag, props, ...kids) {
   if (value !== undefined) el.value = value;
   return el;
 }
+/* подсказка с сервера: <code>…</code> — моноширинным, прочие теги отбрасываем (вставляем только как текст) */
+function rich(s) {
+  const out = h('span');
+  String(s || '').split(/(<code>[\s\S]*?<\/code>)/g).forEach(p => { const m = p.match(/^<code>([\s\S]*)<\/code>$/); out.append(m ? h('span', { class: 'mono' }, m[1].replace(/<[^>]+>/g, '')) : p.replace(/<[^>]+>/g, '')); });
+  return out;
+}
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const ICONS = {
@@ -30,7 +36,7 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
   bell: '<path d="M6 8a6 6 0 1 1 12 0c0 7 3 8 3 8H3s3-1 3-8"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
-  chevR: '<path d="m9 6 6 6-6 6"/>', chevL: '<path d="m15 6-6 6 6 6"/>',
+  chevR: '<path d="m9 6 6 6-6 6"/>', chevL: '<path d="m15 6-6 6 6 6"/>', chevD: '<path d="m6 9 6 6 6-6"/>',
   check: '<path d="m5 12.5 4.5 4.5L19 7"/>',
   alert: '<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/>',
   unplug: '<path d="M3 3l18 18"/><path d="M8.5 16.5a5 5 0 0 1 7 0"/><path d="M5 12.5a10 10 0 0 1 5.2-2.8"/><path d="M19 12.5a10 10 0 0 0-2.2-1.6"/><path d="M12 20h.01"/>',

@@ -323,7 +323,7 @@ async def main():
        and (await wapi('theme', 'POST', {'ui': 'classic'}))[1]['ui'] == 'classic', 'интерфейс: классический или новый, по выбору пользователя')
     app = await web.get('/app')
     ok(app.status == 200 and 'app-core.js' in await app.text(), 'страница нового интерфейса отдаётся')
-    ok(all([(await web.get(f'/static/{f}')).status == 200 for f in ('app.css', 'app-core.js', 'app-more.js', 'app-extra.js', 'app.js')]), 'файлы нового интерфейса отдаются')
+    ok(all([(await web.get(f'/static/{f}')).status == 200 for f in ('app.css', 'app-core.js', 'app-more.js', 'app-extra.js', 'app-group.js', 'app-admin.js', 'app-relay.js', 'app-tools.js', 'app.js')]), 'файлы нового интерфейса отдаются')
     ok((await wapi('theme', 'POST', {'hero': 'x'}))[0] == 400 and (await wapi('theme', 'POST', {'hero': 'winter-night'}))[1]['hero'] == 'winter-night'
        and (await wapi('theme', 'POST', {'hero': 'auto'}))[1]['hero'] == 'auto', 'картинка на главной: своя из восьми или по сезону')
     rh = await web.get('/static/hero-summer-day.webp')

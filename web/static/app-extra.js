@@ -36,7 +36,6 @@ function nodeSettings(n, det) {
     h('div', { class: 'apply-bar', style: 'margin-bottom:24px' }, h('span', { class: 'muted' }, changes ? pl(changes, 'изменение', 'изменения', 'изменений') : 'Изменений нет'),
       h('span', { class: 'sp' }), changes ? btn('Сбросить', () => { UI.ns = null; render(); }, 's') : null, btn('Применить', apply, 's primary', null, { disabled: !changes })),
     nodeSsh(n, d, st.ssh),
-    h('div', { class: 'list', style: 'margin-top:20px' }, dangerRow('route', 'Вход через Россию', 'Пока в классическом интерфейсе', btn('Открыть', () => classic(`node:${n.pid}:${n.uuid}`), 's', 'ext'))),
   ];
 }
 function nodeSsh(n, d, s) {
@@ -150,13 +149,5 @@ function setBot() {
       switchRow('Обновляться автоматически', `Ночью в ${c.hour}:00 по вашему времени`, c.on, v => saveUpd({ on: v }))),
     next ? h('details', { class: 'more-opts', style: 'margin-bottom:22px' }, h('summary', null, `Что нового в ${next.version}`),
       h('ul', { style: 'margin:8px 0 0;padding-left:18px' }, next.items.map(i => h('li', { style: 'margin-bottom:6px' }, i.text)))) : null,
-    h('div', { class: 'section-h' }, h('h2', null, 'Резервные копии')),
-    bk.error ? h('div', { class: 'muted' }, bk.error)
-      : [h('div', { class: 'list', style: 'margin-bottom:12px' },
-          switchRow('Копия каждую ночь', `В ${bk.hour}:00, хранится ${bk.keep} последних` + (bk.last_at ? ` · последняя ${ago(bk.last_at * 1000)}` : ''), bk.on,
-            async v => { try { S.bk = await api('backup', 'POST', { on: v }); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); })),
-        bk.last_error ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, 'Последняя копия не удалась'), bk.last_error)) : null,
-        h('div', { class: 'chips' }, btn('Сделать копию сейчас', e => busyBtn(e, async () => {
-          try { S.bk = await api('backup/now', 'POST'); toast('Копия создана', 'Файл отправлен вам в Telegram'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); }), '', 'box'),
-          btn('Восстановление и ключ шифрования', () => classic('settings'), 'ghost', 'ext'))]);
+    h('div', { class: 'list' }, dangerRow('box', 'Резервные копии', bk.error ? bk.error : bk.on ? `Каждую ночь в ${bk.hour}:00` + (bk.last_at ? ` · последняя ${ago(bk.last_at * 1000)}` : '') : 'Выключены', btn('Открыть', () => go('settings/backup'), 's'))));
 }
