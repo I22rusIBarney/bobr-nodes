@@ -640,6 +640,16 @@ def resolve_many(hosts) -> dict[str, set[str]]:
     return out
 
 
+def safe_addresses(items) -> None:
+    """Адрес ноды или хоста из панели попадает в команды на серверах. Панель группы может указать пользователь,
+    поэтому всё, что не IP и не домен, обнуляем сразу на входе."""
+    from . import naming
+    for x in items if isinstance(items, list) else []:
+        a = x.get('address') if isinstance(x, dict) else None
+        if isinstance(a, str) and a and not (is_ip(a) or naming.valid_domain(a.lower())):
+            x['address'] = ''
+
+
 class Panel:
     def __init__(self, url: str, token: str, cookie: str = '', extra_headers: dict | None = None):
         self.url = url.rstrip('/')
@@ -675,7 +685,10 @@ class Panel:
                     (f'{".".join(map(str, e.get("path") or []))}: {e.get("message", "")}' if isinstance(e, dict) else str(e))
                     for e in errs[:4])
             raise StepError(f'панель {method} {path}: HTTP {code}{hint}: {str(msg)[:300]}')
-        return data.get('response', data)
+        out = data.get('response', data)
+        if method == 'GET' and path.split('?')[0] in ('/api/nodes', '/api/hosts'):
+            safe_addresses(out)
+        return out
 
     def secret_key(self) -> str:
         return self.call('GET', '/api/keygen')['secretKey']

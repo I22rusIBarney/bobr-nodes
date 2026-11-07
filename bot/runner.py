@@ -132,6 +132,9 @@ class Runner:
                  bcloud_factory=bcloud_from, poll_every: float = 10, ip_timeout: float = 20 * 60, edit_every: float = 3):
         self.store = store
         self.bot = bot
+        # администраторы: их группам доверяем полностью (см. services.guard_bot_key)
+        from .services import admin_ids
+        self.admins = admin_ids()
         self.logdir = Path(logdir)
         self.logdir.mkdir(parents=True, exist_ok=True)
         self.deploy = deploy
@@ -303,8 +306,9 @@ class Runner:
 
     def _node_ssh(self, d: dict, prof: dict) -> dict:
         """Поля входа для задачи по ноде: сохранённый доступ, иначе — из задачи (пароль root из покупки)."""
-        from . import sshaccess
+        from . import services, sshaccess
         ssh = self.ssh_of(prof['id'], d['node_uuid']) or d.get('ssh') or {}
+        ssh = services.guard_bot_key(self.store, prof, ssh, d.get('ip') or '', self.admins)
         return {**sshaccess.to_node(ssh, self.bot_key()[0]), 'known_hosts': self.known_hosts()}
 
     async def _run_reip(self, jid: int, d: dict, prof: dict) -> None:
@@ -408,6 +412,24 @@ class Runner:
                 res = await asyncio.to_thread(self.upgrade_node, node, prof, lf, on_log, on_stage)
         self.store.patch_job_data(jid, result=res)
 
+    async def _lost_purchase(self, jid: int, bc, d: dict) -> int | None:
+        """Сервер, который купила прошлая попытка этой задачи, но ответ Bobr Cloud не дошёл (таймаут, перезапуск).
+        Признаки: та же локация, ещё создаётся или работает, не занят другой задачей или входом, root-пароль —
+        тот, что бот задал этой покупке (пока сервер создаётся, пароля может ещё не быть). Несколько подходящих —
+        не угадываем, просим проверить."""
+        used = {int(j['data']['server_id']) for j in self.store.jobs(5000, include_hidden=True)
+                if j['id'] != jid and j['data'].get('server_id')}
+        used |= {int(r['server_id']) for r in self.store.relays() if r.get('server_id')}
+        cands = [x for x in await bc.servers() if int(x['id']) not in used and x.get('location') == d['location']
+                 and x.get('status') in ('provisioning', 'active') and x.get('root_password') in (None, '', d['password'])]
+        exact = [x for x in cands if x.get('root_password') == d['password']]
+        pick = exact or cands
+        if len(pick) > 1:
+            raise Fail('прошлая покупка могла пройти без ответа, а в Bobr Cloud несколько похожих новых серверов: '
+                       + ', '.join(str(x.get('name') or x['id']) for x in pick[:5])
+                       + ' — проверьте «Мои серверы» и удалите лишний, затем «Повторить»')
+        return int(pick[0]['id']) if pick else None
+
     async def _run(self, jid: int) -> None:
         job = self.store.job(jid)
         if not job:
@@ -435,11 +457,17 @@ class Runner:
             # Bobr Cloud (Astra) иногда не выдаёт сервер — деньги возвращаются, а бот сам пробует купить ещё раз;
             # после второй неудачи предлагает другую конфигурацию или локацию
             while True:
+                if not d.get('server_id') and d.get('buy_tried'):
+                    sid = await self._lost_purchase(jid, bc, d)  # прошлая покупка могла пройти без ответа
+                    if sid:
+                        d = self.store.patch_job_data(jid, server_id=sid)
+                        self.last[jid] = 'сервер из прошлой попытки уже куплен — продолжаю с ним'
+                    elif job['status'] == 'buying' and not d.get('create_tries'):
+                        raise Fail('бот перезапустился во время покупки, а сервера в Bobr Cloud пока нет — '
+                                   'проверьте «Мои серверы» в Bobr Cloud. Повтор купит новый сервер.')
                 if not d.get('server_id'):
-                    if job['status'] == 'buying' and not d.get('create_tries'):
-                        raise Fail('бот перезапустился во время покупки — проверьте «Мои серверы» в Bobr Cloud. '
-                                   'Повтор купит новый сервер.')
                     await self._set(jid, status='buying', stage='buy', error='')
+                    d = self.store.patch_job_data(jid, buy_tried=True)  # до запроса: ответ может не дойти
                     srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
                     d = self.store.patch_job_data(jid, server_id=srv['id'])
 

@@ -154,8 +154,16 @@ class Monitor:
         self.ru_first, self.ru_every = 75.0, 60.0  # проверка новой ноды: первый опрос и дальше
 
     # ───────── чекеры ─────────
-    def subs(self) -> list[tuple[int, str]]:
-        return [(p['id'], p['mon_sub']) for p in self.store.profiles() if p.get('mon_sub')]
+    def subs(self, ch: dict | None = None) -> list[tuple[int, str]]:
+        """Подписки групп для чекера. Чекер пользователя стоит на его сервере, и .env с подписками он может прочитать —
+        поэтому туда только подписки его групп; чекеры администратора проверяют все группы."""
+        ps = [p for p in self.store.profiles() if p.get('mon_sub')]
+        owner = int((ch or {}).get('created_by') or 0)
+        if owner and self.access is not None:
+            ps = [p for p in ps if self.access.owns(p, owner)]
+        elif owner:
+            ps = [p for p in ps if str(p.get('created_by') or '') == str(owner)]
+        return [(p['id'], p['mon_sub']) for p in ps]
 
     def keyfiles(self) -> tuple[str, str, str]:
         path, pub = self.runner.bot_key()
@@ -183,7 +191,7 @@ class Monitor:
 
         self.store.patch_checker(cid, status='installing', error='', log=[])
         path, pub, kh = self.keyfiles()
-        subs = self.subs()
+        subs = self.subs(ch)
         try:
             fields = await asyncio.to_thread(ck.install, ch, subs, path, pub, kh, say, _Sink())
             self.store.patch_checker(cid, **fields, status='running' if subs else 'idle', error='', subs_mark=ck.subs_mark(subs),
@@ -201,13 +209,13 @@ class Monitor:
 
     async def _resync(self, force: bool = False) -> bool:
         """Записать текущие подписки на установленные чекеры, где записан другой набор. True — что-то записали."""
-        subs = self.subs()
-        mark = ck.subs_mark(subs)
         path, _, kh = self.keyfiles()
         done = False
         for ch in self.store.checkers():
             if ch.get('status') not in ('running', 'idle') or not ch.get('api_password'):
                 continue
+            subs = self.subs(ch)
+            mark = ck.subs_mark(subs)
             if not force and ch.get('subs_mark') == mark:
                 continue
             try:
@@ -297,7 +305,15 @@ class Monitor:
         return bool(done) and (len(done) < 3 or any(p.get('online') for p in done))
 
     # ───────── цикл ─────────
+    def recover(self) -> None:
+        """Установка чекера, прерванная перезапуском бота, сама не продолжится — иначе он навсегда «ставится»."""
+        for ch in self.store.checkers():
+            if ch.get('status') == 'installing':
+                self.store.patch_checker(ch['id'], status='failed',
+                                         error='установка прервалась: бот перезапустился — нажмите «Переустановить»')
+
     async def run(self) -> None:
+        self.recover()
         await asyncio.sleep(30)  # после запуска бота — первый опрос почти сразу, дальше по расписанию
         while True:
             try:

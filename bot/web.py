@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import socket
 import time
 from pathlib import Path
@@ -531,6 +532,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         data.pop('owner', None)  # клиента bcloud ставим сами после проверки формы
         if cur is not None and str(cur.get('created_by') or '') != str(uid_of(request)):
             data.pop('cf_token', None)
+            # группа администратора: её токен панели на новый адрес не отправляем — новый адрес, новые ключи
+            new_url = str(data.get('panel_url') or '').strip().rstrip('/')
+            if new_url and new_url != str(cur.get('panel_url') or '').rstrip('/'):
+                if not str(data.get('panel_token') or '').strip():
+                    raise ApiError('Новый адрес панели — укажите и её API-токен: прежний токен на другой адрес не отправляем')
+                if cur.get('panel_cookie') and not str(data.get('panel_cookie') or '').strip():
+                    raise ApiError('Новый адрес панели — укажите и cookie-защиту новой панели (или «-», если её нет)')
         return data
 
     async def with_owner(prof: dict, cur: dict | None = None) -> dict:
@@ -633,6 +641,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     def bot_jobs_by_ip(pid: int) -> dict[str, dict]:
         return svc.bot_jobs_by_ip(store, pid)
+
+    def no_foreign_bot_key(request, b: dict, p: dict | None, ip: str) -> None:
+        """Пользователь не может направить ключ бота на чужой сервер: ключ лежит на нодах всех групп."""
+        if is_admin(request) or str(b.get('key') or '') != 'bot':
+            return
+        if p is None or ip not in svc.bot_key_ips(store, p['id']):
+            raise ApiError('Ключ бота подходит только для серверов, которые бот сам купил или поставил в ваших группах. Укажите пароль или свой ключ.')
 
     def ssh_view(pid: int, uuid: str, ip: str) -> dict:
         from . import sshaccess
@@ -916,6 +931,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             ip = str(b.get('ip') or '').strip()
             if not engine.is_ip(ip) or ':' in ip:
                 raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
+            no_foreign_bot_key(request, b, p, ip)
         elif source == 'server':
             try:
                 sid = int(b.get('server_id'))
@@ -1328,7 +1344,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if ss.get('address') and ss.get('port'):
                 o = ''
                 for _ in range(6):  # выход перезапускает Xray с новым inbound — даём ему до минуты
-                    _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/{ss['address']}/{int(ss['port'])}' "
+                    _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/$0/$1' {shlex.quote(str(ss['address']))} {int(ss['port'])} "
                                                           '&& echo SS_OPEN || echo SS_CLOSED', 30)
                     if 'SS_OPEN' in o:
                         break
@@ -1733,6 +1749,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except ValueError as e:
             raise ApiError(str(e)) from None
         ip = str(b.get('ip') or '')
+        if new.get('key') == 'bot':
+            no_foreign_bot_key(request, {'key': 'bot'}, p, (bot_jobs_by_ip(p['id']).get(ip) or {}).get('ip') or ip)
         result = {'ok': True, 'message': 'Сохранено'}
         if ip:
             node = {'ip': ip, **sshaccess.to_node(new, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}
@@ -2446,6 +2464,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
         if any(x['ip'] == ip for x in store.checkers()):
             raise ApiError('Чекер с этим IP уже есть')
+        no_foreign_bot_key(request, b, None, ip)  # свой чекер пользователь ставит по паролю или своему ключу
         from . import sshaccess
         try:
             acc = sshaccess.clean(b, None, runner.keydir)
