@@ -511,5 +511,5 @@ body:has(.bulk) .toasts { bottom: 84px; }
 .nav-h { margin: 18px 10px 6px; font-size: 12px; font-weight: 600; color: var(--ink-3); }
 .nav-a .ext { margin-left: auto; color: var(--ink-3); display: inline-flex; }
 .nav-a .ext .i { width: 14px; height: 14px; }
-.balance { cursor: default; }
+.balance:hover { border-color: var(--rule-2); }
 @media (max-width: 1100px) { .nav-h { display: none; } }

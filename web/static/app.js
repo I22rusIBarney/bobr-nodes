@@ -152,7 +152,7 @@ function shell(base, changed) {
         h('span', { class: 'title-m' }, h('img', { src: '/static/logo.png', alt: 'Bobr Nodes' })),
         h('button', { type: 'button', class: 'search-btn', onclick: () => openPalette(), 'aria-label': 'Поиск и команды' }, ic('search'), h('span', { class: 'lbl' }, 'Найти ноду или действие'), h('kbd', null, '⌘K')),
         h('span', { class: 'sp' }),
-        bal != null ? h('span', { class: 'balance', title: 'Баланс Bobr Cloud · ' + (D.wallet.account || '') }, ic('wallet'), h('span', { class: 'num' }, rubK(bal))) : null,
+        bal != null ? h('button', { type: 'button', class: 'balance', onclick: topUp, title: 'Пополнить баланс Bobr Cloud · ' + (D.wallet.account || '') }, ic('wallet'), h('span', { class: 'num' }, rubK(bal))) : null,
         h('button', { type: 'button', class: 'icon-btn', id: 'bell', onclick: openBell, 'aria-label': `Уведомления${unread ? `, новых: ${unread}` : ''}` }, ic('bell'), unread ? h('span', { class: 'dot' }) : null),
         h('button', { type: 'button', class: 'btn primary hide-m', onclick: () => openDeploy() }, ic('plus'), 'Добавить ноды')),
       h('div', { class: 'page' + (changed ? ' view-in' : '') }, D.err ? errorView() : D.loading ? skeleton() : VIEWS[base.name](base.arg))),
@@ -439,7 +439,7 @@ function drawerNode(n) {
   loadDetail(n);
   const tab = UI.tabs.node || 'overview';
   const TABS = [['overview', 'Обзор'], ['more', 'Настройки'], ['history', 'История']];
-  const body = { overview: nodeOverview, more: nodeMore, history: nodeHistory }[tab](n, D.detail[n.id] || {});
+  const body = { overview: nodeOverview, more: nodeSettings, history: nodeHistory }[tab](n, D.detail[n.id] || {});
   return h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Нода ' + n.name },
     h('div', { class: 'drawer-h' }, h('div', { html: postmark(n) }),
       h('div', { style: 'min-width:0;flex:1' },
@@ -519,15 +519,6 @@ function removeNode(n) {
   confirmTyped({ title: `Убрать ${n.name} из панели?`, word: n.name, ok: 'Убрать',
     text: 'Бот удалит ноду из панели вместе с её хостами и DNS-записью. Клиенты потеряют эту ноду. Сервер в Bobr Cloud останется — удалить его можно в Bobr Cloud.',
     fn: async () => { const r = await api(`profiles/${n.pid}/nodes/${n.uuid}`, 'DELETE'); toast(r.message || `${n.name} убрана`); closeOverlay(); refreshSoon(); } });
-}
-function nodeMore(n) {
-  const row = (i, t, s) => h('button', { type: 'button', class: 'li', onclick: () => classic(`node:${n.pid}:${n.uuid}`) },
-    h('div', { class: 'ic-tile' }, ic(i)), h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's', style: 'white-space:normal' }, s)), h('span', { class: 'chev' }, ic('ext')));
-  return [h('p', { class: 'muted', style: 'margin:0 0 14px' }, 'Эти настройки пока в классическом интерфейсе — откроется карточка этой же ноды.'),
-    h('div', { class: 'list' },
-      row('box', 'Дополнения и порт', 'Psiphon, WARP, запасной XHTTP, порт для клиентов, Final Mask'),
-      row('route', 'Вход через Россию', 'Клиенты подключаются к серверу в России, он пересылает трафик на ноду'),
-      row('terminal', 'Доступ SSH', 'Пароль, свой ключ или ключ бота'))];
 }
 function nodeHistory(n) {
   const js = D.jobs.filter(j => j.profile_id === n.pid && (j.domain === n.domain || j.domain === n.address || j.loc_name === n.name));
