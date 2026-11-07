@@ -83,6 +83,18 @@ const badge = (text, cls) => h('span', { class: 'badge ' + (cls || '') }, text);
 const statusLine = () => h('div', { class: 'status-line', role: 'status' });
 function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad'); el.textContent = r.message; UI.haptic(r.ok ? 'success' : 'error'); }
 const isAdmin = () => !!ST && ST.role === 'admin';
+// новый интерфейс (/app): если выбран — открываем его; ?classic=1 — пришли из нового в раздел, которого там ещё нет
+const QS = new URLSearchParams(location.search);
+const toNewUi = t => { if (t && t.ui === 'new' && !QS.has('classic')) { location.replace('/app'); return true; } return false; };
+function openDeep() {  // ?open=… — раздел, который новый интерфейс открывает здесь
+  const [k, a, b] = (QS.get('open') || '').split(':');
+  const go = { node: () => UI.nav.push(() => nodeView(+a, b)), job: () => UI.nav.push(() => jobView(+a)),
+    deploy: () => { D = null; UI.nav.push(() => deployView(a ? +a : undefined)); }, jobs: () => { JOBS = null; UI.nav.push(jobsView); },
+    group: () => UI.nav.push(() => groupView(+a)),
+    monitor: () => { MON = null; UI.nav.push(monitorView); }, servers: () => UI.nav.setTab('servers'), settings: () => UI.nav.setTab('settings'),
+    theme: () => UI.nav.push(themeView) }[k];
+  if (go && ST && !ST.error && ST.role !== 'paused') go();
+}
 // подпись группы в списках: чья она (у администратора — пользователя; у пользователя — от администратора)
 const groupWho = p => p.kind === 'user' ? 'пользователя ' + (p.created_by_label || '') : p.kind === 'shared' ? 'от администратора' : '';
 
@@ -95,8 +107,9 @@ async function load() {
     else ST = { error: e.message, status: e.status };
   }
   if (ST.theme) applyTheme(ST.theme);
+  if (ST.role !== 'paused' && toNewUi(ST.theme)) return;
   UI.nav.refresh();
-  if (ST && !ST.error && !ST._stale && ST.tour_done === false && !TOUR.on && !TOUR.offered) { TOUR.offered = true; setTimeout(tourStart, 700); }
+  if (ST && !ST.error && !ST._stale && ST.tour_done === false && !TOUR.on && !TOUR.offered && !QS.has('classic')) { TOUR.offered = true; setTimeout(tourStart, 700); }
 }
 // ───────── последнее известное состояние: сразу при открытии, потом — свежее ─────────
 const CACHE_KEY = 'bn:cache:' + (((UI.tg && UI.tg.initDataUnsafe && UI.tg.initDataUnsafe.user) || {}).id || 'web');
@@ -119,6 +132,7 @@ function restoreCache() {
     for (const k in c.nodes || {}) NODES[k] = { ...c.nodes[k], _stale: true };
     if (c.wal) WAL = { ...c.wal, _stale: true };
     if (ST.theme) applyTheme(ST.theme);
+    if (ST.role !== 'paused') toNewUi(ST.theme);
   } catch (e) {}
 }
 // список нод: нет — загрузить; сохранённый или старше минуты — обновить в фоне (новая нода появится сама)
@@ -219,6 +233,8 @@ function home() {
   const hk = heroKey();
   v.append(h('div', { class: 'hero' + (hk === 'none' ? ' plain' : '') }, hk === 'none' ? null : h('div', { class: 'art' }, heroImg(hk)),
     h('h2', {}, name ? `Привет, ${name}!` : 'BobrNet'), h('span', { class: 'st ' + state[1], role: 'status' }, state[0])));
+  if (ST.theme && ST.theme.ui === 'new') v.append(h('div', { class: 'notice info' }, 'Сейчас открыт классический интерфейс. ',
+    h('button', { class: 'btn', type: 'button', onclick: () => location.replace('/app') }, 'Вернуться в новый интерфейс')));
   const servers = ST.profiles.reduce((a, p) => a + (p.servers || 0), 0);
   v.append(h('div', { class: 'stats' },
     statTile(NS.nodes != null ? NS.nodes : servers, NS.nodes != null ? UI.plural(NS.nodes, 'нода', 'ноды', 'нод') : UI.plural(servers, 'сервер', 'сервера', 'серверов'), null, 'nodes'),
@@ -1001,6 +1017,18 @@ function hostView() {
 function themeView() {
   const t = ST.theme;
   const v = h('div', {}, ...title('Оформление'), h('div', { class: 'subtitle' }, 'Только для вас: у других пользователей бота оформление своё.'));
+  const ui = t.ui || 'classic', pickUi = async k => {
+    if (k === ui) return;
+    const r = await UI.run(() => api('theme', 'POST', { ui: k }));
+    if (!r) return;
+    ST.theme = r;
+    if (k === 'new') location.replace('/app'); else UI.nav.refresh();
+  };
+  v.append(group('Интерфейс', [
+    row({ title: 'Классический', sub: 'привычный вид', right: ui === 'classic' ? icon('check', 'check') : null, chevron: false, onClick: () => pickUi('classic') }),
+    row({ title: 'Новый', sub: 'пробная версия: обзор с проблемами и кнопками починки, все ноды одной таблицей', cls: 'wrap',
+      right: ui === 'new' ? icon('check', 'check') : null, chevron: false, onClick: () => pickUi('new') })],
+    'Можно переключаться в любой момент. Разделы, которых ещё нет в новом интерфейсе, открываются здесь.'));
   if (!window.FX) { v.append(h('div', { class: 'notice bad' }, 'Не загрузился модуль оформления. Обновите страницу.')); return v; }
   const save = async patch => {
     const r = await UI.run(() => api('theme', 'POST', patch));
@@ -3671,7 +3699,7 @@ restoreCache();
 UI.nav.mount(document.getElementById('root'), home, [
   { key: 'home', label: 'Главная', icon: 'home', root: home }, { key: 'servers', label: 'Серверы', icon: 'servers', root: serversView },
   { key: 'tools', label: 'Инструменты', icon: 'tools', root: toolsView }, { key: 'settings', label: 'Настройки', icon: 'gear', root: settingsTab }]);
-load();
+load().then(openDeep);
 </script>
 </body>
 </html>
