@@ -28,6 +28,10 @@ function wizLoadOwn() {
   w.ownLoading = true;
   api(`profiles/${w.pid}/servers`).then(r => { w.own = r.servers || []; }).catch(e => { w.ownErr = e.message; w.own = []; }).then(() => { w.ownLoading = false; render(true); });
 }
+function wizBack() {  // кнопка «Назад» Telegram в мастере: шаг назад, с первого шага — закрыть
+  const w = UI.wiz;
+  if (w && !w.ids && w.step > 0) { w.step--; w.err = ''; render(); } else closeWizard();
+}
 function closeWizard() {
   const w = UI.wiz, leave = () => { UI.wiz = null; closeOverlay(); };
   if (w && !w.ids && (w.locs.length || w.sel.size || w.step > 0)) confirmAct({ title: 'Закрыть мастер?', text: 'Выбор не сохранится. Ничего не куплено.', ok: 'Закрыть', cls: 'danger solid', fn: async () => leave() });
@@ -91,7 +95,7 @@ function wizard() {
       w.ids ? null : h('div', { class: 'steps', 'aria-label': `Шаг ${w.step + 1} из ${STEPS.length}` }, STEPS.map((s, i) => [i ? h('span', { class: 'sep' }) : null,
         h('span', { class: 'stp' + (i === w.step ? ' on' : i < w.step ? ' done' : '') }, h('i', null, i < w.step ? '✓' : i + 1), h('span', null, s))])),
       h('span', { style: 'flex:1' }),
-      h('button', { type: 'button', class: 'icon-btn', onclick: closeWizard, 'aria-label': 'Закрыть' }, ic('x'))),
+      h('button', { type: 'button', class: 'icon-btn x-close', onclick: closeWizard, 'aria-label': 'Закрыть' }, ic('x'))),
     h('div', { class: 'wiz-body', 'data-keep': 'wiz' + w.step }, h('div', { class: 'wiz-in' }, body,
       w.err ? h('div', { class: 'notice', role: 'alert', style: 'margin-top:16px' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, 'Не получилось'), w.err)) : null)),
     w.ids || !w.cat ? null : h('div', { class: 'wiz-foot' },

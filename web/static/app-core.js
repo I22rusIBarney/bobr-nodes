@@ -80,6 +80,33 @@ const flag = cc => (/^[A-Z]{2}$/.test(cc || '') ? String.fromCodePoint(...[...cc
 /* ── Telegram и запросы к боту ── */
 const tg = (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData !== undefined) ? window.Telegram.WebApp : null;
 try { tg && tg.ready(); tg && tg.expand(); } catch (e) { /* старый клиент */ }
+/* Telegram: безопасные области, высота окна, нативная кнопка «Назад».
+   В полноэкранном режиме Telegram рисует поверх страницы строку состояния и свои кнопки — контент начинается ниже них. */
+const tgAt = v => { try { return !!tg && tg.isVersionAtLeast(v); } catch (e) { return false; } };
+const nativeBack = !!tg && tg.platform && tg.platform !== 'unknown' && tgAt('6.1');
+if (nativeBack) document.documentElement.classList.add('tg-native');
+function tgLayout() {
+  if (!tg) return;
+  const st = document.documentElement.style, sa = tg.safeAreaInset || {}, ca = tg.contentSafeAreaInset || {};
+  let ctop = ca.top || 0;
+  // старые клиенты не сообщают высоту полосы с кнопками Telegram — берём её стандартную высоту
+  if (tg.isFullscreen && !ctop && ['ios', 'android'].includes(tg.platform)) ctop = 48;
+  st.setProperty('--tg-safe-area-inset-top', (sa.top || 0) + 'px');
+  st.setProperty('--tg-safe-area-inset-bottom', (sa.bottom || 0) + 'px');
+  st.setProperty('--tg-content-safe-area-inset-top', ctop + 'px');
+  st.setProperty('--tg-content-safe-area-inset-bottom', (ca.bottom || 0) + 'px');
+  if (tg.viewportStableHeight) st.setProperty('--app-h', tg.viewportStableHeight + 'px');
+  document.documentElement.classList.toggle('tg-fullscreen', !!tg.isFullscreen);
+}
+try {
+  if (tg) {
+    // на телефоне — во весь экран, как классический интерфейс; свайп вниз не закрывает приложение посреди прокрутки
+    if (tgAt('8.0') && ['ios', 'android'].includes(tg.platform) && !tg.isFullscreen) tg.requestFullscreen();
+    if (tgAt('7.7')) tg.disableVerticalSwipes();
+    tgLayout();
+    ['safeAreaChanged', 'contentSafeAreaChanged', 'fullscreenChanged', 'viewportChanged'].forEach(e => tg.onEvent(e, tgLayout));
+  }
+} catch (e) { /* старый клиент */ }
 async function api(path, method = 'GET', body) {
   const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), method === 'GET' ? 45000 : 120000);
   let r;
@@ -134,7 +161,7 @@ function modal({ title, body, actions = [], icon }) {
   const close = () => { wrap.remove(); const i = layers.indexOf(close); if (i >= 0) layers.splice(i, 1); syncBack(); prev && prev.focus && prev.focus(); };
   const box = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
     h('div', { class: 'modal-h' }, icon ? h('div', { class: 'attn-ic ' + icon[1] }, ic(icon[0])) : null, h('h3', { style: 'flex:1;margin-top:5px' }, title),
-      h('button', { type: 'button', class: 'icon-btn', style: 'width:32px;height:32px;border:0', onclick: close, 'aria-label': 'Закрыть' }, ic('x'))),
+      h('button', { type: 'button', class: 'icon-btn x-close', style: 'width:32px;height:32px;border:0', onclick: close, 'aria-label': 'Закрыть' }, ic('x'))),
     h('div', { class: 'modal-b' }, body),
     actions.length ? h('div', { class: 'modal-f' }, actions.map(a => {
       const b = h('button', { type: 'button', class: 'btn ' + (a.cls || ''), disabled: a.disabled, onclick: () => a.fn ? a.fn(close, b) : close() }, a.l);
@@ -168,13 +195,13 @@ function confirmTyped({ title, text, word, ok, fn }) {
 let backHandler = null;
 function topClose() { if (layers.length) return layers[layers.length - 1]; return backHandler; }
 function syncBack() {
-  if (!tg || !tg.BackButton) return;
+  if (!nativeBack) return;
   try { topClose() ? tg.BackButton.show() : tg.BackButton.hide(); } catch (e) { /* старый клиент */ }
 }
-try { tg && tg.BackButton && tg.BackButton.onClick(() => { const c = topClose(); c && c(); }); } catch (e) { /* старый клиент */ }
+try { nativeBack && tg.BackButton.onClick(() => { const c = topClose(); c && c(); }); } catch (e) { /* старый клиент */ }
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); window.openPalette && openPalette(); return; }
-  if (e.key === 'Escape') { const c = topClose(); c && c(); }
+  if (e.key === 'Escape') { const c = topClose(); c && !c.nav && c(); }  // Esc закрывает окна, но не уводит со страницы
 });
 window.addEventListener('scroll', () => { const t = $('.topbar'); t && t.classList.toggle('scrolled', window.scrollY > 4); }, { passive: true });
 
