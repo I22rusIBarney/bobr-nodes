@@ -85,7 +85,7 @@ def probe_cmd(items: list[tuple[str, str, int, str]]) -> str:
     for label, host, port, sni in items:
         h, p_, sn = shlex.quote(host), int(port), shlex.quote(sni or host)
         out.append(
-            f'if timeout 6 bash -c "</dev/tcp/{host}/{p_}" 2>/dev/null; then t=ok; else t=fail; fi; '
+            f"if timeout 6 bash -c '</dev/tcp/$0/$1' {h} {p_} 2>/dev/null; then t=ok; else t=fail; fi; "  # адрес — аргументом, не кодом
             f'o=$(timeout 10 openssl s_client -connect {h}:{p_} -servername {sn} </dev/null 2>&1); '
             'if echo "$o" | grep -q "Verify return code: 0"; then s=ok; '
             'elif echo "$o" | grep -qE "Server certificate|BEGIN CERTIFICATE"; then s=cert; '

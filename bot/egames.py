@@ -62,7 +62,7 @@ def keys(keep: dict | None = None) -> dict:
 
 
 # ───────── сервер ─────────
-def compose_text(secret: str, node_port: int) -> str:
+def compose_text(secret: str, node_port: int, image: str = 'remnawave/node:latest') -> str:
     return f'''x-common: &common
   ulimits:
     nofile:
@@ -90,7 +90,7 @@ services:
     command: sh -c 'rm -f {SOCK} && exec nginx -g "daemon off;"'
 
   remnanode:
-    image: remnawave/node:latest
+    image: {image}
     container_name: remnanode
     hostname: remnanode
     <<: *common
@@ -147,7 +147,7 @@ FALLBACK_HTML = ('<!doctype html><html lang="en"><head><meta charset="utf-8"><me
 
 
 def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips: list[str], extra_ports: list[int] = (),
-                port: int = 443) -> str:
+                port: int = 443, image: str = 'remnawave/node:latest') -> str:
     """Сервер ноды «как у eGames». Старую ноду (бота, Nuvrion, eGames) в /opt/remnanode останавливает и откладывает."""
     b64 = lambda t: base64.b64encode(t.encode()).decode()  # noqa: E731
     d = shlex.quote(domain)
@@ -182,7 +182,7 @@ def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips:
         'S=$(find "$T/x" -mindepth 2 -maxdepth 3 -name index.html 2>/dev/null | shuf -n1); '
         'if [ -n "$S" ]; then cp -r "$(dirname "$S")"/. /var/www/html/; else '
         f'echo {b64(FALLBACK_HTML)} | base64 -d > /var/www/html/index.html; fi; rm -rf "$T"; fi; '
-        f'mkdir -p {NODE_DIR} && cd {NODE_DIR} && echo {b64(compose_text(secret, node_port))} | base64 -d > docker-compose.yml '
+        f'mkdir -p {NODE_DIR} && cd {NODE_DIR} && echo {b64(compose_text(secret, node_port, image))} | base64 -d > docker-compose.yml '
         f'&& chmod 600 docker-compose.yml && echo {b64(nginx_conf(domain))} | base64 -d > nginx.conf; '
         f'if [ $UFW = 1 ]; then ufw allow {int(port)}/tcp comment bobr-egames >/dev/null; '
         + ''.join(f'ufw allow {int(pt)} comment bobr-egames >/dev/null; ' for pt in extra_ports) +
@@ -196,10 +196,10 @@ def install_cmd(domain: str, email: str, secret: str, node_port: int, panel_ips:
 
 
 def install(r: engine.Remote, domain: str, email: str, secret: str, node_port: int, panel_ips: list[str], log,
-            extra_ports: list[int] = (), port: int = 443) -> None:
+            extra_ports: list[int] = (), port: int = 443, image: str = 'remnawave/node:latest') -> None:
     log(f'ставлю ноду как в eGames на {domain}' + (f' (порт {port})' if int(port) != 443 else '') +
         ': Docker, сертификат, NGINX-заглушка, remnawave/node (до 5 минут)')
-    rc, out = r.run(install_cmd(domain, email, secret, node_port, panel_ips, extra_ports, port), 1200)
+    rc, out = r.run(install_cmd(domain, email, secret, node_port, panel_ips, extra_ports, port, image), 1200)
     out = engine.strip_ansi(out)
     if 'EG_MOVED' in out:
         log('старая нода на сервере остановлена и отложена в /opt/remnanode.before-egames-…')

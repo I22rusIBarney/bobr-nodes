@@ -516,40 +516,20 @@ function tourSteps() {
   const admin = isAdmin(), g = ST.profiles[0], S = [];
   S.push({ icon: ['sparkle', 'violet'], title: 'Привет! Это BobrNet',
     text: 'Бот покупает серверы в Bobr Cloud, ставит на них ноды Remnawave и дальше сам за ними следит. Покажу за минуту, где что лежит.' });
-  S.push({ tab: 'home', sel: '.home-page .hero', icon: ['activity', 'green'], title: 'Состояние одним взглядом',
-    text: 'Если что-то не так — ноды без связи, ошибки в задачах, нехватка ресурсов — это будет написано здесь. Всё хорошо — «Все системы работают».' });
-  S.push({ tab: 'home', sel: '.home-page .stats', icon: ['servers', 'blue'], title: 'Главные цифры',
-    text: 'Сколько у вас нод, групп и пользователей онлайн прямо сейчас — сразу по всем панелям.' });
-  S.push({ tab: 'home', sel: '.home-page .wallet-chip', icon: ['wallet', 'green'], title: 'Баланс Bobr Cloud',
-    text: 'С него покупаются и продлеваются серверы. Нажмите, чтобы пополнить картой или СБП. Если денег скоро не хватит, бот предупредит заранее.' });
-  S.push({ tab: 'home', sel: '.home-page .appbar .round-btn', icon: ['bell', 'amber'], title: 'Колокольчик',
-    text: 'Все события в одном месте: упала нода, панель не отвечает, кончается аренда, установка готова. Число на кнопке — новые события.' });
   S.push({ tab: 'home', sel: '.home-page .cta', icon: ['plusCircle', 'blue'], title: 'Развернуть ноды',
     text: 'Главная кнопка. Мастер спросит группу, страну, тариф и количество — а бот сам купит серверы, поставит ноды и добавит их в панель.' +
       (ST.issues.length ? ' Сейчас она серая: сначала закончите настройку — подсказка чуть выше.' : '') });
   S.push({ tab: 'home', sel: '.home-page section.group', icon: ['layers', 'violet'], title: 'Группы',
     text: 'Группа — это одна панель Remnawave со своими нодами, доменами и Cloudflare. Нажмите на группу, чтобы управлять её нодами.' });
-  S.push({ tab: 'home', sel: '.home-page .qa', icon: ['zap', 'amber'], title: 'Быстрые действия',
-    text: 'Самое частое под рукой: мониторинг из России, утренняя сводка, обновление нод' + (admin ? ', пользователи' : '') + ' и оформление.' });
-  S.push({ tab: 'home', sel: '.tabbar [data-k="servers"]', icon: ['servers', 'blue'], title: 'Раздел «Серверы»',
-    text: 'Внизу — четыре раздела. В «Серверах» все группы и их ноды. Заглянем туда.' });
-  S.push({ tab: 'servers', sel: '.servers-page section.group', icon: ['servers', 'blue'], title: 'Все группы',
-    text: 'У каждой группы — число нод и онлайн. Здесь же создаётся новая группа: адрес панели, токен и домен для имён нод.' });
   if (g) {
     const gv = tourScreen('group', () => groupView(g.id));
     S.push({ tab: 'servers', screen: gv, sel: '.group-page .segmented', icon: ['list', 'teal'], title: 'Страница группы',
-      text: 'Вкладки: серверы группы, статистика и пользователи. Нажмите на ноду — откроется её карточка: SSH, смена IP, дополнения, вход через Россию.' });
-    S.push({ tab: 'servers', screen: gv, sel: '.group-page .qa.four', icon: ['gear', 'gray'], title: 'Управление группой',
-      text: 'Обновление нод с проверкой и откатом, автоматизация (автообновление, нагрузка, автомасштабирование, прогноз баланса), аренда серверов и настройки панели.' });
-    S.push({ tab: 'servers', screen: gv, sel: '.group-page .qa.four + .stack', icon: ['shield', 'red'], title: 'Плагины и уборка',
-      text: 'Плагины — блокировка торрентов и фильтры сканеров сразу на всех нодах. Уборка найдёт оплаченные серверы без нод и мёртвые ноды.' });
+      text: 'Сначала — серверы группы и их состояние словами: на связи, нет связи, идёт задача. Нажмите на сервер — откроется его карточка. Ниже — «Управление группой»: обновления, автоматизация, аренда, плагины и настройки.' });
   }
   S.push({ tab: 'tools', sel: '.tools-page section.group', icon: ['activity', 'blue'], title: 'Мониторинг и задачи',
     text: 'Мониторинг каждые 5 минут проверяет ноды из России и чинит упавшие: смена IP, перезапуск, новая нода. В «Задачах» — ход установок и обновлений.' });
-  S.push({ tab: 'settings', sel: '.settings-page section.group', icon: ['bell', 'amber'], title: 'Настройки для вас',
-    text: 'Баланс, утренняя сводка, оформление и уведомления — что приходит в Telegram, а что только в колокольчик, плюс тихие часы ночью.' });
-  if (admin) S.push({ tab: 'settings', sel: '.settings-page section.group:last-of-type', icon: ['cpu', 'gray'], title: 'Сервер бота',
-    text: 'Подключения (Bobr Cloud, Cloudflare, Gemini), защита и нагрузка сервера, автообновление бота и история версий.' });
+  S.push({ tab: 'settings', sel: '.settings-page section.group', icon: ['gear', 'gray'], title: 'Настройки',
+    text: 'Баланс, утренняя сводка, уведомления и оформление' + (admin ? ', а ниже — сервер бота: подключения Bobr Cloud, Cloudflare и Gemini, защита, обновления' : '') + '. Тур можно повторить отсюда же.' });
   S.push({ icon: ['checkCircle', 'green'], title: 'Готово!',
     text: (ST.profiles.length ? 'Начните с кнопки «Развернуть ноды».' : 'Начните с новой группы — подключите свою панель Remnawave.') + ' Обучение всегда можно пройти снова: Настройки → «Обучение».' });
   return S;
@@ -1252,7 +1232,7 @@ function otherView() {
 let MON = null, monTimer = 0;
 const MONF = {};  // несохранённые настройки мониторинга групп
 const CKF = {};  // несохранённый доступ по SSH на странице чекера
-const MST = { ok: ['', 'ok', 'доступна'], down: ['недоступна', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
+const MST = { ok: ['', 'ok', 'доступна из России'], down: ['не проходит из России', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
   ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
 const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
 const cst = c => c.status === 'idle' && MON.groups.some(g => g.enabled) ? ['подписки — при опросе', 'warn'] : (CST[c.status] || [c.status, '']);
@@ -1966,24 +1946,17 @@ function groupView(pid) {
   const go = { deploy: () => { D = null; UI.nav.push(() => deployView(pid)); }, upd: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); },
     auto: () => { delete AUTO[pid]; UI.nav.push(() => autoView(pid)); }, plug: () => { delete PLUG[pid]; delete PLUGD[pid]; UI.nav.push(() => pluginsView(pid)); }, clean: () => { delete CLEAN[pid]; UI.nav.push(() => cleanupView(pid)); }, rent: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); }, set: () => { delete PS[pid]; openProfile(pid); } };
   const v = h('div', { class: 'group-page' }, ...pageHead(g.name, { sub: g.panel_url.replace(/^https?:\/\//, '') + ' · ' + acct, menu: [
-    { text: 'Обновление нод', icon: 'renew', color: 'teal', fn: go.upd }, { text: 'Автоматизация', icon: 'zap', color: 'amber', fn: go.auto },
-    { text: 'Аренда серверов', icon: 'calendar', color: 'green', fn: go.rent }, { text: 'Плагины нод', icon: 'shield', color: 'red', fn: go.plug }, { text: 'Уборка', icon: 'trash', color: 'gray', fn: go.clean }, { text: 'Настройки группы', icon: 'gear', color: 'gray', fn: go.set },
+    { text: 'Настройки группы', icon: 'gear', color: 'gray', fn: go.set },
     { text: 'Обновить данные', icon: 'restart', color: 'blue', fn: () => { delete NODES[pid]; delete PS[pid]; delete GJ[pid]; UI.nav.refresh(); } }] }));
   v.append(h('div', { class: 'cta', style: 'margin-bottom:var(--s4)' }, h('button', { class: 'btn', type: 'button', disabled: ST.issues.some(x => x !== 'создайте группу'), onclick: go.deploy }, icon('plusCircle'), 'Развернуть в группе')));
-  // панель: связь и действия с ней
-  v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Панель',
-    st ? h('span', { class: 'st ' + (st.ok ? 'ok' : 'bad'), style: 'margin-left:auto;font-size:13px;font-weight:500' }, st.ok ? st.message.replace(/^Панель отвечает: /, '') : 'нет связи') : null),
-    st && !st.ok ? h('div', { class: 'failed', style: 'margin:0 0 10px' }, h('p', { style: 'margin:0' }, h('b', {}, 'Панель не отвечает'), st.message)) : null,
-    h('div', { class: 'qa four' }, [['Обновления', 'renew', 'teal', go.upd], ['Автоматизация', 'zap', 'amber', go.auto], ['Аренда', 'calendar', 'green', go.rent], ['Настройки', 'gear', 'gray', go.set]]
-      .map(([t, ic, c, fn]) => h('button', { type: 'button', onclick: fn }, UI.tile(ic, c), t))),
-    UI.stack([row({ icon: 'shield', color: 'red', title: 'Плагины нод', sub: 'блокировка торрентов, фильтры сканеров', onClick: go.plug }),
-      row({ icon: 'trash', color: 'gray', title: 'Уборка', sub: 'лишние серверы и мёртвые ноды', onClick: go.clean })])));
+  // панель не отвечает — видно сразу; когда всё в порядке, место отдаём серверам
+  if (st && !st.ok) v.append(h('div', { class: 'failed', style: 'margin:0 0 var(--s4)' }, h('p', { style: 'margin:0' }, h('b', {}, 'Панель не отвечает'), st.message)));
   v.append(UI.segmented([{ value: 'nodes', label: 'Серверы' }, { value: 'stats', label: 'Статистика' }, { value: 'access', label: 'Пользователи' }], S.tab, x => { S.tab = x; UI.nav.refresh(); }, 'tabs'));
   if (S.tab === 'stats') return groupStats(v, pid, L);
   if (S.tab === 'access') return groupAccess(v, g);
   // ── серверы: поиск, фильтр, карточки нод ──
   if (!L) { v.append(h('div', { class: 'group' }, UI.stack([1, 2, 3, 4].map(() => h('div', { class: 'skeleton' }))))); return v; }
-  if (L.error) { v.append(UI.failed(L.error, () => { delete NODES[pid]; UI.nav.refresh(); }, 'Панель не ответила')); return groupJobs(v, pid, jobs, S); }
+  if (L.error) { v.append(UI.failed(L.error, () => { delete NODES[pid]; UI.nav.refresh(); }, 'Панель не ответила')); groupJobs(v, pid, jobs, S); v.append(groupManage(st, go)); return v; }
   const target = (L.versions || {}).target;
   const off = n => !n.disabled && !n.connected;
   const cnt = { all: L.nodes.length, on: L.nodes.filter(n => n.connected && !n.disabled).length, off: L.nodes.filter(off).length, warn: L.nodes.filter(n => nodeHot(n) || n.busy).length };
@@ -1998,16 +1971,30 @@ function groupView(pid) {
     list = [...list].sort(S.sort === 'name' ? (a, b) => a.name.localeCompare(b.name, 'ru', { numeric: true })
       : S.sort === 'online' ? (a, b) => (b.online || 0) - (a.online || 0) : (a, b) => rank(a) - rank(b) || (b.online || 0) - (a.online || 0));
     const CAP = 8, shown = S.all || q ? list : list.slice(0, CAP);
-    box.replaceChildren(UI.stack([...shown.map(n => nodeCard(pid, n, target)),
+    box.replaceChildren(UI.stack([...(shown.length ? [nodeHead()] : []), ...shown.map(n => nodeCard(pid, n, target)),
       ...(!list.length ? [row({ cls: 'is-dim wrap', title: q ? 'Ничего не нашлось' : 'Здесь пусто', sub: q ? 'Поиск — по имени, адресу и стране.' : null, chevron: false })] : []),
       ...(list.length > CAP && !q ? [act(S.all ? 'Свернуть' : `Все серверы · ${list.length}`, () => { S.all = !S.all; draw(); })] : [])]));
   };
   v.append(h('div', { class: 'searchbar' }, UI.search(S.q, 'Поиск по имени, стране, IP…', q => { S.q = q; draw(); }), sortBtn));
-  v.append(UI.fchips([{ value: 'all', label: 'Все', n: cnt.all }, { value: 'on', label: 'Онлайн', n: cnt.on, tone: 'ok' }, { value: 'off', label: 'Оффлайн', n: cnt.off, tone: cnt.off ? 'bad' : '' },
+  v.append(UI.fchips([{ value: 'all', label: 'Все', n: cnt.all }, { value: 'on', label: 'На связи', n: cnt.on, tone: 'ok' }, { value: 'off', label: 'Нет связи', n: cnt.off, tone: cnt.off ? 'bad' : '' },
     ...(cnt.warn ? [{ value: 'warn', label: 'Внимание', n: cnt.warn, tone: 'warn' }] : [])], S.f, x => { S.f = x; UI.nav.refresh(); }));
   draw();
   v.append(box);
-  return groupJobs(v, pid, jobs, S);
+  groupJobs(v, pid, jobs, S);
+  v.append(groupManage(st, go));
+  return v;
+}
+// управление группой — под списком серверов: всё, что раньше было плитками над ним, с понятными подписями
+function groupManage(st, go) {
+  return h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Управление группой',
+    st && st.ok ? h('span', { class: 'st ok', style: 'margin-left:auto;font-size:13px;font-weight:500' }, 'панель: ' + st.message.replace(/^Панель отвечает: /, '')) : null),
+    UI.stack([
+      row({ icon: 'renew', color: 'teal', title: 'Обновления и изменения', sub: 'сразу у нескольких нод: версия, дополнения, порт', onClick: go.upd }),
+      row({ icon: 'zap', color: 'amber', title: 'Автоматизация', sub: 'автообновление, нагрузка, срок аренды', onClick: go.auto }),
+      row({ icon: 'calendar', color: 'green', title: 'Аренда серверов', sub: 'сроки, продление, автопродление', onClick: go.rent }),
+      row({ icon: 'shield', color: 'red', title: 'Плагины нод', sub: 'блокировка торрентов, фильтры сканеров', onClick: go.plug }),
+      row({ icon: 'trash', color: 'gray', title: 'Уборка', sub: 'лишние серверы и мёртвые ноды', onClick: go.clean }),
+      row({ icon: 'gear', color: 'gray', title: 'Настройки группы', sub: 'панель, домены, сквады, скрипт установки', onClick: go.set })]));
 }
 // карточка ноды: флаг, имя, адрес, метки; справа — онлайн или состояние
 function nodeCard(pid, n, target) {
@@ -2016,10 +2003,18 @@ function nodeCard(pid, n, target) {
   if (n.version) tags.push(['v' + n.version + (old ? ' · устарела' : ''), old ? 'warn' : '']);
   (n.features || []).forEach(f => tags.push([FEAT[f] || f, 'accent']));
   if (nodeHot(n)) tags.push([loadShort(n.load), 'warn']);
-  return row({ flag: flagOf(n.country), title: n.name, sub: mid(n.address, 34), tags,
-    status: n.busy ? ['задача', 'run'] : n.disabled ? ['выключена', 'quiet'] : !n.connected ? ['недоступна', 'bad']
-      : [String(n.online ?? 0), 'ok', 'онлайн ' + (n.online ?? 0), 'num'],
+  const live = n.connected && !n.disabled && !n.busy;
+  return row({ flag: flagOf(n.country), title: n.name, cls: 'node',
+    sub: [mid(n.address, 34), live ? h('span', { class: 'm-only' }, ` · ${n.online ?? 0} онлайн`) : null], tags,
+    cols: [[live ? `${n.online ?? 0} онлайн` : '', 'num'], [n.version ? 'v' + n.version + (old ? ' · устарела' : '') : '', old ? 'warn' : ''],
+      [(n.features || []).map(f => FEAT[f] || f).join(', '), (n.features || []).length ? 'accent' : ''], [n.load ? loadShort(n.load) : '', nodeHot(n) ? 'warn' : '']],
+    status: n.busy ? ['идёт задача', 'run'] : n.disabled ? ['выключена', 'quiet'] : !n.connected ? ['нет связи', 'bad'] : ['на связи', 'ok'],
     onClick: () => { delete NODE[n.uuid]; UI.nav.push(() => nodeView(pid, n.uuid)); } });
+}
+// заголовок таблицы нод на широком экране (те же колонки, что у nodeCard)
+function nodeHead() {
+  return h('div', { class: 'row node node-head', 'aria-hidden': 'true' }, h('span', { class: 'flag-tile' }), h('div', { class: 'grow' }, 'Сервер'),
+    h('div', { class: 'cols' }, ['Онлайн', 'Версия', 'Дополнения', 'Нагрузка'].map(t => h('span', { class: 'c' }, t))), h('span', { class: 'hd-st' }, 'Состояние'), h('span', { class: 'hd-chev' }));
 }
 // установки серверов в группе: то, что идёт или с ошибкой, — сверху
 function groupJobs(v, pid, jobs, S) {
@@ -3557,11 +3552,9 @@ function toolsView() {
   const admin = isAdmin(), j = ST.jobs;
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Каждый день'), UI.stack([
     row({ icon: 'activity', color: 'blue', title: 'Мониторинг', sub: 'доступность нод из России и починка', onClick: () => { MON = null; UI.nav.push(monitorView); } }),
-    row({ icon: 'list', color: 'violet', title: 'Задачи', sub: 'установки, обновления, смена IP', status: j.active ? ['идёт: ' + j.active, 'run'] : j.failed ? ['ошибок: ' + j.failed, 'bad'] : null, onClick: () => { JOBS = null; UI.nav.push(jobsView); } }),
-    row({ icon: 'plusCircle', color: 'green', title: 'Развернуть ноды', sub: 'купить серверы и поставить ноды', onClick: () => { D = null; UI.nav.push(() => deployView()); } })])));
+    row({ icon: 'list', color: 'violet', title: 'Задачи', sub: 'установки, обновления, смена IP', status: j.active ? ['идёт: ' + j.active, 'run'] : j.failed ? ['ошибок: ' + j.failed, 'bad'] : null, onClick: () => { JOBS = null; UI.nav.push(jobsView); } })])));
   const more = [
     admin || ST.profiles.length > 1 ? row({ icon: 'swap', color: 'teal', title: 'Перенос хостов', sub: 'между панелями или из файла', onClick: () => { TX = null; UI.nav.push(transferView); } }) : null,
-    row({ icon: 'renew', color: 'amber', title: 'Обновление нод', sub: 'выбранные или все, с откатом', onClick: () => pickGroup('Обновление нод', pid => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); }) }),
     admin ? row({ icon: 'code', color: 'violet', title: 'Мои скрипты', sub: 'свои установщики с GitHub', onClick: () => { SCR = null; UI.nav.push(scriptsView); } }) : null].filter(Boolean);
   v.append(h('section', { class: 'group' }, h('div', { class: 'group-h' }, 'Инструменты'), UI.stack(more)));
   return v;

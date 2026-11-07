@@ -121,6 +121,9 @@ async def main():
     logging.info('веб-админка: %s/admin', public_url or 'http://localhost:8080')
 
     selfupdate.take_note(data_dir)  # список коммитов от bnodes больше не нужен — что нового берём из истории версий
+    rolled = selfupdate.rollback_note(data_dir)
+    if rolled:
+        await autopilot.notify.emit('system.update', rolled)
     note = selfupdate.whats_new(store)
     if note:
         await autopilot.notify.emit('system.update', note)

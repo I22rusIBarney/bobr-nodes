@@ -32,7 +32,9 @@ pull_image() {  # $1 — sha коммита. 0 — образ скачан, 1 �
   while :; do
     if docker pull -q "$img" >/dev/null 2>&1; then
       env_set BNODES_IMAGE "$img"
-      docker images "ghcr.io/${repo,,}" --format '{{.Repository}}:{{.Tag}}' | grep -vx "$img" | xargs -r docker rmi >/dev/null 2>&1 || true
+      # прежний образ оставляем: на него откатываемся, если новая версия не запустится
+      docker images "ghcr.io/${repo,,}" --format '{{.Repository}}:{{.Tag}}' | grep -vx "$img" | grep -vx "${PREV_IMAGE:-}" \
+        | xargs -r docker rmi >/dev/null 2>&1 || true
       return 0
     fi
     st="$(curl -fsS -m 10 "https://api.github.com/repos/$repo/actions/runs?head_sha=$sha&per_page=5" 2>/dev/null | tr -d ' \n' || true)"
@@ -335,6 +337,7 @@ case "${1:-install}" in
     before="$(git rev-parse HEAD)"; after="$(git rev-parse origin/main)"
     [[ "$before" == "$after" ]] && exit 0
     git merge-base --is-ancestor HEAD origin/main || exit 0   # локальные правки — только вручную
+    [[ -f data/update-skip && "$(cat data/update-skip)" == "$after" ]] && exit 0   # эта версия уже не запустилась — ждём следующую
     repo="$(gh_repo)"; [[ -n "$repo" ]] || exit 0
     docker pull -q "ghcr.io/${repo,,}:sha-$after" >/dev/null 2>&1 || exit 0   # тесты ещё идут или не прошли
     compose exec -T nodes python -m bot.selfupdate check $now >/dev/null 2>&1 || exit 0
@@ -347,9 +350,24 @@ case "${1:-install}" in
     deploy; install_cli
     if wait_ready; then ok "Бот запущен"; echo RESTORE_OK; else die "Бот не запустился — посмотрите: bnodes logs"; fi
     exit 0 ;;
-  _rebuild)
+  _rebuild)  # $2 — версия до обновления: на неё откатываемся, если новая не запустится
+    PREV_IMAGE="$(env_get BNODES_IMAGE)"
     deploy "${2:-}"; install_cli
-    wait_ready && ok "Бот перезапущен" || warn "Бот не ответил — посмотрите bnodes logs"
+    if wait_ready; then rm -f data/update-skip; ok "Бот перезапущен"; exit 0; fi
+    if [[ -n "${2:-}" && -n "$PREV_IMAGE" ]] && docker image inspect "$PREV_IMAGE" >/dev/null 2>&1; then
+      bad="$(git rev-parse HEAD)"
+      warn "Новая версия ${bad:0:7} не запустилась — возвращаю прежнюю ($2)"
+      git reset -q --keep "$2" || warn "Не удалось вернуть код к $2 — проверьте git status"
+      env_set BNODES_IMAGE "$PREV_IMAGE"
+      compose up -d --remove-orphans
+      git log -1 --format='%H%x09%cd%x09%s' --date=format:'%d.%m.%Y %H:%M' > data/version.txt 2>/dev/null || true
+      printf '%s\n' "$bad" > data/update-skip              # автообновление эту версию больше не ставит
+      printf '%s %s\n' "${bad:0:7}" "$2" > data/update-rollback.txt  # бот сообщит администраторам
+      rm -f data/update-note.txt
+      if wait_ready; then ok "Бот работает на прежней версии $2"; else warn "Бот не ответил и на прежней версии — посмотрите bnodes logs"; fi
+    else
+      warn "Бот не ответил — посмотрите bnodes logs"
+    fi
     exit 0 ;;
   restart) compose restart nodes; ok "Бот перезапущен"; exit 0 ;;
   logs)    compose logs -f --tail=100 nodes; exit 0 ;;

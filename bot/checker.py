@@ -16,8 +16,8 @@ from . import engine
 from .engine import StepError
 
 DIR = '/opt/bnodes-checker'
-IMAGE = 'kutovoys/xray-checker:latest'
-MIRROR = 'mirror.gcr.io/kutovoys/xray-checker:latest'  # Docker Hub из России бывает недоступен
+IMAGE = 'kutovoys/xray-checker:v1.3.1'  # закреплённая версия: :latest меняется без нашей проверки
+MIRROR = 'mirror.gcr.io/kutovoys/xray-checker:v1.3.1'  # Docker Hub из России бывает недоступен
 PORT = 2112
 USER = 'bnodes'
 INTERVAL = 300  # секунд между проверками — как у xray-checker по умолчанию

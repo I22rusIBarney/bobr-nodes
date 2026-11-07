@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import math
 import re
 import secrets
@@ -49,11 +50,56 @@ def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
     return out
 
 
+def admin_ids() -> set[int]:
+    """Администраторы бота из .env (ADMIN_IDS)."""
+    return {int(x) for x in os.environ.get('ADMIN_IDS', '').replace(' ', '').split(',') if x.isdigit()}
+
+
+def tenant_group(store: Store, prof: dict | None, admins) -> bool:
+    """Группой управляет приглашённый пользователь бота: он её создал или он — её клиент Bobr Cloud.
+    Тогда панель (а с ней адреса нод) задаёт он, и доверять им наравне с группами администратора нельзя.
+    Клиент Bobr Cloud, который не пользуется ботом (или сам администратор), группу пользовательской не делает."""
+    if not prof:
+        return False
+    if prof.get('created_by'):
+        return True
+    admins = {str(a) for a in admins}
+    tg = str(prof.get('owner_tg_id') or '').strip()
+    owner = str(prof.get('owner') or '').strip()
+    if not tg and owner.isdigit():
+        tg = owner
+    if tg:
+        return tg not in admins and tg.isdigit() and store.user(int(tg)) is not None
+    if owner.startswith('@'):  # доступ пользователю бота даёт и совпадение @username
+        name = owner[1:].lower()
+        return any((u.get('username') or '').lower() == name and str(u.get('tg_id', u.get('id'))) not in admins
+                   for u in store.users())
+    return False
+
+
+def bot_key_ips(store: Store, pid: int) -> set[str]:
+    """Адреса серверов группы, на которые бот сам положил свой ключ: купленные и поставленные им ноды
+    (IP и домен из задачи) и купленные им входы."""
+    out = set(bot_jobs_by_ip(store, pid))
+    out |= {x['ip'] for x in store.relays() if x['pid'] == pid and x.get('ip') and (x.get('bought') or x.get('server_id'))}
+    return out
+
+
+def guard_bot_key(store: Store, prof: dict | None, acc: dict, target: str, admins) -> dict:
+    """Ключ бота лежит на всех нодах, которые бот ставил, — во всех группах. В группе пользователя ключ бота
+    работает только с серверами, которые бот сам купил или поставил в этой группе; иначе — пароль или ничего."""
+    if (acc or {}).get('key') != 'bot' or not tenant_group(store, prof, admins) or target in bot_key_ips(store, prof['id']):
+        return acc
+    acc = {**acc, 'key': ''}
+    return acc if acc.get('password') else {}
+
+
 def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict:
     """Доступ для задачи: сохранённый, иначе — пароль из задачи покупки."""
     saved = runner.ssh_of(pid, uuid)
     if saved:
-        return saved
+        target = (bot_jobs_by_ip(store, pid).get(ip) or {}).get('ip') or ip
+        return guard_bot_key(store, store.profile(pid), saved, target, runner.admins)
     d = bot_jobs_by_ip(store, pid).get(ip)
     return {'user': 'root', 'port': 22, 'password': d.get('password', ''), 'key': ''} if d else {}
 
@@ -223,12 +269,20 @@ async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: i
     if used:
         errs.append('уже есть в задачах: ' + ', '.join(sorted(used)))
     if not errs:
+        tenant = tenant_group(store, prof, admin_ids())
+
         def zones():
             cf = cf_for(store, prof)
             for d in doms:
                 cf.zone_for(d)
+            if tenant:  # бот перезаписывает A-запись — в группе пользователя только свои или новые имена
+                return [d for d in doms if any(r.get('comment') != 'nv-deploy' for r in cf.records(d))]
+            return []
         try:
-            await asyncio.to_thread(zones)
+            foreign = await asyncio.to_thread(zones)
+            if foreign:
+                errs.append('у этих имён уже есть DNS-записи, созданные не ботом (или ботом старой версии — тогда удалите '
+                            'запись в Cloudflare) — выберите другие: ' + ', '.join(foreign))
         except engine.StepError as e:
             errs.append(str(e))
     if errs:

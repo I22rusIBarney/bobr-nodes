@@ -85,6 +85,12 @@ def pick_target(tags: list[str], panel_ver: str) -> str:
     return max(good, key=semver) if good else 'latest'
 
 
+def node_image(panel: engine.Panel) -> str:
+    """Образ ноды для новой установки (мост, eGames): последняя версия той же ветки, что панель, —
+    а не :latest, который может уехать на новую ветку раньше панели."""
+    return 'remnawave/node:' + pick_target(hub_tags(), panel_version(panel))
+
+
 def check_tag(tag: str) -> str:
     tag = str(tag or 'latest').strip()
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}', tag):

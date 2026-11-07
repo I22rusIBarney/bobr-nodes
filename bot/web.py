@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import socket
 import time
 from pathlib import Path
@@ -193,7 +194,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise
         except Exception as e:  # noqa: BLE001 — показываем причину, а не «сервер не смог»
             logging.getLogger(__name__).exception('api %s', request.path)
-            return web.json_response({'detail': f'Ошибка бота: {type(e).__name__}: {e}'[:300]}, status=500)
+            if role == 'admin':  # администратору — где именно сломалось; пользователю — без внутренностей
+                return web.json_response({'detail': f'Ошибка бота: {type(e).__name__}: {e}'[:300]}, status=500)
+            return web.json_response({'detail': 'Что-то пошло не так на стороне бота. Попробуйте ещё раз через минуту — '
+                                                'если повторится, напишите администратору.'}, status=500)
 
     app = web.Application(middlewares=[headers, guard], client_max_size=256 * 1024)
     r = web.RouteTableDef()
@@ -286,12 +290,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     def theme(uid: int = 0) -> dict:
         t = theme_raw(uid)
-        bg, effect = t.get('bg') or 'none', t.get('effect') or 'auto'
+        bg, effect = t.get('bg') or 'none', t.get('effect') or 'none'  # эффекты — только если выбрали сами
         try:
             glass = max(0, min(GLASS_MAX, int(t.get('glass') or 0)))
         except (TypeError, ValueError):
             glass = 0
-        return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
+        return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'none',
                 'image': t.get('image') or '', 'glass': glass, 'hero': t.get('hero') if t.get('hero') in THEME_HEROES else 'auto'}
 
     def theme_put(uid: int, t: dict) -> dict:
@@ -531,6 +535,18 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         data.pop('owner', None)  # клиента bcloud ставим сами после проверки формы
         if cur is not None and str(cur.get('created_by') or '') != str(uid_of(request)):
             data.pop('cf_token', None)
+            # группа администратора: её токен панели на новый адрес не отправляем — новый адрес, новые ключи
+            from urllib.parse import urlsplit
+
+            def origin(u) -> tuple:
+                p_ = urlsplit(str(u or '').strip())
+                return p_.scheme.lower(), p_.netloc.lower()
+            new_url = str(data.get('panel_url') or '').strip()
+            if new_url and origin(new_url) != origin(cur.get('panel_url')):
+                if not str(data.get('panel_token') or '').strip():
+                    raise ApiError('Новый адрес панели — укажите и её API-токен: прежний токен на другой адрес не отправляем')
+                if cur.get('panel_cookie') and not str(data.get('panel_cookie') or '').strip():
+                    raise ApiError('Новый адрес панели — укажите и cookie-защиту новой панели (или «-», если её нет)')
         return data
 
     async def with_owner(prof: dict, cur: dict | None = None) -> dict:
@@ -633,6 +649,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     def bot_jobs_by_ip(pid: int) -> dict[str, dict]:
         return svc.bot_jobs_by_ip(store, pid)
+
+    def no_foreign_bot_key(request, b: dict, p: dict | None, ip: str) -> None:
+        """Пользователь не может направить ключ бота на чужой сервер: ключ лежит на нодах всех групп."""
+        if is_admin(request) or str(b.get('key') or '') != 'bot':
+            return
+        if p is None or ip not in svc.bot_key_ips(store, p['id']):
+            raise ApiError('Ключ бота подходит только для серверов, которые бот сам купил или поставил в ваших группах. Укажите пароль или свой ключ.')
 
     def ssh_view(pid: int, uuid: str, ip: str) -> dict:
         from . import sshaccess
@@ -848,8 +871,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return x
 
     def relay_remote(acc: dict) -> engine.Remote:
+        """Вход по SSH на сервер моста. Ключ бота в группе пользователя — только к серверам, которые бот там купил."""
         from . import sshaccess
-        return engine.Remote({'ip': acc['ip'], **sshaccess.to_node(acc.get('ssh'), runner.bot_key()[0]),
+        ssh = svc.guard_bot_key(store, store.profile(acc['pid']), acc.get('ssh') or {}, acc['ip'], runner.admins) \
+            if acc.get('pid') else acc.get('ssh')
+        return engine.Remote({'ip': acc['ip'], **sshaccess.to_node(ssh, runner.bot_key()[0]),
                               'known_hosts': runner.known_hosts()}, None)
 
     def node_ctx(p: dict, uuid: str):
@@ -916,6 +942,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             ip = str(b.get('ip') or '').strip()
             if not engine.is_ip(ip) or ':' in ip:
                 raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
+            no_foreign_bot_key(request, b, p, ip)
         elif source == 'server':
             try:
                 sid = int(b.get('server_id'))
@@ -1031,7 +1058,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         from .runner import cf_token_of
         nd = x['convert']
         nprof = store.profile(int(nd['node_pid']))
-        r = relay_remote({'ip': x['ip'], 'ssh': acc})
+        r = relay_remote({'ip': x['ip'], 'ssh': acc, 'pid': x['pid']})
         log(f'останавливаю ноду {nd.get("domain") or x["ip"]} на сервере')
         await asyncio.to_thread(rl.convert, r, nd.get('domain') or '', log)
         if nprof:
@@ -1127,7 +1154,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             try:
                 if wait:
                     say('жду, пока на сервере поднимется SSH')
-                    await asyncio.to_thread(engine.wait_ssh, relay_remote({'ip': ip, 'ssh': x['ssh']}), say)
+                    await asyncio.to_thread(engine.wait_ssh, relay_remote({'ip': ip, 'ssh': x['ssh'], 'pid': x['pid']}), say)
                 if x.get('convert') and not x['convert'].get('done'):
                     relay_say(x['id'], stage='convert')
                     await relay_convert(x, x['ssh'], say)
@@ -1174,8 +1201,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         pl, n, hosts = await asyncio.to_thread(ctx)
         relay_say(x['id'], stage='node')
         secret = await asyncio.to_thread(pl.secret_key)
+        image = await asyncio.to_thread(up.node_image, pl)
         await asyncio.to_thread(xb.install, relay_remote(x), secret, int(x.get('node_port') or 2222), int(x['listen']),
-                                xb.env_panel_ips(p), say)
+                                xb.env_panel_ips(p), say, image)
         relay_say(x['id'], 'панель: профиль моста, служебный пользователь выхода, нода входа, хост, сквады', stage='panel')
 
         def setup():
@@ -1255,8 +1283,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         await asyncio.to_thread(engine.wait_dns, dom, nip, say, 600, 15, cf)
         secret = await asyncio.to_thread(pl.secret_key)
         try:
+            image = await asyncio.to_thread(up.node_image, pl)  # версия ноды — под ветку панели, не :latest
             await asyncio.to_thread(egm.install, r, dom, p['email'], secret, int(p.get('node_port') or 2222), xb.env_panel_ips(p), say,
-                                    [xb.SS_PORT])
+                                    [xb.SS_PORT], 443, image)
         except engine.StepError as e:  # «выход:» — страница моста по этой метке спросит пароль именно выхода
             raise engine.StepError(f'выход {dom}: {e}') from None
 
@@ -1303,8 +1332,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         await asyncio.to_thread(engine.wait_dns, x['domain'], x['ip'], say, 600, 15, cf)
         secret = await asyncio.to_thread(pl.secret_key)
         r = relay_remote(x)
+        image = await asyncio.to_thread(up.node_image, pl)
         await asyncio.to_thread(egm.install, r, x['domain'], p['email'], secret, int(x.get('node_port') or 2222),
-                                xb.env_panel_ips(p), say, (), int(x.get('listen') or 443))
+                                xb.env_panel_ips(p), say, (), int(x.get('listen') or 443), image)
         relay_say(x['id'], 'панель: профиль моста, Shadowsocks до выхода, служебный пользователь, нода входа, хост', stage='panel')
 
         def setup():
@@ -1328,7 +1358,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if ss.get('address') and ss.get('port'):
                 o = ''
                 for _ in range(6):  # выход перезапускает Xray с новым inbound — даём ему до минуты
-                    _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/{ss['address']}/{int(ss['port'])}' "
+                    _, o = await asyncio.to_thread(r.run, f"timeout 6 bash -c 'echo > /dev/tcp/$0/$1' {shlex.quote(str(ss['address']))} {int(ss['port'])} "
                                                           '&& echo SS_OPEN || echo SS_CLOSED', 30)
                     if 'SS_OPEN' in o:
                         break
@@ -1445,6 +1475,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 x['ssh'] = sshaccess.clean(b, x.get('ssh'), runner.keydir)
             except ValueError as e:
                 raise ApiError(str(e)) from None
+            if x['ssh'].get('key') == 'bot':
+                no_foreign_bot_key(request, {'key': 'bot'}, store.profile(x['pid']), x['ip'])
         if b.get('background'):
             store.save_relay({**x, 'status': 'installing', 'stage': 'ssh', 'error': '',
                               'log': [time.strftime('%H:%M:%S ') + 'переустановка']})
@@ -1487,7 +1519,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             engine.forget_host(runner.known_hosts(), x['ip'], int(new.get('port') or 22))
 
         def check():
-            rc, out = relay_remote({'ip': x['ip'], 'ssh': new}).run('id -u', 25)
+            rc, out = relay_remote({'ip': x['ip'], 'ssh': new, 'pid': x['pid']}).run('id -u', 25)
             return rc == 0
         try:
             if not await asyncio.to_thread(check):
@@ -1733,6 +1765,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except ValueError as e:
             raise ApiError(str(e)) from None
         ip = str(b.get('ip') or '')
+        if new.get('key') == 'bot':
+            no_foreign_bot_key(request, {'key': 'bot'}, p, (bot_jobs_by_ip(p['id']).get(ip) or {}).get('ip') or ip)
         result = {'ok': True, 'message': 'Сохранено'}
         if ip:
             node = {'ip': ip, **sshaccess.to_node(new, runner.bot_key()[0]), 'known_hosts': runner.known_hosts()}
@@ -2446,6 +2480,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
         if any(x['ip'] == ip for x in store.checkers()):
             raise ApiError('Чекер с этим IP уже есть')
+        no_foreign_bot_key(request, b, None, ip)  # свой чекер пользователь ставит по паролю или своему ключу
         from . import sshaccess
         try:
             acc = sshaccess.clean(b, None, runner.keydir)
@@ -2489,6 +2524,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Установка уже идёт')
         from . import sshaccess
         b = await body(request)
+        if not is_admin(request) and str(b.get('key') or '') == 'bot' and ch.get('key') != 'bot':
+            # на ключ бота чекер переводит сам бот после установки по паролю; пользователь — нет
+            raise ApiError('Ключ бота подходит только для серверов, которые бот сам купил или поставил в ваших группах. '
+                           'Укажите пароль или свой ключ.')
         if any(str(b.get(k) or '').strip() for k in ('user', 'port', 'password', 'key', 'key_text', 'sudo_password')):
             try:  # новый доступ: пустые поля — оставить сохранённое
                 store.patch_checker(ch['id'], **sshaccess.clean(b, ch, runner.keydir))
