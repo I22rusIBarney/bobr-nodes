@@ -290,12 +290,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     def theme(uid: int = 0) -> dict:
         t = theme_raw(uid)
-        bg, effect = t.get('bg') or 'none', t.get('effect') or 'auto'
+        bg, effect = t.get('bg') or 'none', t.get('effect') or 'none'  # эффекты — только если выбрали сами
         try:
             glass = max(0, min(GLASS_MAX, int(t.get('glass') or 0)))
         except (TypeError, ValueError):
             glass = 0
-        return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'auto',
+        return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'none',
                 'image': t.get('image') or '', 'glass': glass, 'hero': t.get('hero') if t.get('hero') in THEME_HEROES else 'auto'}
 
     def theme_put(uid: int, t: dict) -> dict:
@@ -1201,8 +1201,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         pl, n, hosts = await asyncio.to_thread(ctx)
         relay_say(x['id'], stage='node')
         secret = await asyncio.to_thread(pl.secret_key)
+        image = await asyncio.to_thread(up.node_image, pl)
         await asyncio.to_thread(xb.install, relay_remote(x), secret, int(x.get('node_port') or 2222), int(x['listen']),
-                                xb.env_panel_ips(p), say)
+                                xb.env_panel_ips(p), say, image)
         relay_say(x['id'], 'панель: профиль моста, служебный пользователь выхода, нода входа, хост, сквады', stage='panel')
 
         def setup():
@@ -1282,8 +1283,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         await asyncio.to_thread(engine.wait_dns, dom, nip, say, 600, 15, cf)
         secret = await asyncio.to_thread(pl.secret_key)
         try:
+            image = await asyncio.to_thread(up.node_image, pl)  # версия ноды — под ветку панели, не :latest
             await asyncio.to_thread(egm.install, r, dom, p['email'], secret, int(p.get('node_port') or 2222), xb.env_panel_ips(p), say,
-                                    [xb.SS_PORT])
+                                    [xb.SS_PORT], 443, image)
         except engine.StepError as e:  # «выход:» — страница моста по этой метке спросит пароль именно выхода
             raise engine.StepError(f'выход {dom}: {e}') from None
 
@@ -1330,8 +1332,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         await asyncio.to_thread(engine.wait_dns, x['domain'], x['ip'], say, 600, 15, cf)
         secret = await asyncio.to_thread(pl.secret_key)
         r = relay_remote(x)
+        image = await asyncio.to_thread(up.node_image, pl)
         await asyncio.to_thread(egm.install, r, x['domain'], p['email'], secret, int(x.get('node_port') or 2222),
-                                xb.env_panel_ips(p), say, (), int(x.get('listen') or 443))
+                                xb.env_panel_ips(p), say, (), int(x.get('listen') or 443), image)
         relay_say(x['id'], 'панель: профиль моста, Shadowsocks до выхода, служебный пользователь, нода входа, хост', stage='panel')
 
         def setup():

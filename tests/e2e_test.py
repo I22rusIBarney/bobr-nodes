@@ -318,7 +318,7 @@ async def main():
     ok((await web.get('/static/ui.css')).status == 200 and (await web.get('/static/../main.py')).status == 404, 'статика только своя')
     ok((await web.get('/static/fx.js')).status == 200, 'модуль оформления отдаётся')
     st, js = await wapi('state')
-    ok(js['theme'] == {'bg': 'none', 'effect': 'auto', 'image': '', 'glass': 0, 'hero': 'auto'}, 'оформление по умолчанию: без фона, эффект по календарю, поля непрозрачные, картинка по сезону')
+    ok(js['theme'] == {'bg': 'none', 'effect': 'none', 'image': '', 'glass': 0, 'hero': 'auto'}, 'оформление по умолчанию: без фона, без эффектов, поля непрозрачные, картинка по сезону')
     ok((await wapi('theme', 'POST', {'hero': 'x'}))[0] == 400 and (await wapi('theme', 'POST', {'hero': 'winter-night'}))[1]['hero'] == 'winter-night'
        and (await wapi('theme', 'POST', {'hero': 'auto'}))[1]['hero'] == 'auto', 'картинка на главной: своя из восьми или по сезону')
     rh = await web.get('/static/hero-summer-day.webp')

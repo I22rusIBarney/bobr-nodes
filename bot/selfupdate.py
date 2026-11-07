@@ -133,6 +133,21 @@ def take_note(data_dir: str) -> str | None:
     return text
 
 
+def rollback_note(data_dir: str) -> str | None:
+    """Новая версия не запустилась, и bnodes вернул прежнюю (пишет install.sh). Читается один раз."""
+    path = os.path.join(data_dir, 'update-rollback.txt')
+    try:
+        head = open(path, encoding='utf-8').read().split()
+        os.remove(path)
+    except OSError:
+        return None
+    import html
+    bad, good = (head + ['', ''])[:2]
+    return (f'⚠️ <b>Обновление не запустилось</b>\n\nВерсия {html.escape(bad)} не ответила после перезапуска — бот сам вернулся '
+            f'на прежнюю{" " + html.escape(good) if good else ""} и работает. Автообновление эту версию больше ставить не будет; '
+            'подробности — bnodes logs на сервере.')
+
+
 # ───────── проверка новой версии на GitHub ─────────
 NOW_FILE = 'update-now'   # «обновить сейчас»: файл в data/, его видит systemd (bnodes-update-now.path) и запускает обновление
 _REMOTE: dict = {}        # кэш ответа GitHub на 5 минут — у API без токена лимит 60 запросов в час

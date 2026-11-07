@@ -362,16 +362,16 @@ def squads_with(panel: engine.Panel, inbound_uuid: str) -> list[str]:
 
 
 # ───────── сервер входа ─────────
-def compose_text(secret: str, node_port: int) -> str:
-    return (f'services:\n  remnanode:\n    container_name: remnanode\n    hostname: remnanode\n    image: {IMAGE}\n'
+def compose_text(secret: str, node_port: int, image: str = IMAGE) -> str:
+    return (f'services:\n  remnanode:\n    container_name: remnanode\n    hostname: remnanode\n    image: {image}\n'
             f'    network_mode: host\n    restart: always\n    ulimits:\n      nofile:\n        soft: 1048576\n        hard: 1048576\n'
             f'    environment:\n      - NODE_PORT={int(node_port)}\n      - SECRET_KEY={secret}\n')
 
 
-def install_cmd(secret: str, node_port: int, listen: int, panel_ips: list[str]) -> str:
+def install_cmd(secret: str, node_port: int, listen: int, panel_ips: list[str], image: str = IMAGE) -> str:
     """Docker (если нет), контейнер ноды, порты в ufw: вход — всем, API ноды — только панели. HAProxy-проброс этого
     сервера (если был) снимается: порт входа нужен Xray."""
-    comp = base64.b64encode(compose_text(secret, node_port).encode()).decode()
+    comp = base64.b64encode(compose_text(secret, node_port, image).encode()).decode()
     ips = ' '.join(shlex.quote(i) for i in panel_ips if engine.is_ip(i))
     return (
         f': {MARK}; set +e; export DEBIAN_FRONTEND=noninteractive; '
@@ -395,9 +395,9 @@ def install_cmd(secret: str, node_port: int, listen: int, panel_ips: list[str]) 
         '{ echo XB_DOWN; docker logs --tail 8 remnanode 2>&1; }')
 
 
-def install(r: engine.Remote, secret: str, node_port: int, listen: int, panel_ips: list[str], log) -> None:
+def install(r: engine.Remote, secret: str, node_port: int, listen: int, panel_ips: list[str], log, image: str = IMAGE) -> None:
     log('ставлю ноду на вход: Docker и контейнер remnawave/node (первый раз — до пары минут)')
-    rc, out = r.run(install_cmd(secret, node_port, listen, panel_ips), 900)
+    rc, out = r.run(install_cmd(secret, node_port, listen, panel_ips, image), 900)
     out = engine.strip_ansi(out)
     if 'XB_BUSY' in out:
         raise engine.StepError(f'порт {listen} на сервере входа занят другой программой: ' + out.split('XB_BUSY', 1)[1].strip()[:200])

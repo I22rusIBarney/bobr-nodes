@@ -244,3 +244,15 @@ def test_panel_keeps_idn_and_punycode_addresses(monkeypatch):
     monkeypatch.setattr(engine, 'http', fake_http)
     nodes = engine.Panel('https://panel.test', 't').call('GET', '/api/nodes')
     assert [n['address'] for n in nodes] == ['нода.рф', 'node.xn--p1ai', '', '2001:db8::1']
+
+
+def test_new_bridge_node_image_follows_panel_branch(monkeypatch):
+    from bot import egames, upgrade, xbridge
+    monkeypatch.setattr(upgrade, 'hub_tags', lambda *a, **k: ['3.0.0', '2.3.1', '2.2.0'])
+    monkeypatch.setattr(upgrade, 'panel_version', lambda panel: '2.2.5')
+    img = upgrade.node_image(None)
+    assert img == 'remnawave/node:2.3.1'  # ветка панели 2.x, а не новая 3.x
+    assert f'image: {img}' in xbridge.compose_text('s', 2222, img)
+    assert f'image: {img}' in egames.compose_text('s', 2222, img)
+    monkeypatch.setattr(upgrade, 'hub_tags', lambda *a, **k: [])  # Docker Hub недоступен — как раньше
+    assert upgrade.node_image(None) == 'remnawave/node:latest'
