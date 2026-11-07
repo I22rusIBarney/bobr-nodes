@@ -28,7 +28,7 @@ from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
-          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
+          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app-group.js': 'application/javascript', 'app-admin.js': 'application/javascript', 'app-relay.js': 'application/javascript', 'app-tools.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
           'logo.png': 'image/png',

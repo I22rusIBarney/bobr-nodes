@@ -1,6 +1,6 @@
 'use strict';
 /* Новый интерфейс Bobr Nodes — экраны. Данные — те же запросы, что у классического интерфейса.
-   Разделы, которые ещё не перенесены, открываются в классическом (classic()). */
+   Классический интерфейс остаётся рядом: в него можно вернуться в «Интерфейс и тема». */
 
 const D = { st: null, err: null, loading: true, nodes: {}, nerr: {}, mon: null, jobs: [], rent: {}, wallet: null, detail: {}, job: {} };
 const UI = { base: null, lastKey: '', ovKey: '', tabs: {}, nf: { status: 'all', group: 'all', q: '', sort: 'attn', cc: null }, sel: new Set(), selMode: false };
@@ -14,7 +14,7 @@ async function loadAll() {
   clearTimeout(pollTimer);
   try { D.st = await api('state'); D.err = null; }
   catch (e) { D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return; }
-  if (D.st.role === 'paused') { classic(); return; }  // подписка на паузе — экран оплаты есть только там
+  if (D.st.role === 'paused') { D.loading = false; render(true); return; }  // подписка на паузе — только экран оплаты
   if (D.st.theme && D.st.theme.ui === 'classic') { location.replace('/admin?classic=1'); return; }  // классический выбрали на другом устройстве
   await Promise.all([
     ...groups().map(p => loadNodes(p.id)),
@@ -105,6 +105,8 @@ function render(soft) {
 function parentOf(r) {
   const phone = innerWidth < 720;
   if (r.name === 'group') return 'groups';
+  if (r.name === 'script') return 'settings/scripts';
+  if (r.name === 'report') return 'settings/reports';
   if (r.name === 'settings' && r.arg) return phone ? 'settings' : null;
   if (phone && ['groups', 'settings'].includes(r.name)) return 'more';  // на телефоне группы и настройки открываются из «Ещё»
   return null;
@@ -117,7 +119,8 @@ function renderOverlay(r) {
   document.body.style.overflow = key ? 'hidden' : '';
   // нативная «Назад»: окно — закрыть, мастер — шаг назад, вложенная страница — к родителю; на разделах её нет
   const up = parentOf(UI.base);
-  backHandler = key ? (r.name === 'deploy' ? wizBack : closeOverlay) : up ? Object.assign(() => go(up), { nav: true }) : null; syncBack();
+  const relayBack = r.name === 'node' && UI.relay && UI.relay.node === r.arg && UI.tabs.node === 'bridge' ? () => { UI.relay = null; render(); } : null;  // мост → список мостов
+  backHandler = key ? (r.name === 'deploy' ? wizBack : relayBack || closeOverlay) : up ? Object.assign(() => go(up), { nav: true }) : null; syncBack();
   if (!key || D.loading || D.err) return host.replaceChildren();
   let panel;
   if (r.name === 'deploy') {
@@ -140,7 +143,7 @@ const NAV = [
   { id: 'activity', l: 'Задачи', i: 'activity', cnt: () => D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400).length },
   { id: 'settings', l: 'Настройки', i: 'sliders' },
 ];
-const SECTION_OF = { node: 'nodes', task: 'activity', group: 'groups', look: 'settings' };
+const SECTION_OF = { node: 'nodes', task: 'activity', group: 'groups', look: 'settings', script: 'settings', report: 'settings' };
 function shell(base, changed) {
   const cur = SECTION_OF[base.name] || base.name;
   const navBtn = x => { const c = x.cnt && x.cnt();
@@ -164,7 +167,7 @@ function shell(base, changed) {
         bal != null ? h('button', { type: 'button', class: 'balance', onclick: topUp, title: 'Пополнить баланс Bobr Cloud · ' + (D.wallet.account || '') }, ic('wallet'), h('span', { class: 'num' }, rubK(bal))) : null,
         h('button', { type: 'button', class: 'icon-btn', id: 'bell', onclick: openBell, 'aria-label': `Уведомления${unread ? `, новых: ${unread}` : ''}` }, ic('bell'), unread ? h('span', { class: 'dot' }) : null),
         h('button', { type: 'button', class: 'btn primary hide-m', onclick: () => openDeploy() }, ic('plus'), 'Добавить ноды')),
-      h('div', { class: 'page' + (changed ? ' view-in' : '') }, D.err ? errorView() : D.loading ? skeleton() : VIEWS[base.name](base.arg))),
+      h('div', { class: 'page' + (changed ? ' view-in' : '') }, D.err ? errorView() : D.loading ? skeleton() : D.st.role === 'paused' ? paywall() : VIEWS[base.name](base.arg))),
     h('nav', { class: 'tabbar', 'aria-label': 'Разделы' },
       tabBtn(NAV[0], cur), tabBtn(NAV[1], cur),
       h('button', { type: 'button', onclick: () => openDeploy(), 'aria-label': 'Добавить ноды' }, h('span', { class: 'add' }, ic('plus'))),
@@ -250,7 +253,7 @@ function attention() {
   if (st.issues && st.issues.length) out.push({ sev: 'warn', icon: 'sliders', title: 'Нужна настройка', text: st.issues.join(', '),
     acts: [{ l: 'Настроить', p: 1, fn: () => go(isAdmin() ? 'settings/connections' : 'groups') }] });
   if (st.host && st.host.level === 'bad') out.push({ sev: 'bad', icon: 'server', title: 'Серверу бота не хватает ресурсов', text: `Процессор ${st.host.cpu ?? '—'}%, память ${st.host.mem ?? '—'}%`,
-    acts: [{ l: 'Подробнее', fn: () => classic('settings') }] });
+    acts: [{ l: 'Подробнее', fn: () => go('settings/health') }] });
   for (const n of ns.filter(offline))
     out.push({ sev: 'bad', icon: 'unplug', title: `${n.name} не на связи`, text: `${n.group} · панель не видит ноду`,
       acts: [{ l: 'Открыть', p: 1, fn: () => go('node/' + n.id) }] });
@@ -447,8 +450,8 @@ function loadDetail(n) {
 function drawerNode(n) {
   loadDetail(n);
   const tab = UI.tabs.node || 'overview';
-  const TABS = [['overview', 'Обзор'], ['more', 'Настройки'], ['history', 'История']];
-  const body = { overview: nodeOverview, more: nodeSettings, history: nodeHistory }[tab](n, D.detail[n.id] || {});
+  const TABS = [['overview', 'Обзор'], ['more', 'Настройки'], ['bridge', 'Вход через Россию'], ['history', 'История']];
+  const body = { overview: nodeOverview, more: nodeSettings, bridge: nodeBridge, history: nodeHistory }[tab](n, D.detail[n.id] || {});
   return h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Нода ' + n.name },
     h('div', { class: 'drawer-h' }, h('div', { html: postmark(n) }),
       h('div', { style: 'min-width:0;flex:1' },
@@ -456,8 +459,8 @@ function drawerNode(n) {
         h('div', { class: 'mono', style: 'font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, n.domain || n.address),
         h('div', { class: 'muted', style: 'font-size:13px;margin-top:2px' }, `${n.group}${n.profile ? ' · ' + n.profile : ''}`)),
       h('button', { type: 'button', class: 'icon-btn x', onclick: closeOverlay, 'aria-label': 'Закрыть' }, ic('x'))),
-    h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([v, l]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(v === tab), onclick: () => { UI.tabs.node = v; render(); } }, l))),
-    h('div', { class: 'drawer-body', 'data-keep': 'node-' + n.id + tab }, body));
+    h('div', { class: 'tabs', role: 'tablist' }, TABS.map(([v, l]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(v === tab), onclick: () => { UI.tabs.node = v; UI.relay = null; render(); } }, l))),
+    h('div', { class: 'drawer-body', 'data-keep': 'node-' + n.id + tab + (UI.relay ? UI.relay.id : '') }, body));
 }
 const kv = (k, v, act) => [h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), h('div', null, act || null)];
 const copyBtn = (v, what) => h('button', { type: 'button', class: 'icon-btn', style: 'width:30px;height:30px;border:0', onclick: () => copy(v, what), 'aria-label': 'Скопировать ' + what }, ic('copy'));
@@ -497,7 +500,7 @@ function nodeOverview(n, det) {
     h('div', { class: 'section-h' }, h('h2', null, 'Опасные действия')),
     h('div', { class: 'list' },
       d && d.bcloud && d.bcloud.server_id ? dangerRow('globe', 'Сменить IP', d.bcloud.price_kop != null ? `Новый адрес от Bobr Cloud за ${rubK(d.bcloud.price_kop)}, DNS и панель бот обновит сам` : 'Новый адрес от Bobr Cloud, DNS и панель бот обновит сам',
-        btn('Сменить IP', () => changeIp(n, d), 's')) : dangerRow('globe', 'Сменить IP', 'Нода куплена не через бота — новый IP указывается вручную', btn('Открыть', () => classic(`node:${n.pid}:${n.uuid}`), 's', 'ext')),
+        btn('Сменить IP', () => changeIp(n, d), 's')) : dangerRow('globe', 'Сменить IP', 'Нода куплена не через бота — новый адрес указываете вы, остальное бот сделает сам', btn('Указать IP', () => manualIp(n, d), 's')),
       dangerRow('trash', 'Убрать из панели', 'Нода, её хосты и DNS-запись. Сервер в Bobr Cloud не удаляется', btn('Убрать', () => removeNode(n), 's danger'))),
   ];
 }
@@ -652,7 +655,7 @@ function openPalette() {
   document.body.append(scrim, pal); layers.push(close); syncBack(); draw(); inp.focus();
 }
 
-const VIEWS = { overview: vOverview, nodes: vNodes, groups: vGroups, group: vGroup, activity: vActivity, settings: vSettings,
+const VIEWS = { overview: vOverview, nodes: vNodes, groups: vGroups, group: vGroup, activity: vActivity, settings: vSettings, script: vScript, report: vReport,
   look: () => { setTimeout(() => go('settings/look')); return skeleton(); }, more: () => (innerWidth >= 720 ? (setTimeout(() => go('settings')), skeleton()) : vMore()) };
 render();
 loadAll();

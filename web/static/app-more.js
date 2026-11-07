@@ -184,7 +184,7 @@ function wizReview(w, items, cost) {
       row('Адреса', items.flatMap(({ loc }) => w.domains[loc]).join(', '), 'mono'),
       row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.port || '443')),
     !own && bal != null ? (bal < cost ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('wallet')), h('div', { class: 'grow' }, h('b', null, `Не хватает ${rubK(cost - bal)}`),
-      `На балансе ${rubK(bal)}. Пополнить можно в Bobr Cloud или в классическом интерфейсе.`), btn('Пополнить', () => classic(''), 's', 'ext'))
+      `На балансе ${rubK(bal)}.`), btn('Пополнить', topUp, 's primary', 'wallet'))
       : h('div', { class: 'muted' }, `На балансе ${rubK(bal)}, после покупки останется ${rubK(bal - cost)}.`)) : null];
 }
 async function wizSubmit(w, items) {
@@ -222,11 +222,11 @@ function vGroup(arg) {
   const pid = +arg, g = groups().find(p => p.id === pid);
   if (!g) return [pageH('Группа не найдена'), empty('layers', 'Такой группы нет', 'Возможно, её удалили или у вас нет к ней доступа.', btn('К группам', () => go('groups'), 'primary'))];
   const tab = UI.tabs['g' + pid] || 'nodes', ns = allNodes().filter(n => n.pid === pid);
-  const TABS = [['nodes', `Ноды · ${ns.length}`], ['conn', 'Подключение'], ['mon', 'Мониторинг'], ['auto', 'Автоматизация'], ['rent', 'Аренда']];
+  const TABS = [['nodes', `Ноды · ${ns.length}`], ['conn', 'Подключение'], ['mon', 'Проверка и починка'], ['auto', 'Автоматизация'], ['rent', 'Аренда'], ['plugins', 'Плагины'], ['clean', 'Уборка']];
   const f = { status: 'all', q: '', cc: null, group: 'all', sort: UI.nf.sort };
   const content = { nodes: () => [D.nerr[pid] ? nodesErrors() : null, ns.length ? [nodesTable(filtered(ns, f), false), nodeCards(filtered(ns, f)), bulkBar()]
       : D.nodes[pid] ? empty('server', 'В группе нет нод', 'Добавьте первые — выберите страны и тариф.', btn('Добавить ноды', () => openDeploy(pid), 'primary', 'plus')) : skeleton()],
-    conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), rent: () => groupRent(g) }[tab]();
+    conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), rent: () => groupRent(g), plugins: () => groupPlugins(g), clean: () => groupCleanup(g) }[tab]();
   return [h('button', { type: 'button', class: 'back', onclick: () => go('groups') }, ic('chevL'), 'Группы'),
     pageH(g.name, `${(g.panel_url || '').replace(/^https?:\/\//, '')} · ${pl(ns.length, 'нода', 'ноды', 'нод')}` + (g.created_by_label ? ` · ${g.created_by_label}` : ''),
       [btn('Ноды в эту группу', () => openDeploy(pid), '', 'plus')]),
@@ -239,7 +239,7 @@ function profileForm(F, val, locked, hints, required, keys) {
   return keys.map(k => { const f = F.profile[k]; if (!f) return null;
     const inp = h('input', { class: 'inp' + (['name', 'email'].includes(k) ? '' : ' mono'), 'data-k': 'pf-' + k, type: f.secret ? 'password' : 'text', autocomplete: 'off',
       disabled: locked.includes(k), value: val[k] ?? '', placeholder: f.secret && hints[k] ? `сохранён ${hints[k]} · введите новый, чтобы заменить` : '', oninput: e => { val[k] = e.target.value; } });
-    return fld(f.label + (required.includes(k) ? '' : ' (необязательно)'), inp, f.help); });
+    return fld(f.label + (required.includes(k) ? '' : ' (необязательно)'), inp, rich(f.help)); });
 }
 const MAIN_KEYS = ['name', 'panel_url', 'panel_token', 'panel_cookie', 'outgoing_ips', 'email', 'base_domain'];
 const MORE_KEYS = ['name_pattern', 'squads', 'node_port', 'cf_token', 'owner'];
@@ -251,7 +251,7 @@ function groupConn(g) {
   if (!st.prof || !F.profile) return h('div', { class: 'sk', style: 'height:300px' });
   const p = st.prof, locked = p.locked || [];
   const save = e => busyBtn(e, async () => {
-    try { const r = await api('profiles/' + g.id, 'PUT', Object.fromEntries(MAIN_KEYS.concat(MORE_KEYS).filter(k => k in st.val).map(k => [k, st.val[k]]))); st.check = r.check; toast(r.check.ok ? 'Сохранено, панель отвечает' : 'Сохранено, но панель не ответила', r.check.message, r.check.ok ? 'ok' : 'bad'); delete GD[g.id].prof; refreshSoon(); }
+    try { const r = await api('profiles/' + g.id, 'PUT', { ...Object.fromEntries(MAIN_KEYS.concat(MORE_KEYS).filter(k => k in st.val).map(k => [k, st.val[k]])), ...(st.script !== undefined ? { script_id: st.script } : {}) }); st.check = r.check; toast(r.check.ok ? 'Сохранено, панель отвечает' : 'Сохранено, но панель не ответила', r.check.message, r.check.ok ? 'ok' : 'bad'); delete GD[g.id].prof; refreshSoon(); }
     catch (x) { st.check = { ok: false, message: x.message }; }
     render();
   });
@@ -263,13 +263,23 @@ function groupConn(g) {
       st.check ? h('div', { class: 'notice' + (st.check.ok ? ' ok' : ''), role: 'status', style: 'margin:0' }, h('span', { class: 'i' }, ic(st.check.ok ? 'check' : 'alert')),
         h('div', { class: 'grow' }, h('b', null, st.check.ok ? 'Панель отвечает' : 'Не получилось'), st.check.message)) : null,
       h('div', { class: 'chips' }, btn('Проверить подключение', check, '', 'refresh'), btn('Сохранить', save, 'primary'))),
-    h('div', { class: 'list', style: 'margin-bottom:16px' },
-      dangerRow('code', 'Скрипт установки, плагины нод, перенос хостов', 'Пока в классическом интерфейсе', btn('Открыть', () => classic('group:' + g.id), 's', 'ext'))),
+    groupScript(g, st),
     p.can_delete ? [h('div', { class: 'section-h' }, h('h2', null, 'Опасные действия')),
       h('div', { class: 'list' }, dangerRow('trash', 'Удалить группу', 'Бот забудет панель и правила группы. Ноды останутся в панели, серверы — в Bobr Cloud', btn('Удалить', () => confirmTyped({
         title: `Удалить группу «${g.name}»?`, word: g.name, ok: 'Удалить группу',
         text: 'Бот перестанет управлять нодами этой группы и следить за ними. Ноды в панели и серверы в Bobr Cloud не удаляются.',
         fn: async () => { await api('profiles/' + g.id, 'DELETE'); toast(`Группа «${g.name}» удалена`); go('groups'); refreshSoon(); } }), 's danger')))] : null);
+}
+function groupScript(g, st) {  // чем бот ставит ноды в этой группе: встроенный установщик или утверждённый свой скрипт
+  if (!D.scrList) { D.scrList = { loading: true }; api('scripts').then(r => { D.scrList = r.scripts || []; }).catch(() => { D.scrList = []; }).then(() => render(true)); }
+  const list = Array.isArray(D.scrList) ? D.scrList.filter(s => s.status === 'approved') : [];
+  if (!list.length) return null;
+  const cur = st.script !== undefined ? st.script : (st.prof.script_id || null);
+  const chosen = list.find(s => s.id === cur);
+  return h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:16px' }, fld('Скрипт установки', h('select', { class: 'sel', value: String(cur || ''), style: 'max-width:420px',
+      onchange: e => { st.script = e.target.value ? +e.target.value : null; render(); } }, h('option', { value: '' }, 'Встроенный установщик'), list.map(s => h('option', { value: String(s.id) }, s.title))),
+    chosen && chosen.profile_mode && chosen.profile_mode !== 'file' ? 'Этот скрипт не создаёт профиль Xray сам — профиль и inbound выберите в классическом интерфейсе (карточка группы).' : 'Сохраните, чтобы применить. Уже поставленные ноды не меняются.'),
+    chosen && chosen.profile_mode && chosen.profile_mode !== 'file' ? h('div', null, btn('Открыть в классическом', () => classic('group:' + g.id), 's', 'ext')) : null);
 }
 function newGroup() {
   const F = loadFields();
@@ -291,53 +301,7 @@ function newGroup() {
     } catch (x) { err.textContent = x.message; b.classList.remove('busy'); b.disabled = false; }
   } }] });
 }
-function groupMon(g) {
-  if (!D.mon) return empty('radar', 'Мониторинг выключен', 'На этом боте нет проверки из России.');
-  const m = (D.mon.groups || []).find(x => x.id === g.id);
-  if (!m) return h('div', { class: 'sk', style: 'height:200px' });
-  const st = GD['m' + g.id] || (GD['m' + g.id] = { steps: [...m.mon_steps], mode: m.mon_mode, quiet: m.mon_quiet, sub: '' });
-  const save = e => busyBtn(e, async () => {
-    try {
-      await api(`profiles/${g.id}/monitor`, 'POST', { mon_mode: st.mode, mon_steps: st.steps, mon_quiet: st.quiet, ...(st.sub ? { mon_sub: st.sub } : {}) });
-      toast('Мониторинг группы сохранён'); delete GD['m' + g.id]; D.mon = await api('monitor'); render();
-    } catch (x) { toast('Не получилось', x.message, 'bad'); }
-  });
-  const ALL = Object.keys(D.mon.steps);
-  return h('div', { style: 'max-width:720px' },
-    h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:16px' },
-      fld('Подписка для проверки', h('input', { class: 'inp mono', type: 'password', autocomplete: 'off', 'data-k': 'msub', value: st.sub, oninput: e => { st.sub = e.target.value.trim(); },
-        placeholder: m.enabled ? `сохранена ${m.sub_hint || ''} · введите новую, чтобы заменить` : 'https://… — ссылка подписки любого клиента группы' }),
-        m.enabled ? 'Чекеры в России подключаются по ней к каждой ноде. «-» — выключить проверку группы.' : 'Без подписки бот не проверяет ноды группы из России.'),
-      fld('Что делать, если нода не проходит', seg(Object.entries(D.mon.modes).map(([v, l]) => ({ v, l })), st.mode, v => { st.mode = v; render(); }, 'Режим'))),
-    h('div', { class: 'section-h' }, h('h2', null, 'Шаги починки'), h('span', { class: 'faint', style: 'font-size:13px' }, 'по порядку')),
-    h('div', { class: 'list steps-list', style: 'margin-bottom:16px' }, ALL.map(k => h('label', { class: 'switch' },
-      h('span', { class: 'num-i' }, st.steps.includes(k) ? st.steps.indexOf(k) + 1 : '–'), h('span', { class: 'grow' }, h('b', null, D.mon.steps[k][0].toUpperCase() + D.mon.steps[k].slice(1))),
-      toggle(st.steps.includes(k), v => { st.steps = v ? [...st.steps, k].sort((a, b) => ALL.indexOf(a) - ALL.indexOf(b)) : st.steps.filter(x => x !== k); render(); }, D.mon.steps[k])))),
-    h('div', { class: 'list', style: 'margin-bottom:16px' }, switchRow('Без уведомлений', 'Проверять и чинить молча — итог будет в колокольчике', st.quiet, v => { st.quiet = v; })),
-    h('div', { class: 'chips' }, btn('Сохранить', save, 'primary'), btn('Чекеры', () => go('settings/checkers'), '', 'radar'), btn('Какие ноды докупать', () => classic('monitor'), 'ghost', 'ext')));
-}
 const WD = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
-function groupAuto(g) {
-  const st = GD['a' + g.id];
-  if (!st) { GD['a' + g.id] = { loading: true }; api(`profiles/${g.id}/auto`).then(r => { GD['a' + g.id] = { a: r }; }).catch(e => { GD['a' + g.id] = { err: e.message }; }).then(() => render(true)); }
-  if (!st || st.loading) return h('div', { class: 'sk', style: 'height:240px' });
-  if (st.err) return empty('alert', 'Не загрузилось', st.err, btn('Повторить', () => { delete GD['a' + g.id]; render(); }, 'primary'));
-  const a = st.a;
-  const save = async patch => { try { const r = await api(`profiles/${g.id}/auto`, 'POST', patch); Object.assign(a, r); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); };
-  return h('div', { style: 'max-width:720px' },
-    h('div', { class: 'list', style: 'margin-bottom:12px' },
-      switchRow('Автообновление нод', `По одной, с проверкой и откатом, ${a.weekday == null ? 'каждый день' : 'по ' + WD[a.weekday]} в ${a.hour}:00`, a.update, v => save({ update: v })),
-      switchRow('Следить за нагрузкой', 'Сообщать, когда процессор, память или канал ноды на пределе', a.load, v => save({ load: v })),
-      switchRow('Автопродление аренды', 'Для новых серверов группы — за 3 дня до конца, если хватает баланса', !!a.renew, v => save({ renew: v }))),
-    a.update ? h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:12px' },
-      fld('Когда обновлять', h('div', { class: 'chips' },
-        h('select', { class: 'sel', 'aria-label': 'День', value: a.weekday == null ? '' : String(a.weekday), onchange: e => save({ weekday: e.target.value === '' ? null : +e.target.value }) },
-          h('option', { value: '' }, 'каждый день'), WD.map((d, i) => h('option', { value: String(i) }, d))),
-        h('select', { class: 'sel', 'aria-label': 'Час', value: String(a.hour), onchange: e => save({ hour: +e.target.value }) }, Array.from({ length: 24 }, (_, i) => h('option', { value: String(i) }, `${i}:00`)))),
-        a.last && a.last.date ? `Последний раз: ${a.last.date}` + (a.last.tag ? ` → ${a.last.tag}` : '') : 'Время — по часовому поясу из утренней сводки.')) : null,
-    h('div', { class: 'list' }, dangerRow('zap', 'Автомасштабирование и прогноз баланса', 'Докупать ноды при нагрузке, предупреждать о деньгах — пока в классическом интерфейсе',
-      btn('Открыть', () => classic('group:' + g.id), 's', 'ext'))));
-}
 function groupRent(g) {
   const rs = D.rent[g.id];
   if (rs == null) return h('div', { class: 'sk', style: 'height:200px' });
@@ -367,23 +331,36 @@ function vActivity() {
 
 /* ═════════ Настройки ═════════ */
 const SETTINGS = () => [
-  { id: 'connections', l: 'Подключения', i: 'globe', s: 'Bobr Cloud, Cloudflare, Gemini', admin: 1 },
-  { id: 'notifications', l: 'Уведомления', i: 'bell', s: 'Что присылать в Telegram' },
-  { id: 'checkers', l: 'Чекеры в России', i: 'radar', s: 'Кто проверяет ноды' },
-  { id: 'users', l: 'Пользователи', i: 'users', s: 'Приглашения и доступ', admin: 1 },
-  { id: 'bot', l: 'Сервер бота', i: 'server', s: 'Обновление и резервные копии', admin: 1 },
-  { id: 'look', l: 'Интерфейс и тема', i: 'contrast', s: 'Светлая, тёмная, классический вид' },
-  { id: 'classic', l: 'Ещё в классическом', i: 'ext', s: 'Скрипты, плагины, мосты, переезд' },
-].filter(s => !s.admin || isAdmin());
+  { g: 'Основное', id: 'connections', l: 'Подключения', i: 'globe', s: 'Bobr Cloud, Cloudflare, Gemini', admin: 1 },
+  { g: 'Основное', id: 'notifications', l: 'Уведомления', i: 'bell', s: 'Что присылать в Telegram' },
+  { g: 'Основное', id: 'summary', l: 'Утренняя сводка', i: 'clock', s: 'Итог по всем группам раз в день' },
+  { g: 'Основное', id: 'checkers', l: 'Чекеры в России', i: 'radar', s: 'Кто проверяет ноды' },
+  { g: 'Основное', id: 'look', l: 'Интерфейс и тема', i: 'contrast', s: 'Светлая, тёмная, классический вид' },
+  { g: 'Пользователи и деньги', id: 'users', l: 'Пользователи', i: 'users', s: 'Приглашения и доступ', admin: 1 },
+  { g: 'Пользователи и деньги', id: 'tariff', l: 'Подписка для пользователей', i: 'wallet', s: 'Цена, период, бесплатный срок', admin: 1 },
+  { g: 'Пользователи и деньги', id: 'reports', l: 'Отзывы и ошибки', i: 'alert', s: 'Обращения пользователей и сбои задач', admin: 1 },
+  { g: 'Основное', id: 'subscription', l: 'Подписка', i: 'wallet', s: 'Срок доступа и автопродление', member: 1, billing: 1 },
+  { g: 'Основное', id: 'problem', l: 'Сообщить о проблеме', i: 'alert', s: 'Администратор ответит здесь же', member: 1 },
+  { g: 'Сервер бота', id: 'bot', l: 'Обновление', i: 'up', s: 'Версия, автообновление', admin: 1 },
+  { g: 'Сервер бота', id: 'backup', l: 'Резервные копии', i: 'box', s: 'Пароль, расписание, восстановление', admin: 1 },
+  { g: 'Сервер бота', id: 'health', l: 'Нагрузка и защита', i: 'shield', s: 'Ресурсы VPS, входы по SSH', admin: 1 },
+  { g: 'Сервер бота', id: 'audit', l: 'Журнал действий', i: 'activity', s: 'Кто, когда и что поменял', admin: 1 },
+  { g: 'Инструменты', id: 'scripts', l: 'Мои скрипты', i: 'code', s: 'Свои установщики с GitHub', admin: 1 },
+  { g: 'Инструменты', id: 'transfer', l: 'Перенос хостов', i: 'layers', s: 'Между панелями или из файла' },
+  { g: 'Инструменты', id: 'migrate', l: 'Переезд бота', i: 'server', s: 'На другой сервер со всеми данными', admin: 1 },
+].filter(s => (!s.admin || isAdmin()) && (!s.member || !isAdmin()) && (!s.billing || (D.st.billing && D.st.billing.on)));
 function vSettings(sec) {
   const list = SETTINGS(), mobile = innerWidth < 720;
   if (sec && !list.some(s => s.id === sec)) sec = '';
   const cur = sec || (mobile ? '' : list[0].id);
-  const nav = h('div', { class: 'list set-nav' }, list.map(s => h('button', { type: 'button', class: 'li', 'aria-current': s.id === cur ? 'page' : null, onclick: () => go('settings/' + s.id) },
-    h('div', { class: 'ic-tile' }, ic(s.i)), h('div', { class: 'grow' }, h('div', { class: 't' }, s.l), h('div', { class: 's' }, s.s)), h('span', { class: 'chev show-m' }, ic('chevR')))));
+  const item = s => h('button', { type: 'button', class: 'li', 'aria-current': s.id === cur ? 'page' : null, onclick: () => go('settings/' + s.id) },
+    h('div', { class: 'ic-tile' }, ic(s.i)), h('div', { class: 'grow' }, h('div', { class: 't' }, s.l), h('div', { class: 's' }, s.s)), h('span', { class: 'chev show-m' }, ic('chevR')));
+  const nav = h('div', { class: 'set-nav-wrap' }, [...new Set(list.map(s => s.g))].map(g => [h('div', { class: 'set-g' }, g),
+    h('div', { class: 'list set-nav', style: 'margin-bottom:14px' }, list.filter(s => s.g === g).map(item))]));
   if (!cur) return [pageH('Настройки'), nav];
   const S_ = list.find(s => s.id === cur);
-  const content = { connections: setConnections, notifications: setNotif, checkers: setCheckers, users: setUsers, bot: setBot, look: () => vLook().slice(1), classic: setClassic }[cur]();
+  const content = { health: setHealth, scripts: setScripts, reports: setReports, audit: setAudit, tariff: setTariff, subscription: setSubscription, problem: setProblem,
+    connections: setConnections, notifications: setNotif, summary: setSummary, checkers: setCheckers, users: setUsers, bot: setBot, look: () => vLook().slice(1), transfer: setTransfer, migrate: setMigrate, backup: setBackup }[cur]();
   return mobile ? [h('button', { type: 'button', class: 'back', onclick: () => go('settings') }, ic('chevL'), 'Настройки'), pageH(S_.l), content]
     : [pageH('Настройки'), h('div', { class: 'set-grid' }, nav, h('div', { style: 'min-width:0' }, h('h2', { class: 'set-h' }, S_.l), content))];
 }
@@ -393,7 +370,7 @@ function setConnections() {
     ['Gemini — разбор своих скриптов', 'gemini', ['gemini_key', 'gemini_model', 'gemini_proxy']], ['Установка', null, ['parallel', 'ssh_pubkey']]];
   const input = k => { const f = S[k]; if (!f) return null;
     return fld(f.label, h('input', { class: 'inp' + (k === 'parallel' ? '' : ' mono'), 'data-k': 'st-' + k, type: f.secret ? 'password' : 'text', autocomplete: 'off',
-      value: st.val[k] ?? (f.secret ? '' : f.value || ''), placeholder: f.secret && f.set ? `сохранён ${f.hint} · введите новый, чтобы заменить` : '', oninput: e => { st.val[k] = e.target.value; } }), f.help); };
+      value: st.val[k] ?? (f.secret ? '' : f.value || ''), placeholder: f.secret && f.set ? `сохранён ${f.hint} · введите новый, чтобы заменить` : '', oninput: e => { st.val[k] = e.target.value; } }), rich(f.help)); };
   const save = e => busyBtn(e, async () => {
     try { const r = await api('settings', 'POST', { values: st.val }); D.st.settings = r.settings; D.st.issues = r.issues; st.val = {}; toast('Сохранено'); }
     catch (x) { toast('Не получилось', x.message, 'bad'); }
@@ -439,6 +416,7 @@ function setUsers() {
     U.users.length ? h('div', { class: 'list' }, U.users.map(u => h('div', { class: 'li', style: 'flex-wrap:wrap' }, h('span', { class: 'avatar' }, (u.first_name || u.label || '?')[0]),
       h('div', { class: 'grow', style: 'flex:1 1 200px;min-width:0' }, h('div', { class: 't' }, u.label + (u.first_name && !u.label.includes(u.first_name) ? ` · ${u.first_name}` : '')),
         h('div', { class: 's' }, (u.groups.length ? u.groups.map(g => g.name).join(', ') : 'групп нет') + (u.blocked ? ' · заблокирован' : ''))),
+      btn('Доступ', () => userAccess(u), 's ghost'),
       btn(u.blocked ? 'Разблокировать' : 'Заблокировать', () => confirmAct({ title: u.blocked ? `Разблокировать ${u.label}?` : `Заблокировать ${u.label}?`, icon: ['users', 'warn'],
         text: u.blocked ? 'Пользователь снова сможет открыть бота.' : 'Пользователь не сможет открыть бота, пока вы не разблокируете. Его группы и ноды продолжат работать.',
         ok: u.blocked ? 'Разблокировать' : 'Заблокировать', cls: u.blocked ? 'primary' : 'danger solid',
@@ -463,14 +441,4 @@ function invite() {
           actions: [{ l: 'Скопировать', cls: 'primary', fn: cc => { copy(r.link, 'Ссылка'); cc(); } }] });
       } catch (x) { err.textContent = x.message; b.classList.remove('busy'); }
     } }] });
-}
-function setClassic() {
-  const row = (i, t, s, open) => h('button', { type: 'button', class: 'li', onclick: () => classic(open) }, h('div', { class: 'ic-tile' }, ic(i)),
-    h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's', style: 'white-space:normal' }, s)), h('span', { class: 'chev' }, ic('ext')));
-  return [h('p', { class: 'muted', style: 'margin:0 0 14px' }, 'Эти разделы пока есть только в классическом интерфейсе — откроется сразу нужный.'),
-    h('div', { class: 'list' },
-      row('radar', 'Какие ноды докупать при блокировке', 'Тарифы и запасной вариант для шага «новая нода»', 'monitor'),
-      row('route', 'Вход через Россию', 'Мост через российский сервер — на карточке ноды', 'servers'),
-      isAdmin() ? row('terminal', 'Мои скрипты, плагины нод, переезд бота, журнал действий', 'Вкладка «Настройки» классического интерфейса', 'settings') : null,
-      row('wallet', 'Подписка на бота', 'Оплата доступа для приглашённых', ''))];
 }
