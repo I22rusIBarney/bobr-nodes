@@ -49,6 +49,7 @@ def test_admin_groups_keep_bot_key_anywhere(tmp_path):
     pid = store.save_profile({'name': 'Основная', 'owner': str(ADMIN)})
     store.set(f'node_ssh:{pid}:u1', json.dumps({'user': 'root', 'port': 22, 'key': 'bot', 'password': ''}))
     assert svc.node_ssh(store, runner, pid, 'u1', '203.0.113.9')['key'] == 'bot'
+    store.save_user({'tg_id': MEMBER, 'username': 'vasya'})  # клиент группы — пользователь бота
     shared = store.save_profile({'name': 'Для клиента', 'owner': str(MEMBER)})  # группа админа для пользователя
     store.set(f'node_ssh:{shared}:u1', json.dumps({'user': 'root', 'port': 22, 'key': 'bot', 'password': ''}))
     assert svc.node_ssh(store, runner, shared, 'u1', '203.0.113.9') == {}
@@ -128,6 +129,7 @@ def test_member_cannot_add_checker_with_bot_key(tmp_path):
 
 def test_member_group_cannot_take_foreign_dns_names(tmp_path, monkeypatch):
     store, _ = make(tmp_path)
+    store.save_user({'tg_id': MEMBER, 'username': 'vasya'})
     prof = store.profile(store.save_profile({'name': 'Для клиента', 'owner': str(MEMBER)}))
     admin_prof = store.profile(store.save_profile({'name': 'Основная', 'owner': str(ADMIN)}))
 
@@ -182,3 +184,63 @@ def test_checker_install_interrupted_by_restart_is_not_stuck(tmp_path):
     mon.recover()  # при запуске бота
     ch = store.checker(cid)
     assert ch['status'] == 'failed' and 'перезапуст' in ch['error']
+
+
+def member_client(tmp_path):
+    store, runner = make(tmp_path)
+    access = Access(store, {ADMIN})
+    inv = access.create_invite(ADMIN, uses=1)
+    access.redeem(inv['token'], {'id': MEMBER, 'first_name': 'Вася', 'username': 'vasya'})
+    return store, runner, access
+
+
+def call_as_member(store, runner, access, tmp_path, method, path, body):
+    from aiohttp.test_utils import TestClient, TestServer
+    from bot.web import build_web
+
+    async def go():
+        client = TestClient(TestServer(build_web(store, runner, '42:TEST', {ADMIN}, access=access, data_dir=tmp_path)))
+        await client.start_server()
+        try:
+            r = await client.request(method, path, json=body, headers={'X-Init-Data': init_data(MEMBER)})
+            return r.status, await r.json()
+        finally:
+            await client.close()
+    return asyncio.run(go())
+
+
+def test_member_cannot_switch_relay_to_bot_key_later(tmp_path):
+    store, runner, access = member_client(tmp_path)
+    pid = store.save_profile({'name': 'Вася', 'created_by': MEMBER})
+    rid = store.save_relay({'pid': pid, 'node_uuid': 'u1', 'ip': '203.0.113.9', 'listen': 443, 'status': 'failed',
+                            'ssh': {'user': 'root', 'port': 22, 'password': 'x', 'key': ''}})
+    status, js = call_as_member(store, runner, access, tmp_path, 'POST', f'/api/relays/{rid}/apply', {'key': 'bot'})
+    assert status == 400 and 'ключ бота' in js['detail'].lower(), js
+    assert store.relay(rid)['ssh']['key'] == ''
+
+
+def test_member_cannot_switch_checker_to_bot_key_later(tmp_path):
+    store, runner, access = member_client(tmp_path)
+    cid = store.save_checker({'name': 'Мой', 'ip': '203.0.113.9', 'user': 'root', 'port': 22, 'password': 'x', 'key': '',
+                              'status': 'failed', 'created_by': MEMBER})
+    status, js = call_as_member(store, runner, access, tmp_path, 'POST', f'/api/checkers/{cid}/install', {'key': 'bot'})
+    assert status == 400 and 'ключ бота' in js['detail'].lower(), js
+    assert store.checker(cid)['key'] == ''
+
+
+def test_admin_group_for_non_member_client_is_not_member_group(tmp_path):
+    store, runner = make(tmp_path)
+    # клиент Bobr Cloud группы — не пользователь бота (просто покупатель) или сам администратор по @username
+    for owner in ({'owner': '555', 'owner_tg_id': '555'}, {'owner': '@admin', 'owner_tg_id': str(ADMIN)}):
+        pid = store.save_profile({'name': 'Админская', **owner})
+        store.set(f'node_ssh:{pid}:u1', json.dumps({'user': 'root', 'port': 22, 'key': 'bot', 'password': ''}))
+        assert svc.node_ssh(store, runner, pid, 'u1', '203.0.113.9')['key'] == 'bot', owner
+
+
+def test_panel_keeps_idn_and_punycode_addresses(monkeypatch):
+    def fake_http(method, url, headers, body):
+        return 200, {'response': [{'uuid': 'a', 'address': 'нода.рф'}, {'uuid': 'b', 'address': 'node.xn--p1ai'},
+                                  {'uuid': 'c', 'address': 'x;rm -rf /'}, {'uuid': 'd', 'address': '2001:db8::1'}]}
+    monkeypatch.setattr(engine, 'http', fake_http)
+    nodes = engine.Panel('https://panel.test', 't').call('GET', '/api/nodes')
+    assert [n['address'] for n in nodes] == ['нода.рф', 'node.xn--p1ai', '', '2001:db8::1']

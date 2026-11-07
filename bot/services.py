@@ -55,15 +55,26 @@ def admin_ids() -> set[int]:
     return {int(x) for x in os.environ.get('ADMIN_IDS', '').replace(' ', '').split(',') if x.isdigit()}
 
 
-def tenant_group(prof: dict | None, admins) -> bool:
-    """Группой управляет приглашённый пользователь: он её создал или он — её клиент Bobr Cloud.
-    Тогда панель (а с ней адреса нод) задаёт он, и доверять им наравне с группами администратора нельзя."""
+def tenant_group(store: Store, prof: dict | None, admins) -> bool:
+    """Группой управляет приглашённый пользователь бота: он её создал или он — её клиент Bobr Cloud.
+    Тогда панель (а с ней адреса нод) задаёт он, и доверять им наравне с группами администратора нельзя.
+    Клиент Bobr Cloud, который не пользуется ботом (или сам администратор), группу пользовательской не делает."""
     if not prof:
         return False
     if prof.get('created_by'):
         return True
-    owner = str(prof.get('owner') or prof.get('owner_tg_id') or '').strip()
-    return bool(owner) and owner not in {str(a) for a in admins}
+    admins = {str(a) for a in admins}
+    tg = str(prof.get('owner_tg_id') or '').strip()
+    owner = str(prof.get('owner') or '').strip()
+    if not tg and owner.isdigit():
+        tg = owner
+    if tg:
+        return tg not in admins and tg.isdigit() and store.user(int(tg)) is not None
+    if owner.startswith('@'):  # доступ пользователю бота даёт и совпадение @username
+        name = owner[1:].lower()
+        return any((u.get('username') or '').lower() == name and str(u.get('tg_id', u.get('id'))) not in admins
+                   for u in store.users())
+    return False
 
 
 def bot_key_ips(store: Store, pid: int) -> set[str]:
@@ -77,7 +88,7 @@ def bot_key_ips(store: Store, pid: int) -> set[str]:
 def guard_bot_key(store: Store, prof: dict | None, acc: dict, target: str, admins) -> dict:
     """Ключ бота лежит на всех нодах, которые бот ставил, — во всех группах. В группе пользователя ключ бота
     работает только с серверами, которые бот сам купил или поставил в этой группе; иначе — пароль или ничего."""
-    if (acc or {}).get('key') != 'bot' or not tenant_group(prof, admins) or target in bot_key_ips(store, prof['id']):
+    if (acc or {}).get('key') != 'bot' or not tenant_group(store, prof, admins) or target in bot_key_ips(store, prof['id']):
         return acc
     acc = {**acc, 'key': ''}
     return acc if acc.get('password') else {}
@@ -258,7 +269,7 @@ async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: i
     if used:
         errs.append('уже есть в задачах: ' + ', '.join(sorted(used)))
     if not errs:
-        tenant = tenant_group(prof, admin_ids())
+        tenant = tenant_group(store, prof, admin_ids())
 
         def zones():
             cf = cf_for(store, prof)
@@ -270,7 +281,8 @@ async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: i
         try:
             foreign = await asyncio.to_thread(zones)
             if foreign:
-                errs.append('у этих имён уже есть DNS-записи, созданные не ботом — выберите другие: ' + ', '.join(foreign))
+                errs.append('у этих имён уже есть DNS-записи, созданные не ботом (или ботом старой версии — тогда удалите '
+                            'запись в Cloudflare) — выберите другие: ' + ', '.join(foreign))
         except engine.StepError as e:
             errs.append(str(e))
     if errs:

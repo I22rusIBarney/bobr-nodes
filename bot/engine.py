@@ -643,10 +643,10 @@ def resolve_many(hosts) -> dict[str, set[str]]:
 def safe_addresses(items) -> None:
     """Адрес ноды или хоста из панели попадает в команды на серверах. Панель группы может указать пользователь,
     поэтому всё, что не IP и не домен, обнуляем сразу на входе."""
-    from . import naming
     for x in items if isinstance(items, list) else []:
         a = x.get('address') if isinstance(x, dict) else None
-        if isinstance(a, str) and a and not (is_ip(a) or naming.valid_domain(a.lower())):
+        # IP (и IPv6), домены — в том числе .рф и xn-- — проходят; пробелы, кавычки, $ ; | и прочее — нет
+        if isinstance(a, str) and a and not re.fullmatch(r'[\w.\-:\[\]]+', a):
             x['address'] = ''
 
 

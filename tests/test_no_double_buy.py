@@ -69,3 +69,31 @@ def test_foreign_server_with_other_password_is_not_taken(tmp_path):
     store.update_job(jid, status='queued')
     run(runner, jid)
     assert bc.buys == 2 and store.job(jid)['data']['server_id'] == 502
+
+
+def test_parallel_purchase_in_flight_is_not_taken(tmp_path):
+    """Другая задача той же локации ещё покупает: её создающийся сервер (пароля пока нет) не наш."""
+    store = Store(tmp_path / 'bot.db')
+    bc = FakeBC()
+    runner = Runner(store, None, tmp_path / 'logs', bcloud_factory=lambda store, buyer: bc)
+    runner.render = lambda *a, **k: asyncio.sleep(0)
+    jid = job(store)
+    run(runner, jid)  # наша покупка оборвалась: сервер 501 создаётся, пароля ещё нет
+    other = job(store, password='other-job-pw')
+    store.update_job(other, status='buying')
+    store.patch_job_data(other, buy_tried=True)
+    store.update_job(jid, status='queued')
+    run(runner, jid)
+    assert bc.buys == 2, 'пока параллельно идёт покупка, сервер без пароля не угадываем'
+
+
+def test_old_server_without_password_is_not_taken(tmp_path):
+    store = Store(tmp_path / 'bot.db')
+    bc = FakeBC(lose_answer=False)
+    bc.list.append({'id': 400, 'status': 'active', 'location': 'nl', 'root_password': ''})  # давний сервер, не наш
+    runner = Runner(store, None, tmp_path / 'logs', bcloud_factory=lambda store, buyer: bc)
+    runner.render = lambda *a, **k: asyncio.sleep(0)
+    jid = job(store)
+    store.patch_job_data(jid, buy_tried=True)
+    run(runner, jid)
+    assert bc.buys == 1 and store.job(jid)['data']['server_id'] == 501

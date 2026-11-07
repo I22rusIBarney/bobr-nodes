@@ -536,8 +536,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if cur is not None and str(cur.get('created_by') or '') != str(uid_of(request)):
             data.pop('cf_token', None)
             # группа администратора: её токен панели на новый адрес не отправляем — новый адрес, новые ключи
-            new_url = str(data.get('panel_url') or '').strip().rstrip('/')
-            if new_url and new_url != str(cur.get('panel_url') or '').rstrip('/'):
+            from urllib.parse import urlsplit
+
+            def origin(u) -> tuple:
+                p_ = urlsplit(str(u or '').strip())
+                return p_.scheme.lower(), p_.netloc.lower()
+            new_url = str(data.get('panel_url') or '').strip()
+            if new_url and origin(new_url) != origin(cur.get('panel_url')):
                 if not str(data.get('panel_token') or '').strip():
                     raise ApiError('Новый адрес панели — укажите и её API-токен: прежний токен на другой адрес не отправляем')
                 if cur.get('panel_cookie') and not str(data.get('panel_cookie') or '').strip():
@@ -866,8 +871,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return x
 
     def relay_remote(acc: dict) -> engine.Remote:
+        """Вход по SSH на сервер моста. Ключ бота в группе пользователя — только к серверам, которые бот там купил."""
         from . import sshaccess
-        return engine.Remote({'ip': acc['ip'], **sshaccess.to_node(acc.get('ssh'), runner.bot_key()[0]),
+        ssh = svc.guard_bot_key(store, store.profile(acc['pid']), acc.get('ssh') or {}, acc['ip'], runner.admins) \
+            if acc.get('pid') else acc.get('ssh')
+        return engine.Remote({'ip': acc['ip'], **sshaccess.to_node(ssh, runner.bot_key()[0]),
                               'known_hosts': runner.known_hosts()}, None)
 
     def node_ctx(p: dict, uuid: str):
@@ -1050,7 +1058,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         from .runner import cf_token_of
         nd = x['convert']
         nprof = store.profile(int(nd['node_pid']))
-        r = relay_remote({'ip': x['ip'], 'ssh': acc})
+        r = relay_remote({'ip': x['ip'], 'ssh': acc, 'pid': x['pid']})
         log(f'останавливаю ноду {nd.get("domain") or x["ip"]} на сервере')
         await asyncio.to_thread(rl.convert, r, nd.get('domain') or '', log)
         if nprof:
@@ -1146,7 +1154,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             try:
                 if wait:
                     say('жду, пока на сервере поднимется SSH')
-                    await asyncio.to_thread(engine.wait_ssh, relay_remote({'ip': ip, 'ssh': x['ssh']}), say)
+                    await asyncio.to_thread(engine.wait_ssh, relay_remote({'ip': ip, 'ssh': x['ssh'], 'pid': x['pid']}), say)
                 if x.get('convert') and not x['convert'].get('done'):
                     relay_say(x['id'], stage='convert')
                     await relay_convert(x, x['ssh'], say)
@@ -1464,6 +1472,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 x['ssh'] = sshaccess.clean(b, x.get('ssh'), runner.keydir)
             except ValueError as e:
                 raise ApiError(str(e)) from None
+            if x['ssh'].get('key') == 'bot':
+                no_foreign_bot_key(request, {'key': 'bot'}, store.profile(x['pid']), x['ip'])
         if b.get('background'):
             store.save_relay({**x, 'status': 'installing', 'stage': 'ssh', 'error': '',
                               'log': [time.strftime('%H:%M:%S ') + 'переустановка']})
@@ -1506,7 +1516,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             engine.forget_host(runner.known_hosts(), x['ip'], int(new.get('port') or 22))
 
         def check():
-            rc, out = relay_remote({'ip': x['ip'], 'ssh': new}).run('id -u', 25)
+            rc, out = relay_remote({'ip': x['ip'], 'ssh': new, 'pid': x['pid']}).run('id -u', 25)
             return rc == 0
         try:
             if not await asyncio.to_thread(check):
@@ -2511,6 +2521,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Установка уже идёт')
         from . import sshaccess
         b = await body(request)
+        if not is_admin(request) and str(b.get('key') or '') == 'bot' and ch.get('key') != 'bot':
+            # на ключ бота чекер переводит сам бот после установки по паролю; пользователь — нет
+            raise ApiError('Ключ бота подходит только для серверов, которые бот сам купил или поставил в ваших группах. '
+                           'Укажите пароль или свой ключ.')
         if any(str(b.get(k) or '').strip() for k in ('user', 'port', 'password', 'key', 'key_text', 'sudo_password')):
             try:  # новый доступ: пустые поля — оставить сохранённое
                 store.patch_checker(ch['id'], **sshaccess.clean(b, ch, runner.keydir))

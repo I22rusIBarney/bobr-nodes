@@ -69,6 +69,21 @@ class Fail(Exception):
     pass
 
 
+def created_after(srv: dict, period: str, ts: float) -> bool:
+    """Сервер создан не раньше ts: Bobr Cloud не отдаёт дату создания, но срок у нового сервера — срок аренды
+    от момента покупки. Нет срока — не знаем, считаем подходящим (сервер ещё создаётся)."""
+    from datetime import datetime
+    exp = srv.get('expires_at')
+    if not exp:
+        return True
+    try:
+        end = datetime.fromisoformat(str(exp).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return True
+    days = {'1m': 30, '3m': 90, '6m': 180, '1y': 365}.get(period, 30)
+    return end - days * 86400 >= ts
+
+
 def bcloud_from(store: Store, tg_id: int | str | None = None) -> Bcloud:
     """Клиент Bobr Cloud от имени tg_id (владелец группы); по умолчанию — аккаунт из настроек."""
     return Bcloud(store.get('bcloud_url'), store.get('bcloud_token'), int(tg_id or store.get('bcloud_tg_id') or 0))
@@ -420,10 +435,16 @@ class Runner:
         used = {int(j['data']['server_id']) for j in self.store.jobs(5000, include_hidden=True)
                 if j['id'] != jid and j['data'].get('server_id')}
         used |= {int(r['server_id']) for r in self.store.relays() if r.get('server_id')}
-        cands = [x for x in await bc.servers() if int(x['id']) not in used and x.get('location') == d['location']
-                 and x.get('status') in ('provisioning', 'active') and x.get('root_password') in (None, '', d['password'])]
-        exact = [x for x in cands if x.get('root_password') == d['password']]
-        pick = exact or cands
+        servers = [x for x in await bc.servers() if int(x['id']) not in used and x.get('location') == d['location']]
+        exact = [x for x in servers if x.get('status') in ('provisioning', 'active') and x.get('root_password') == d['password']]
+        # пароля у сервера ещё может не быть, пока он создаётся. Такой берём, только если он создан после нашей
+        # попытки и рядом не идёт другая покупка в той же локации — иначе это может быть её сервер
+        busy = any(j['id'] != jid and j['status'] == 'buying' and j['data'].get('location') == d['location']
+                   and not j['data'].get('server_id') for j in self.store.jobs(5000))
+        fresh = [] if busy or not d.get('buy_at') else [
+            x for x in servers if x.get('status') == 'provisioning' and not x.get('root_password')
+            and created_after(x, d.get('period', '1m'), d['buy_at'] - 600)]
+        pick = exact or fresh
         if len(pick) > 1:
             raise Fail('прошлая покупка могла пройти без ответа, а в Bobr Cloud несколько похожих новых серверов: '
                        + ', '.join(str(x.get('name') or x['id']) for x in pick[:5])
@@ -467,7 +488,7 @@ class Runner:
                                    'проверьте «Мои серверы» в Bobr Cloud. Повтор купит новый сервер.')
                 if not d.get('server_id'):
                     await self._set(jid, status='buying', stage='buy', error='')
-                    d = self.store.patch_job_data(jid, buy_tried=True)  # до запроса: ответ может не дойти
+                    d = self.store.patch_job_data(jid, buy_tried=True, buy_at=int(time.time()))  # до запроса: ответ может не дойти
                     srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
                     d = self.store.patch_job_data(jid, server_id=srv['id'])
 
