@@ -318,7 +318,12 @@ async def main():
     ok((await web.get('/static/ui.css')).status == 200 and (await web.get('/static/../main.py')).status == 404, 'статика только своя')
     ok((await web.get('/static/fx.js')).status == 200, 'модуль оформления отдаётся')
     st, js = await wapi('state')
-    ok(js['theme'] == {'bg': 'none', 'effect': 'none', 'image': '', 'glass': 0, 'hero': 'auto'}, 'оформление по умолчанию: без фона, без эффектов, поля непрозрачные, картинка по сезону')
+    ok(js['theme'] == {'bg': 'none', 'effect': 'none', 'image': '', 'glass': 0, 'hero': 'auto', 'ui': 'classic'}, 'оформление по умолчанию: без фона, без эффектов, поля непрозрачные, картинка по сезону, классический интерфейс')
+    ok((await wapi('theme', 'POST', {'ui': 'beta'}))[0] == 400 and (await wapi('theme', 'POST', {'ui': 'new'}))[1]['ui'] == 'new'
+       and (await wapi('theme', 'POST', {'ui': 'classic'}))[1]['ui'] == 'classic', 'интерфейс: классический или новый, по выбору пользователя')
+    app = await web.get('/app')
+    ok(app.status == 200 and 'app-core.js' in await app.text(), 'страница нового интерфейса отдаётся')
+    ok(all([(await web.get(f'/static/{f}')).status == 200 for f in ('app.css', 'app-core.js', 'app.js')]), 'файлы нового интерфейса отдаются')
     ok((await wapi('theme', 'POST', {'hero': 'x'}))[0] == 400 and (await wapi('theme', 'POST', {'hero': 'winter-night'}))[1]['hero'] == 'winter-night'
        and (await wapi('theme', 'POST', {'hero': 'auto'}))[1]['hero'] == 'auto', 'картинка на главной: своя из восьми или по сезону')
     rh = await web.get('/static/hero-summer-day.webp')
