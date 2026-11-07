@@ -194,7 +194,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise
         except Exception as e:  # noqa: BLE001 — показываем причину, а не «сервер не смог»
             logging.getLogger(__name__).exception('api %s', request.path)
-            return web.json_response({'detail': f'Ошибка бота: {type(e).__name__}: {e}'[:300]}, status=500)
+            if role == 'admin':  # администратору — где именно сломалось; пользователю — без внутренностей
+                return web.json_response({'detail': f'Ошибка бота: {type(e).__name__}: {e}'[:300]}, status=500)
+            return web.json_response({'detail': 'Что-то пошло не так на стороне бота. Попробуйте ещё раз через минуту — '
+                                                'если повторится, напишите администратору.'}, status=500)
 
     app = web.Application(middlewares=[headers, guard], client_max_size=256 * 1024)
     r = web.RouteTableDef()

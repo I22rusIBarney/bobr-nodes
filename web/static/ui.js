@@ -124,7 +124,7 @@
     },
     /* Строка списка. status: [текст, 'ok'|'bad'|'warn'|'run', подпись] — точка и слово справа (без текста — одна точка); mono — detail машинным шрифтом;
        copy — значение, которое копируется кнопкой справа (IP, пароль, ключ). Иконки без цветных подложек. */
-    row({ title, sub, detail, icon, color, flag, lead: lead0, onClick, chevron, cls, right, label, status, mono, copy, copyLabel, tags }) {
+    row({ title, sub, detail, icon, color, flag, lead: lead0, onClick, chevron, cls, right, label, status, mono, copy, copyLabel, tags, cols }) {
       const tap = !!onClick;
       const lead = lead0 ? lead0 : icon ? UI.tile(icon, color)
         : flag ? UI.h('span', { class: 'flag-tile', 'aria-hidden': 'true' }, flag) : null;
@@ -139,6 +139,8 @@
       }, lead,
         UI.h('div', { class: 'grow' }, UI.h('div', { class: 't' }, title), sub ? UI.h('div', { class: 's' }, sub) : null,
           tags && tags.length ? UI.h('div', { class: 'tags' }, tags.map(t => UI.h('span', { class: 'tag ' + (t[1] || '') }, t[0]))) : null),
+        // колонки таблицы: видны только на широком экране (на телефоне то же — в метках и подписи)
+        cols ? UI.h('div', { class: 'cols' }, cols.map(c => UI.h('span', { class: 'c ' + (c[1] || '') }, c[0] || '—'))) : null,
         dot,
         detail !== undefined && detail !== null ? UI.h('span', { class: 'd' + (mono ? ' mono' : ' num') }, detail) : null,
         right || null,

@@ -525,6 +525,32 @@ body.has-composer .tabbar { display: none; }
 .composer .mode.on { background: var(--warn-soft); color: var(--warn); }
 body.has-composer { padding-bottom: calc(84px + var(--sab)); }
 @media (min-width: 960px) { .composer { left: 232px; } }
+
+/* ── Широкий экран: разделы шире, ноды — таблицей. Главная остаётся прежней колонкой ── */
+.row .cols, .node-head { display: none; }
+@media (min-width: 1200px) {
+  body > #root { max-width: 1100px; }
+  .home-page { max-width: 640px; margin-left: auto; margin-right: auto; }
+  .row.node .cols { display: grid; grid-template-columns: 90px 130px 150px 110px; gap: 14px; align-items: center; flex: none; min-width: 0; font-size: 13px; color: var(--hint); }
+  .row.node .cols .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row.node .cols .c.warn { color: var(--warn); } .row.node .cols .c.accent { color: var(--accent-text); }
+  .row.node .tags, .row.node .m-only { display: none; }
+  .row.node .grow { min-width: 0; }
+  .row.node .s { white-space: nowrap; }
+  .row.node > .st { min-width: 110px; justify-content: flex-end; }
+  /* строки нод — одной таблицей: без промежутков, разделители между строками */
+  .stack:has(> .node-head) { gap: 0; }
+  .stack:has(> .node-head) > .row { border-radius: 0; min-height: 56px; box-shadow: inset 0 -1px 0 var(--line); }
+  .stack:has(> .node-head) > .row:first-child { border-radius: var(--r-group) var(--r-group) 0 0; }
+  .stack:has(> .node-head) > :last-child { border-radius: 0 0 var(--r-group) var(--r-group); box-shadow: none; }
+  .stack:has(> .node-head) { background: var(--cell); border-radius: var(--r-group); box-shadow: inset 0 0 0 1px var(--line); overflow: hidden; }
+  .stack:has(> .node-head) > .row.tap:hover { background: var(--fill); }
+  .node-head { display: flex; min-height: 40px !important; font-size: 11px; font-weight: 600; color: var(--hint-2); text-transform: uppercase; letter-spacing: .06em; background: none !important; }
+  .node-head .flag-tile { visibility: hidden; height: 1px; }
+  .row.node.node-head .cols { display: grid; color: var(--hint-2); font-size: 11px; }
+  .node-head .hd-st { min-width: 110px; text-align: right; flex: none; }
+  .node-head .hd-chev { width: 7px; flex: none; }
+}
 .count { min-width: 18px; height: 18px; border-radius: 9px; background: var(--danger); color: #fff; font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; padding: 0 5px; font-variant-numeric: tabular-nums; }
 
 /* компактный переключатель внутри строки списка */
