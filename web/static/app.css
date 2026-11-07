@@ -316,7 +316,7 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; min-height: 8
 .steps { display: flex; gap: 6px; align-items: center; margin-left: 24px; flex-wrap: wrap; }
 .steps .stp { display: flex; align-items: center; gap: 8px; color: var(--ink-3); font-weight: 600; font-size: 13px; }
 .steps .stp i { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--rule-2); font: 600 11.5px/1 var(--mono); font-style: normal; }
-.steps .stp.on { color: var(--ink); } .steps .stp.on i { border-color: var(--air-blue); background: var(--air-blue); color: #fff; }
+.steps .stp.on { color: var(--ink); } .steps .stp.on i { border-color: var(--btn); background: var(--btn); color: #fff; }
 .steps .stp.done { color: var(--ink-2); } .steps .stp.done i { border-color: var(--ok); background: var(--ok); color: #fff; }
 .steps .sep { width: 18px; height: 1px; background: var(--rule-2); }
 .wiz-body { flex: 1; overflow-y: auto; }

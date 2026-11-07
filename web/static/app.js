@@ -72,7 +72,7 @@ function conn(n) {
 const stChip = n => { const c = conn(n); return h('span', { class: 'st ' + c.cls }, c.word); };
 
 /* ── роутер и отрисовка ── */
-const OVERLAYS = { node: 'nodes', task: 'overview' };
+const OVERLAYS = { node: 'nodes', task: 'activity', deploy: 'overview' };
 const parse = () => { const [name = 'overview', ...rest] = location.hash.replace(/^#\/?/, '').split('/'); return { name: name || 'overview', arg: rest.join('/') ? decodeURIComponent(rest.join('/')) : '' }; };
 const keyOf = r => r.name + (r.arg ? '/' + encodeURIComponent(r.arg) : '');
 function go(path) { if (location.hash === '#/' + path) render(); else location.hash = '#/' + path; }
@@ -108,9 +108,15 @@ function renderOverlay(r) {
   const fresh = key && key.split('/')[0] !== UI.ovKey.split('/')[0];
   UI.ovKey = key;
   document.body.style.overflow = key ? 'hidden' : '';
-  backHandler = key ? closeOverlay : null; syncBack();
+  backHandler = key ? (r.name === 'deploy' ? closeWizard : closeOverlay) : null; syncBack();
   if (!key || D.loading || D.err) return host.replaceChildren();
   let panel;
+  if (r.name === 'deploy') {
+    if (!UI.wiz) { setTimeout(closeOverlay); return host.replaceChildren(); }
+    panel = wizard(); host.replaceChildren(panel);
+    if (fresh) requestAnimationFrame(() => requestAnimationFrame(() => panel.classList.add('show'))); else panel.classList.add('show');
+    return;
+  }
   if (r.name === 'node') { const n = N(r.arg); if (!n) { if (Object.keys(D.nodes).length >= groups().length) setTimeout(closeOverlay); return host.replaceChildren(); } panel = drawerNode(n); }
   else panel = drawerTask(r.arg);
   host.replaceChildren(h('div', { class: 'scrim show', onclick: closeOverlay }), panel);
@@ -121,31 +127,24 @@ function renderOverlay(r) {
 const NAV = [
   { id: 'overview', l: 'Обзор', i: 'home' },
   { id: 'nodes', l: 'Ноды', i: 'server', cnt: () => allNodes().filter(urgent).length },
+  { id: 'groups', l: 'Группы', i: 'layers' },
+  { id: 'activity', l: 'Задачи', i: 'activity', cnt: () => D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400).length },
+  { id: 'settings', l: 'Настройки', i: 'sliders' },
 ];
-const CLASSIC_NAV = () => [
-  { l: 'Группы', i: 'layers', open: 'servers' },
-  { l: 'Задачи', i: 'activity', open: 'jobs', cnt: () => (D.st ? D.st.jobs.failed : 0) },
-  { l: 'Мониторинг', i: 'radar', open: 'monitor' },
-  { l: 'Настройки', i: 'sliders', open: 'settings' },
-];
-const SECTION_OF = { node: 'nodes', task: 'overview' };
+const SECTION_OF = { node: 'nodes', task: 'activity', group: 'groups', look: 'settings' };
 function shell(base, changed) {
   const cur = SECTION_OF[base.name] || base.name;
   const navBtn = x => { const c = x.cnt && x.cnt();
     return h('button', { type: 'button', class: 'nav-a', 'aria-current': cur === x.id ? 'page' : null, onclick: () => go(x.id), title: x.l },
       ic(x.i), h('span', { class: 'lbl' }, x.l), c ? h('span', { class: 'cnt', 'aria-label': `требуют внимания: ${c}` }, c) : null); };
-  const extBtn = x => { const c = x.cnt && x.cnt();
-    return h('button', { type: 'button', class: 'nav-a', onclick: () => classic(x.open), title: x.l + ' — откроется в классическом интерфейсе' },
-      ic(x.i), h('span', { class: 'lbl' }, x.l), c ? h('span', { class: 'cnt' }, c) : h('span', { class: 'ext lbl' }, ic('ext'))); };
   const unread = D.st ? D.st.notif_unread : 0, name = (D.st && D.st.me) || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name) || 'Вы';
   const bal = D.wallet && D.wallet.balance_kop != null ? D.wallet.balance_kop : null;
   return h('div', { class: 'app' },
     h('aside', { class: 'rail', 'aria-label': 'Разделы' },
       h('div', { class: 'brand' }, h('img', { src: '/static/logo.png', alt: '' }), h('span', null, 'Bobr Nodes')),
       NAV.map(navBtn),
-      h('div', { class: 'nav-h lbl' }, 'В классическом интерфейсе'), CLASSIC_NAV().map(extBtn),
       h('div', { class: 'spacer' }),
-      h('button', { type: 'button', class: 'me nav-a', style: 'height:auto', 'aria-current': cur === 'look' ? 'page' : null, onclick: () => go('look'), title: 'Интерфейс и тема' },
+      h('button', { type: 'button', class: 'me nav-a', style: 'height:auto', onclick: () => go('settings/look'), title: 'Интерфейс и тема' },
         h('span', { class: 'avatar' }, name[0]),
         h('span', { class: 'who' }, h('b', null, name), h('span', null, 'интерфейс и тема')))),
     h('main', { class: 'main' },
@@ -155,13 +154,13 @@ function shell(base, changed) {
         h('span', { class: 'sp' }),
         bal != null ? h('span', { class: 'balance', title: 'Баланс Bobr Cloud · ' + (D.wallet.account || '') }, ic('wallet'), h('span', { class: 'num' }, rubK(bal))) : null,
         h('button', { type: 'button', class: 'icon-btn', id: 'bell', onclick: openBell, 'aria-label': `Уведомления${unread ? `, новых: ${unread}` : ''}` }, ic('bell'), unread ? h('span', { class: 'dot' }) : null),
-        h('button', { type: 'button', class: 'btn primary hide-m', onclick: () => classic('deploy'), title: 'Мастер откроется в классическом интерфейсе' }, ic('plus'), 'Добавить ноды')),
+        h('button', { type: 'button', class: 'btn primary hide-m', onclick: () => openDeploy() }, ic('plus'), 'Добавить ноды')),
       h('div', { class: 'page' + (changed ? ' view-in' : '') }, D.err ? errorView() : D.loading ? skeleton() : VIEWS[base.name](base.arg))),
     h('nav', { class: 'tabbar', 'aria-label': 'Разделы' },
       tabBtn(NAV[0], cur), tabBtn(NAV[1], cur),
-      h('button', { type: 'button', onclick: () => classic('deploy'), 'aria-label': 'Добавить ноды' }, h('span', { class: 'add' }, ic('plus'))),
-      h('button', { type: 'button', onclick: () => classic('jobs') }, ic('activity'), 'Задачи'),
-      tabBtn({ id: 'more', l: 'Ещё', i: 'grid' }, cur === 'look' ? 'more' : cur)));
+      h('button', { type: 'button', onclick: () => openDeploy(), 'aria-label': 'Добавить ноды' }, h('span', { class: 'add' }, ic('plus'))),
+      tabBtn(NAV[3], cur),
+      tabBtn({ id: 'more', l: 'Ещё', i: 'grid' }, ['groups', 'settings'].includes(cur) ? 'more' : cur)));
 }
 function tabBtn(x, cur) {
   const c = x.cnt && x.cnt();
@@ -240,7 +239,7 @@ async function retryJob(j) {
 function attention() {
   const ns = allNodes(), out = [], st = D.st;
   if (st.issues && st.issues.length) out.push({ sev: 'warn', icon: 'sliders', title: 'Нужна настройка', text: st.issues.join(', '),
-    acts: [{ l: 'Настроить', p: 1, fn: () => classic('settings') }] });
+    acts: [{ l: 'Настроить', p: 1, fn: () => go(isAdmin() ? 'settings/connections' : 'groups') }] });
   if (st.host && st.host.level === 'bad') out.push({ sev: 'bad', icon: 'server', title: 'Серверу бота не хватает ресурсов', text: `Процессор ${st.host.cpu ?? '—'}%, память ${st.host.mem ?? '—'}%`,
     acts: [{ l: 'Подробнее', fn: () => classic('settings') }] });
   for (const n of ns.filter(offline))
@@ -252,7 +251,7 @@ function attention() {
       acts: [{ l: 'Починить', p: 1, fn: () => fixNode(n) }, { l: 'Не чинить', fn: () => ignoreNode(n) }] });
   const failed = D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400);
   if (failed.length > 3) out.push({ sev: 'bad', icon: 'alert', title: `${pl(failed.length, 'задача', 'задачи', 'задач')} с ошибкой за 3 дня`, text: failed.slice(0, 3).map(j => j.domain).join(', ') + '…',
-    acts: [{ l: 'Показать', p: 1, fn: () => classic('jobs') }] });
+    acts: [{ l: 'Показать', p: 1, fn: () => { UI.af = 'failed'; go('activity'); } }] });
   else for (const j of failed) out.push({ sev: 'bad', icon: 'alert', title: `${jobTitle(j)} — ошибка`, text: j.error || `остановилась на шаге «${j.stage}»`,
     acts: [{ l: 'Повторить', p: 1, fn: () => retryJob(j) }, { l: 'Подробнее', fn: () => go('task/' + j.id) }] });
   for (const n of ns.filter(rentSoon))
@@ -274,7 +273,7 @@ const jobTitle = j => (j.spec && j.spec.startsWith('обновление') ? 'О
 function vOverview() {
   const ns = allNodes(), items = attention(), gs = groups();
   if (!gs.length) return [pageH('Добро пожаловать', 'Подключите панель Remnawave — бот начнёт ставить в неё ноды и следить за ними.'),
-    empty('layers', 'Групп пока нет', 'Группа — это панель Remnawave со своим доменом. Создаётся в классическом интерфейсе.', btn('Подключить панель', () => classic('servers'), 'primary', 'plus'))];
+    empty('layers', 'Групп пока нет', 'Группа — это панель Remnawave со своим доменом и нодами.', btn('Подключить панель', newGroup, 'primary', 'plus'))];
   const cnt = f => ns.filter(f).length;
   const okN = cnt(n => n.connected && !n.disabled && ruState(n) !== 'bad'), offN = cnt(offline), blkN = cnt(n => ruState(n) === 'bad'), disN = cnt(n => n.disabled),
     online = ns.reduce((s, n) => s + (n.online || 0), 0);
@@ -304,17 +303,17 @@ function vOverview() {
               h('button', { type: 'button', role: 'listitem', class: 'cty' + (c.bad ? ' has-bad' : ''), title: c.bad ? `${c.bad} требуют внимания` : '', onclick: to({ cc }) },
                 flag(cc) ? h('span', { class: 'flag' }, flag(cc)) : null, cc, h('span', { class: 'n' }, c.bad ? `${c.bad}/${c.n}` : c.n)))))),
         h('section', { class: 'section' },
-          h('div', { class: 'section-h' }, h('h2', null, 'Группы'), btn('Все группы', () => classic('servers'), 'ghost s more')),
+          h('div', { class: 'section-h' }, h('h2', null, 'Группы'), btn('Все группы', () => go('groups'), 'ghost s more')),
           h('div', { class: 'list' }, gs.map(groupRow)))),
       h('section', { class: 'section' },
-        h('div', { class: 'section-h' }, h('h2', null, 'Недавно'), btn('Все задачи', () => classic('jobs'), 'ghost s more')),
+        h('div', { class: 'section-h' }, h('h2', null, 'Недавно'), btn('Все задачи', () => go('activity'), 'ghost s more')),
         D.jobs.length ? h('div', { class: 'list' }, D.jobs.slice(0, 7).map(taskRow)) : empty('activity', 'Пока тихо', 'Здесь появятся установки, обновления и починки.'))),
   ];
 }
 function groupRow(p) {
   const ns = allNodes().filter(n => n.pid === p.id), bad = ns.filter(urgent).length;
   const who = p.kind === 'user' ? p.created_by_label : p.kind === 'shared' ? 'от администратора' : '';
-  return h('button', { type: 'button', class: 'li', onclick: () => { UI.nf = { ...UI.nf, group: String(p.id), status: 'all', cc: null, q: '' }; go('nodes'); } },
+  return h('button', { type: 'button', class: 'li', onclick: () => go('group/' + p.id) },
     h('div', { class: 'ic-tile' }, ic('layers')),
     h('div', { class: 'grow' }, h('div', { class: 't' }, p.name), h('div', { class: 's' }, `${(p.panel_url || '').replace(/^https?:\/\//, '')} · ${D.nodes[p.id] ? pl(ns.length, 'нода', 'ноды', 'нод') : 'загружаю…'}`)),
     who ? h('span', { class: 'tag hide-m' }, who) : null,
@@ -349,9 +348,9 @@ function filtered(ns, f) {
 function vNodes() {
   const all = allNodes(), f = UI.nf, gs = groups();
   if (f.group !== 'all' && !gs.some(p => String(p.id) === f.group)) f.group = 'all';
-  const add = btn('Добавить ноды', () => classic('deploy'), 'primary', 'plus');
+  const add = btn('Добавить ноды', () => openDeploy(), 'primary', 'plus');
   const loadingNodes = gs.some(p => !D.nodes[p.id] && !D.nerr[p.id]);
-  if (!all.length) return [pageH('Ноды'), nodesErrors(), loadingNodes ? skeleton() : empty('server', 'Нод пока нет', gs.length ? 'Выберите страны и тариф — бот купит серверы, поставит ноды и пропишет DNS.' : 'Сначала подключите панель Remnawave.', gs.length ? add : btn('Подключить панель', () => classic('servers'), 'primary', 'plus'))];
+  if (!all.length) return [pageH('Ноды'), nodesErrors(), loadingNodes ? skeleton() : empty('server', 'Нод пока нет', gs.length ? 'Выберите страны и тариф — бот купит серверы, поставит ноды и пропишет DNS.' : 'Сначала подключите панель Remnawave.', gs.length ? add : btn('Подключить панель', newGroup, 'primary', 'plus'))];
   const scoped = all.filter(n => (f.group === 'all' || String(n.pid) === f.group) && (!f.cc || (n.country || '—') === f.cc));
   const list = filtered(all, f);
   const set = p => { UI.nf = { ...UI.nf, ...p }; render(); };
@@ -564,7 +563,8 @@ function drawerTask(id) {
       })),
       j.log ? [h('div', { class: 'section-h' }, h('h2', null, 'Журнал'), btn('Скопировать', () => copy(j.log, 'Журнал'), 'ghost s more')),
         h('div', { class: 'log', tabindex: '0' }, j.log.slice(-8000).replace(/^#{2,}\s*/gm, ''))] : null,
-      h('div', { class: 'chips', style: 'margin-top:16px' }, btn('Открыть в классическом', () => classic('job:' + j.id), '', 'ext'))));
+      h('div', { class: 'chips', style: 'margin-top:16px' },
+        j.status === 'done' || j.status === 'failed' ? btn('Скрыть из списка', async () => { try { await api(`jobs/${j.id}/hide`, 'POST'); D.jobs = D.jobs.filter(x => x.id !== j.id); closeOverlay(); } catch (x) { toast('Не получилось', x.message, 'bad'); } }, 'ghost') : null)));
 }
 
 /* ── Интерфейс и тема ── */
@@ -580,12 +580,12 @@ function vLook() {
           try { await api('theme', 'POST', { ui: 'classic' }); location.replace('/admin?classic=1'); } catch (x) { b.classList.remove('busy'); toast('Не получилось', x.message, 'bad'); } }, 's')))];
 }
 function vMore() {
-  const row = (i, t, s, fn, ext) => h('button', { type: 'button', class: 'li', onclick: fn }, h('div', { class: 'ic-tile' }, ic(i)),
-    h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's' }, s)), h('span', { class: 'chev' }, ic(ext ? 'ext' : 'chevR')));
-  return [pageH('Ещё'),
-    h('div', { class: 'list', style: 'margin-bottom:22px' }, row('contrast', 'Интерфейс и тема', 'светлая, тёмная, классический вид', () => go('look'))),
-    h('div', { class: 'section-h' }, h('h2', null, 'В классическом интерфейсе')),
-    h('div', { class: 'list' }, CLASSIC_NAV().map(x => row(x.i, x.l, { servers: 'панели, домены, автоматизация', jobs: 'установки и обновления', monitor: 'чекеры и проверка из России', settings: 'подключения, пользователи, сервер бота' }[x.open], () => classic(x.open), true)))];
+  const row = (i, t, s, fn) => h('button', { type: 'button', class: 'li', onclick: fn }, h('div', { class: 'ic-tile' }, ic(i)),
+    h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's' }, s)), h('span', { class: 'chev' }, ic('chevR')));
+  return [pageH('Ещё'), h('div', { class: 'list' },
+    row('layers', 'Группы', `${groups().length} · панели, мониторинг, автоматизация`, () => go('groups')),
+    row('sliders', 'Настройки', 'подключения, уведомления, пользователи', () => go('settings')),
+    row('contrast', 'Интерфейс и тема', 'светлая, тёмная, классический вид', () => go('settings/look')))];
 }
 
 /* ── Колокольчик ── */
@@ -615,11 +615,12 @@ function openPalette() {
   if ($('.palette')) return;
   const cmds = [
     ...NAV.map(x => ({ g: 'Разделы', l: x.l, i: x.i, fn: () => go(x.id) })),
-    ...CLASSIC_NAV().map(x => ({ g: 'Разделы', l: x.l, s: 'классический интерфейс', i: x.i, fn: () => classic(x.open) })),
-    { g: 'Действия', l: 'Добавить ноды', s: 'классический интерфейс', i: 'plus', fn: () => classic('deploy') },
+    { g: 'Действия', l: 'Добавить ноды', i: 'plus', fn: () => openDeploy() },
+    { g: 'Действия', l: 'Новая группа', i: 'layers', fn: () => newGroup() },
     { g: 'Действия', l: 'Обновить устаревшие ноды', i: 'up', fn: () => updateNodes(allNodes().filter(outdated)) },
     { g: 'Действия', l: 'Проверить ноды из России', i: 'shield', fn: () => api('monitor/check', 'POST').then(() => toast('Проверка запущена', 'Результат — через 1–2 минуты')).catch(e => toast('Не получилось', e.message, 'bad')) },
-    { g: 'Действия', l: 'Интерфейс и тема', i: 'contrast', fn: () => go('look') },
+    { g: 'Действия', l: 'Интерфейс и тема', i: 'contrast', fn: () => go('settings/look') },
+    ...groups().map(p => ({ g: 'Группы', l: p.name, s: (p.panel_url || '').replace(/^https?:\/\//, ''), i: 'layers', fn: () => go('group/' + p.id) })),
     ...allNodes().map(n => ({ g: 'Ноды', l: n.name, s: (n.domain || n.address) + ' · ' + n.group, flag: n.country, fn: () => go('node/' + n.id), q: [n.name, n.address, n.domain, n.country, n.group].join(' ') })),
   ];
   let q = '', idx = 0, shown = [];
@@ -651,6 +652,7 @@ function openPalette() {
   document.body.append(scrim, pal); layers.push(close); syncBack(); draw(); inp.focus();
 }
 
-const VIEWS = { overview: vOverview, nodes: vNodes, look: vLook, more: () => (innerWidth >= 720 ? vLook() : vMore()) };
+const VIEWS = { overview: vOverview, nodes: vNodes, groups: vGroups, group: vGroup, activity: vActivity, settings: vSettings,
+  look: () => { setTimeout(() => go('settings/look')); return skeleton(); }, more: () => (innerWidth >= 720 ? (setTimeout(() => go('settings')), skeleton()) : vMore()) };
 render();
 loadAll();

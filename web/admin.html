@@ -90,6 +90,7 @@ function openDeep() {  // ?open=… — раздел, который новый 
   const [k, a, b] = (QS.get('open') || '').split(':');
   const go = { node: () => UI.nav.push(() => nodeView(+a, b)), job: () => UI.nav.push(() => jobView(+a)),
     deploy: () => { D = null; UI.nav.push(() => deployView(a ? +a : undefined)); }, jobs: () => { JOBS = null; UI.nav.push(jobsView); },
+    group: () => UI.nav.push(() => groupView(+a)),
     monitor: () => { MON = null; UI.nav.push(monitorView); }, servers: () => UI.nav.setTab('servers'), settings: () => UI.nav.setTab('settings'),
     theme: () => UI.nav.push(themeView) }[k];
   if (go && ST && !ST.error && ST.role !== 'paused') go();
