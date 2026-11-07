@@ -102,13 +102,22 @@ function render(soft) {
   document.querySelectorAll('[data-keep]').forEach(e => { if (scrolls[e.dataset.keep] != null) e.scrollTop = scrolls[e.dataset.keep]; });
   if (changed && !(r.name in OVERLAYS)) window.scrollTo(0, 0);
 }
+function parentOf(r) {
+  const phone = innerWidth < 720;
+  if (r.name === 'group') return 'groups';
+  if (r.name === 'settings' && r.arg) return phone ? 'settings' : null;
+  if (phone && ['groups', 'settings'].includes(r.name)) return 'more';  // на телефоне группы и настройки открываются из «Ещё»
+  return null;
+}
 function renderOverlay(r) {
   const host = $('#ov');
   const key = r.name in OVERLAYS ? keyOf(r) : '';
   const fresh = key && key.split('/')[0] !== UI.ovKey.split('/')[0];
   UI.ovKey = key;
   document.body.style.overflow = key ? 'hidden' : '';
-  backHandler = key ? (r.name === 'deploy' ? closeWizard : closeOverlay) : null; syncBack();
+  // нативная «Назад»: окно — закрыть, мастер — шаг назад, вложенная страница — к родителю; на разделах её нет
+  const up = parentOf(UI.base);
+  backHandler = key ? (r.name === 'deploy' ? wizBack : closeOverlay) : up ? Object.assign(() => go(up), { nav: true }) : null; syncBack();
   if (!key || D.loading || D.err) return host.replaceChildren();
   let panel;
   if (r.name === 'deploy') {
@@ -591,7 +600,7 @@ function openBell() {
         h('div', { class: 's', style: 'white-space:normal' }, (lines.slice(1).join(' ').slice(0, 140) || x.title) + ' · ' + ago(x.ts * 1000))));
   }) : [h('div', { class: 'empty' }, 'Уведомлений нет')]));
   api('notify/feed').then(r => { D.feed = r; fill(r.items || []); }).catch(e => listEl.replaceChildren(h('div', { class: 'empty' }, e.message)));
-  const pop = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Уведомления', style: innerWidth < 720 ? 'left:12px;right:12px;top:64px;width:auto' : `top:${b.bottom + 8}px;right:${innerWidth - b.right}px` },
+  const pop = h('div', { class: 'popover', role: 'dialog', 'aria-label': 'Уведомления', style: innerWidth < 720 ? 'left:12px;right:12px;top:calc(var(--sa-top) + 64px);width:auto' : `top:${b.bottom + 8}px;right:${innerWidth - b.right}px` },
     h('div', { style: 'display:flex;align-items:center;padding:14px 16px;border-bottom:1px solid var(--rule)' }, h('b', { style: 'flex:1' }, 'Уведомления'),
       btn('Прочитать все', async () => { try { await api('notify/read', 'POST'); D.st.notif_unread = 0; close(); render(); } catch (e) { toast('Не получилось', e.message, 'bad'); } }, 's ghost')),
     listEl);
