@@ -272,7 +272,7 @@ function newGroup() {
   const val = {}, body = h('div', { class: 'form' });
   const draw = () => body.replaceChildren(...(!F.profile ? [h('div', { class: 'sk', style: 'height:200px' })] : [
     h('div', null, 'Бот проверит адрес и токен панели. Остальное можно поменять потом.'),
-    ...profileForm(F, val, [], {}, F.required, MAIN_KEYS),
+    ...profileForm(F, val, [], {}, F.required, MAIN_KEYS).filter(Boolean),
     h('details', { class: 'more-opts' }, h('summary', null, 'Ещё настройки'), h('div', { class: 'form', style: 'margin-top:12px' }, profileForm(F, val, isAdmin() ? [] : ['owner'], {}, F.required, MORE_KEYS))),
     err]));
   const err = h('div', { class: 'err', role: 'alert' });
@@ -310,7 +310,7 @@ function groupMon(g) {
       h('span', { class: 'num-i' }, st.steps.includes(k) ? st.steps.indexOf(k) + 1 : '–'), h('span', { class: 'grow' }, h('b', null, D.mon.steps[k][0].toUpperCase() + D.mon.steps[k].slice(1))),
       toggle(st.steps.includes(k), v => { st.steps = v ? [...st.steps, k].sort((a, b) => ALL.indexOf(a) - ALL.indexOf(b)) : st.steps.filter(x => x !== k); render(); }, D.mon.steps[k])))),
     h('div', { class: 'list', style: 'margin-bottom:16px' }, switchRow('Без уведомлений', 'Проверять и чинить молча — итог будет в колокольчике', st.quiet, v => { st.quiet = v; })),
-    h('div', { class: 'chips' }, btn('Сохранить', save, 'primary'), btn('Чекеры и покупка новых нод', () => classic('monitor'), '', 'ext')));
+    h('div', { class: 'chips' }, btn('Сохранить', save, 'primary'), btn('Чекеры', () => go('settings/checkers'), '', 'radar'), btn('Какие ноды докупать', () => classic('monitor'), 'ghost', 'ext')));
 }
 const WD = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
 function groupAuto(g) {
@@ -365,9 +365,11 @@ function vActivity() {
 const SETTINGS = () => [
   { id: 'connections', l: 'Подключения', i: 'globe', s: 'Bobr Cloud, Cloudflare, Gemini', admin: 1 },
   { id: 'notifications', l: 'Уведомления', i: 'bell', s: 'Что присылать в Telegram' },
+  { id: 'checkers', l: 'Чекеры в России', i: 'radar', s: 'Кто проверяет ноды' },
   { id: 'users', l: 'Пользователи', i: 'users', s: 'Приглашения и доступ', admin: 1 },
+  { id: 'bot', l: 'Сервер бота', i: 'server', s: 'Обновление и резервные копии', admin: 1 },
   { id: 'look', l: 'Интерфейс и тема', i: 'contrast', s: 'Светлая, тёмная, классический вид' },
-  { id: 'classic', l: 'Ещё в классическом', i: 'ext', s: 'Чекеры, скрипты, копии, обновление бота' },
+  { id: 'classic', l: 'Ещё в классическом', i: 'ext', s: 'Скрипты, плагины, мосты, переезд' },
 ].filter(s => !s.admin || isAdmin());
 function vSettings(sec) {
   const list = SETTINGS(), mobile = innerWidth < 720;
@@ -377,7 +379,7 @@ function vSettings(sec) {
     h('div', { class: 'ic-tile' }, ic(s.i)), h('div', { class: 'grow' }, h('div', { class: 't' }, s.l), h('div', { class: 's' }, s.s)), h('span', { class: 'chev show-m' }, ic('chevR')))));
   if (!cur) return [pageH('Настройки'), nav];
   const S_ = list.find(s => s.id === cur);
-  const content = { connections: setConnections, notifications: setNotif, users: setUsers, look: () => vLook().slice(1), classic: setClassic }[cur]();
+  const content = { connections: setConnections, notifications: setNotif, checkers: setCheckers, users: setUsers, bot: setBot, look: () => vLook().slice(1), classic: setClassic }[cur]();
   return mobile ? [h('button', { type: 'button', class: 'back', onclick: () => go('settings') }, ic('chevL'), 'Настройки'), pageH(S_.l), content]
     : [pageH('Настройки'), h('div', { class: 'set-grid' }, nav, h('div', { style: 'min-width:0' }, h('h2', { class: 'set-h' }, S_.l), content))];
 }
@@ -463,8 +465,8 @@ function setClassic() {
     h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's', style: 'white-space:normal' }, s)), h('span', { class: 'chev' }, ic('ext')));
   return [h('p', { class: 'muted', style: 'margin:0 0 14px' }, 'Эти разделы пока есть только в классическом интерфейсе — откроется сразу нужный.'),
     h('div', { class: 'list' },
-      row('radar', 'Чекеры в России', 'Добавить, переустановить, регион, покупка новых нод при блокировке', 'monitor'),
-      row('box', 'Дополнения, вход через Россию, SSH у ноды', 'На карточке ноды: вкладка «Настройки»', 'servers'),
-      isAdmin() ? row('terminal', 'Мои скрипты, резервные копии, обновление бота, переезд', 'Вкладка «Настройки» классического интерфейса', 'settings') : null,
-      row('wallet', 'Оплата и пополнение баланса', 'Главная классического интерфейса', ''))];
+      row('radar', 'Какие ноды докупать при блокировке', 'Тарифы и запасной вариант для шага «новая нода»', 'monitor'),
+      row('route', 'Вход через Россию', 'Мост через российский сервер — на карточке ноды', 'servers'),
+      isAdmin() ? row('terminal', 'Мои скрипты, плагины нод, переезд бота, журнал действий', 'Вкладка «Настройки» классического интерфейса', 'settings') : null,
+      row('wallet', 'Подписка на бота', 'Оплата доступа для приглашённых', ''))];
 }
