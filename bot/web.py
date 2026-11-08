@@ -2867,6 +2867,12 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         (hosts,), _ = await cached(p, 'hosts')
         kinds = json.loads(store.get(f'host_kinds:{p["id"]}') or '{}')
         watch = watched_hosts(p)
+        reach = {}
+        if any(h.get('isHidden') for h in hosts):  # скрытые: через какие балансировщики они попадают в подписку
+            try:
+                reach = engine.host_reach(hosts, await asyncio.to_thread(lambda: panel_of(p).templates()))
+            except engine.StepError:
+                reach = {}
         mon_st = store.mon_all(f'{p["id"]}:host:')
         keep = ('status', 'data', 'fail', 'up', 'total', 'by', 'checked_at', 'since')
         out = []
@@ -2874,7 +2880,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             kind = kinds.get(h['uuid'], '')
             st = mon_st.get(f'{p["id"]}:host:{h["uuid"]}')
             out.append({'uuid': h['uuid'], 'remark': h.get('remark') or '', 'address': h.get('address') or '', 'port': h.get('port'),
-                        'kind': kind, 'hidden': bool(h.get('isHidden')),
+                        'kind': kind, 'hidden': bool(h.get('isHidden')), 'tags': h.get('tags') or [],
+                        **({'reach': reach[h['uuid']]} if h['uuid'] in reach else {}),
                         'watched': kind != 'disabled' and watch.get(h['uuid'], kind == 'loose'),
                         'mon': {k: st.get(k) for k in keep} if st else None})
         return J({'hosts': out, 'enabled': bool(p.get('mon_sub')), 'known': bool(kinds)})
