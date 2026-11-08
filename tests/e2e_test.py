@@ -1072,6 +1072,31 @@ async def main():
                                                   'template_json': {'routing': {'rules': [{'outboundTag': 'direct'}]}}})
     ok(st == 200 and next(t for t in world.templates if t['name'] == tname)['templateJson'] == {'routing': {'rules': [{'outboundTag': 'direct'}]}},
        'присланный Xray JSON обновил шаблон по имени')
+
+    # новый роутинг хостов: архив с конфигами → в шаблон выбранного хоста, с откатом
+    import io as _io, zipfile as _zf
+    h6 = next(h for h in world.hosts if h.get('remark') == 'Обход 6')
+    t6 = next(t for t in world.templates if t['uuid'] == h6['xrayJsonTemplateUuid'])
+    was = json.loads(json.dumps(t6['templateJson']))
+    newcfg = {'outbounds': [{'tag': 'm1-main', 'protocol': 'vless', 'settings': {'vnext': [{'address': 'wrab.online', 'port': 9443}]}}],
+              'routing': {'rules': [{'outboundTag': 'm1-main'}] * 3}}
+    buf = _io.BytesIO()
+    with _zf.ZipFile(buf, 'w') as z:
+        z.writestr('mob/1 wrab.online.json', json.dumps(newcfg))
+        z.writestr('__MACOSX/mob/._1 wrab.online.json', 'x')
+    r = await web.put(f'/api/hosts/templates/files?pid={pid}', data=buf.getvalue(), headers={**H, 'X-File-Name': '3.zip'})
+    up_ = await r.json()
+    ok(r.status == 200 and [f['name'] for f in up_['files']] == ['1 wrab.online.json'] and up_['files'][0]['main']['tag'] == 'm1-main',
+       f'архив с роутингом разобран: {up_}')
+    st, res = await wapi('hosts/templates/apply', 'POST', {'pid': pid, 'pairs': [{'host': h6['uuid'], 'file': up_['files'][0]['id']}]})
+    ok(st == 200 and res['ok'] and res['updated'] == 1 and t6['templateJson']['routing']['rules'] == newcfg['routing']['rules'],
+       f'роутинг хоста обновлён в его шаблоне: {res}')
+    st, res = await wapi('hosts/templates/apply', 'POST', {'pid': pid, 'pairs': [{'host': h6['uuid'], 'file': up_['files'][0]['id']}]})
+    ok(st == 400 and 'устарели' in res['detail'], 'загруженный файл применяется один раз')
+    st, res = await wapi('hosts/templates/undo', 'POST', {'pid': pid})
+    ok(st == 200 and res['ok'] and t6['templateJson'] == was, 'прежний роутинг возвращается одной кнопкой')
+    r = await web.put(f'/api/hosts/templates/files?pid={pid}', data=b'{oops', headers={**H, 'X-File-Name': 'a.json'})
+    ok(r.status == 400 and 'не JSON' in (await r.json())['detail'], 'битый файл — понятная ошибка')
     st, res = await wapi('hosts/import', 'POST', {'pid': pid, 'bundle': {'hosts': []}})
     ok(st == 200 and res['ok'] is False and 'набор' in res['error'] and res['log'] == [], 'чужой JSON — понятная ошибка, ничего не сделано')
     bad = json.loads(json.dumps(b2))

@@ -74,6 +74,99 @@ function setTransfer() {
       r.log.length ? h('div', { class: 'log' }, r.log.join('\n')) : null) : null);
 }
 
+/* ═════════ Новый роутинг хостов ═════════ */
+// присланные Xray JSON (по одному или архивом) → в шаблоны выбранных хостов; хост, профиль и адрес не меняются
+async function rtUpload(pid, file) {
+  const r = await fetch('/api/hosts/templates/files?pid=' + pid, { method: 'PUT', body: file,
+    headers: { 'X-File-Name': encodeURIComponent(file.name), 'X-Init-Data': tg ? tg.initData : '' } });
+  let j = null; try { j = await r.json(); } catch (e) { /* не JSON */ }
+  if (!r.ok) throw new Error((j && (j.detail || j.error)) || `Ошибка ${r.status}`);
+  return j.files;
+}
+function rtAssign(R, hosts) {  // файлам без ручного выбора: хост с тем же главным сервером, иначе — выбранные хосты по порядку
+  const free = hosts.filter(x => R.sel.has(x.uuid)), taken = new Set(Object.entries(R.map).filter(([f]) => R.manual[f]).map(([, u]) => u));
+  R.files.forEach(f => { if (!R.manual[f.id]) delete R.map[f.id]; });
+  R.files.forEach(f => { if (!R.manual[f.id] && f.suggest && !taken.has(f.suggest)) { R.map[f.id] = f.suggest; taken.add(f.suggest); } });
+  R.files.forEach(f => { if (R.manual[f.id] || R.map[f.id]) return; const h0 = free.find(x => !taken.has(x.uuid)); if (h0) { R.map[f.id] = h0.uuid; taken.add(h0.uuid); } });
+}
+function setRouting() {
+  const gs = groups();
+  if (!gs.length) return empty('layers', 'Групп нет', 'Роутинг обновляется у хостов в панелях ваших групп.');
+  const R = UI.rt || (UI.rt = { pid: gs[0].id, files: [], map: {}, manual: {}, sel: new Set(), filter: '', result: null });
+  txMeta(R, R.pid, 'meta');
+  if (R.undoPid !== R.pid) { R.undoPid = R.pid; R.undo = undefined; api('hosts/templates/undo?pid=' + R.pid).then(x => { R.undo = x.undo; render(true); }).catch(() => { R.undo = null; }); }
+  const M = R.meta, hosts = M && !M.error ? M.hosts.filter(x => x.template) : [];
+  const H = u => hosts.find(x => x.uuid === u);
+  const sheet = (...k) => h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:16px' }, ...k);
+  const pick = e => { const fs = [...e.target.files]; e.target.value = ''; if (!fs.length) return;
+    R.busy = true; R.err = ''; render();
+    (async () => {
+      for (const f of fs) { try { R.files.push(...await rtUpload(R.pid, f)); } catch (x) { R.err = (R.err ? R.err + '\n' : '') + x.message; } }
+      const key = n => n.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, m => '.' + [...m].map(c => '⁰¹²³⁴⁵⁶⁷⁸⁹'.indexOf(c)).join(''));  // 3¹ → 3.1
+      R.files.sort((a, b) => key(a.name).localeCompare(key(b.name), 'ru', { numeric: true }));
+      R.busy = false; rtAssign(R, hosts); render();
+    })(); };
+  const pairs = R.files.filter(f => R.map[f.id]);
+  const tplCount = {}; pairs.forEach(f => { const t = (H(R.map[f.id]) || {}).template_uuid; tplCount[t] = (tplCount[t] || 0) + 1; });
+  const clash = pairs.filter(f => tplCount[(H(R.map[f.id]) || {}).template_uuid] > 1);
+  const apply = () => confirmAct({ title: `Обновить роутинг у ${pl(pairs.length, 'хоста', 'хостов', 'хостов')}?`, icon: ['layers', 'run'], ok: 'Обновить',
+    text: h('div', null, h('div', { style: 'margin-bottom:8px' }, 'Содержимое Xray JSON-шаблонов заменится на присланное. Хосты, профили и адреса не меняются. Старые шаблоны бот сохранит — можно вернуть.'),
+      h('div', { class: 'list', style: 'max-height:40vh;overflow:auto' }, pairs.map(f => { const x = H(R.map[f.id]);
+        return h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't' }, x.remark), h('div', { class: 's' }, `шаблон ${x.template} ← ${f.name}`))); }))),
+    fn: async () => {
+      const r = await api('hosts/templates/apply', 'POST', { pid: R.pid, pairs: pairs.map(f => ({ host: R.map[f.id], file: f.id })) });
+      R.result = r; haptic(r.ok ? 'ok' : 'bad');
+      if (r.ok) { R.files = []; R.map = {}; R.manual = {}; R.undoPid = null; R.metaPid = null; }
+      render();
+    } });
+  const undo = () => confirmAct({ title: 'Вернуть прежний роутинг?', icon: ['refresh', 'warn'], ok: 'Вернуть',
+    text: `Шаблоны ${R.undo.templates.join(', ')} станут такими, какими были до обновления ${dt(R.undo.at)}.`,
+    fn: async () => { const r = await api('hosts/templates/undo', 'POST', { pid: R.pid }); R.result = { ...r, undone: true }; R.undoPid = null; render(); } });
+  const q = R.filter.trim().toLowerCase(), shown = hosts.filter(x => !q || [x.remark, x.address, x.profile, x.template].join(' ').toLowerCase().includes(q));
+  const r = R.result;
+  return h('div', { style: 'max-width:820px' },
+    h('p', { class: 'muted', style: 'margin:0 0 14px' }, 'Для хостов, у которых меняется только роутинг: прислали новые Xray JSON — отметьте хосты и загрузите файлы или архив. Бот разложит файлы по хостам и заменит содержимое их шаблонов; хост, профиль и адрес остаются как есть.'),
+    gs.length > 1 ? fld('Группа', h('div', { class: 'chips', style: 'margin-bottom:12px' }, gs.map(p => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(R.pid === p.id),
+      onclick: () => { if (R.pid !== p.id) { UI.rt = { pid: p.id, files: [], map: {}, manual: {}, sel: new Set(), filter: '', result: null }; } render(); } }, p.name)))) : null,
+    R.undo ? h('div', { class: 'notice info', style: 'margin-bottom:16px' }, h('span', { class: 'i' }, ic('refresh')),
+      h('div', { class: 'grow' }, h('b', null, 'Последнее обновление роутинга'), `${dt(R.undo.at)}${R.undo.who ? ', ' + R.undo.who : ''}: ${R.undo.templates.join(', ')}.`),
+      btn('Вернуть как было', undo, 's')) : null,
+    h('h3', { style: 'margin:0 0 8px' }, '1. Хосты'),
+    !M ? sk(160) : M.error ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('alert')), h('div', null, h('b', null, 'Панель недоступна'), M.error))
+      : !hosts.length ? h('div', { class: 'notice', style: 'margin-bottom:16px' }, h('span', { class: 'i' }, ic('info')), h('div', null, 'В панели нет хостов с Xray JSON-шаблоном. Назначьте хосту шаблон в панели — потом здесь можно будет обновлять его роутинг.'))
+      : [h('div', { class: 'toolbar' }, h('label', { class: 'field-s' }, ic('search'), h('input', { 'data-k': 'rtq', placeholder: 'Название, адрес, шаблон', value: R.filter, oninput: e => { R.filter = e.target.value; render(); } })),
+          h('span', { class: 'muted' }, R.sel.size ? `выбрано ${R.sel.size}` : pl(hosts.length, 'хост с шаблоном', 'хоста с шаблоном', 'хостов с шаблоном'))),
+        h('div', { class: 'list', style: 'max-height:40vh;overflow:auto;margin-bottom:16px' }, shown.map(x => h('label', { class: 'switch' },
+          h('input', { type: 'checkbox', class: 'cb', checked: R.sel.has(x.uuid), onchange: e => { e.target.checked ? R.sel.add(x.uuid) : R.sel.delete(x.uuid); rtAssign(R, hosts); render(); } }),
+          h('span', { class: 'grow' }, h('b', null, x.remark || x.address), h('span', null, [`${x.address}:${x.port}`, x.profile, 'шаблон ' + x.template].filter(Boolean).join(' · '))))))],
+    h('h3', { style: 'margin:0 0 8px' }, '2. Файлы'),
+    sheet(h('label', { class: 'btn s' + (R.busy ? ' busy' : ''), style: 'align-self:flex-start;cursor:pointer' }, ic('box'), R.files.length ? 'Добавить файлы' : 'Выбрать JSON или архив',
+        h('input', { type: 'file', accept: '.json,.zip,application/json,application/zip', multiple: true, style: 'display:none', onchange: pick, disabled: !M || !!M.error })),
+      h('div', { class: 'hint' }, 'Можно несколько .json или один .zip. Файл подходит хосту, если в нём тот же главный сервер, что сейчас в шаблоне хоста; остальные — по порядку номеров к отмеченным хостам. Любую пару можно поменять.'),
+      R.err ? h('div', { class: 'err', style: 'white-space:pre-line' }, R.err) : null),
+    R.files.length ? h('div', { class: 'list', style: 'margin-bottom:16px' }, R.files.map(f => {
+      const x = H(R.map[f.id]), m = f.main || {}, bad = clash.includes(f);
+      return h('div', { class: 'li', style: 'flex-wrap:wrap;row-gap:8px' },
+        h('div', { class: 'grow', style: 'min-width:200px' }, h('div', { class: 't', style: 'white-space:normal' }, f.name),
+          h('div', { class: 's', style: 'white-space:normal' }, [m.tag ? `${m.tag} → ${m.address}:${m.port}` : 'без прокси-сервера', pl(f.rules, 'правило', 'правила', 'правил'), pl(f.outbounds, 'выход', 'выхода', 'выходов')].join(' · '))),
+        h('select', { class: 'sel', style: 'max-width:300px;flex:1 1 220px', 'aria-label': 'Хост для ' + f.name,
+            onchange: e => { R.map[f.id] = e.target.value || undefined; R.manual[f.id] = true; if (!e.target.value) delete R.map[f.id]; render(); } },
+          h('option', { value: '', selected: !x }, '— не применять —'),
+          hosts.map(o => h('option', { value: o.uuid, selected: x && x.uuid === o.uuid }, `${o.remark} · ${o.template}`))),
+        x && f.suggest === x.uuid ? h('span', { class: 'st ok', title: 'Главный сервер совпадает с текущим шаблоном хоста' }, 'тот же сервер') : x ? h('span', { class: 'st warn' }, R.manual[f.id] ? 'выбрано вручную' : 'по порядку') : null,
+        bad ? h('span', { class: 'st bad' }, 'шаблон уже занят') : null,
+        btn('', () => { R.files = R.files.filter(y => y !== f); delete R.map[f.id]; delete R.manual[f.id]; rtAssign(R, hosts); render(); }, 's ghost', 'x', { 'aria-label': 'Убрать файл', title: 'Убрать файл' }));
+    })) : null,
+    clash.length ? h('div', { class: 'notice', style: 'margin-bottom:16px' }, h('span', { class: 'i' }, ic('alert')), h('div', null, h('b', null, 'Один шаблон для двух файлов'),
+      'У этих хостов общий шаблон — второй файл перетёр бы первый. Выберите хосты с разными шаблонами.')) : null,
+    btn(pairs.length ? `Обновить роутинг у ${pl(pairs.length, 'хоста', 'хостов', 'хостов')}` : 'Обновить роутинг', apply, 'primary', null, { disabled: !pairs.length || clash.length > 0 }),
+    r ? h('div', { style: 'margin-top:16px' }, h('div', { class: 'notice' + (r.ok ? ' ok' : '') }, h('span', { class: 'i' }, ic(r.ok ? 'check' : 'alert')),
+        h('div', null, h('b', null, r.undone ? (r.ok ? 'Прежний роутинг возвращён' : 'Не вернулось') : r.ok ? 'Роутинг обновлён' : 'Не обновлено'),
+          r.ok ? (r.undone ? `Шаблонов: ${r.restored}.` : `Шаблонов обновлено: ${r.updated}` + (r.same ? `, уже такие же: ${r.same}` : '') + '. Клиенты получат новый роутинг при следующем обновлении подписки.')
+            : r.error + (r.log.length ? ' Ниже — что успело выполниться.' : ' В панели ничего не изменилось.'))),
+      r.log.length ? h('div', { class: 'log' }, r.log.join('\n')) : null) : null);
+}
+
 /* ═════════ Переезд бота ═════════ */
 function setMigrate() {
   const M = loader('mig', 'migrate');

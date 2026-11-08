@@ -719,7 +719,7 @@ class Panel:
                   'hidden': bool(x.get('isHidden')), 'disabled': bool(x.get('isDisabled')), 'tags': x.get('tags') or [],
                   'balancer': x.get('xrayJsonTemplateUuid') in btpl,
                   'profile': pname.get((x.get('inbound') or {}).get('configProfileUuid'), ''),
-                  'template': tname.get(x.get('xrayJsonTemplateUuid'), '')}
+                  'template': tname.get(x.get('xrayJsonTemplateUuid'), ''), 'template_uuid': x.get('xrayJsonTemplateUuid') or ''}
                  for x in sorted(self.call('GET', '/api/hosts'), key=lambda x: x.get('viewPosition', 0))]
         return {'squads': squads, 'templates': tpls, 'profiles': profiles, 'hosts': hosts}
 
