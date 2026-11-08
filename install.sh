@@ -71,8 +71,27 @@ deploy() {
   fi
 }
 
+# сеть сервера бота: BBR и очередь fq — быстрее отдаёт приложение по каналам с потерями (мобильный интернет из России,
+# сервер далеко); без простоя соединения не начинают с медленного старта; TCP Fast Open; поиск MTU при «чёрных дырах».
+# Применяется сразу, без перезагрузки; ядро без BBR — пропускаем. Повторный запуск ничего не ломает.
+tune_net() {
+  local f=/etc/sysctl.d/90-bobr-nodes-net.conf
+  modprobe tcp_bbr 2>/dev/null || true
+  grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || { warn "ядро без BBR — сеть не трогаю"; return 0; }
+  cat > "$f" <<'NET'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+NET
+  sysctl -q -p "$f" >/dev/null 2>&1 || true
+  [[ "$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)" == bbr ]] && ok "Сеть: BBR включён" || true
+}
+
 install_cli() {
   local dir; dir="$(pwd)"
+  tune_net
   cat > /usr/local/bin/bnodes <<EOF
 #!/usr/bin/env bash
 # Bobr Nodes — управление ботом. Создано установщиком из ${dir}
