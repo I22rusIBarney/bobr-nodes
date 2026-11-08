@@ -9,11 +9,14 @@ const fld = (label, input, hint, err) => h('div', { class: 'fld' }, h('label', n
 function openDeploy(pid) {
   if (!groups().length) return modal({ title: 'Сначала подключите панель', icon: ['layers', 'run'], body: 'Ноды живут в группах: группа — это панель Remnawave со своим доменом.',
     actions: [{ l: 'Отмена' }, { l: 'Подключить панель', cls: 'primary', fn: c => { c(); newGroup(); } }] });
-  if (D.st.issues && D.st.issues.length) return modal({ title: 'Нужна настройка', icon: ['sliders', 'warn'], body: 'Чтобы ставить ноды, сначала: ' + D.st.issues.join(', ') + '.',
+  // без Bobr Cloud можно поставить ноду на свой сервер; без Cloudflare и группы — нельзя (DNS и панель)
+  const iss = D.st.issues || [], noBc = iss.some(x => /Bobr Cloud/.test(x)), rest = iss.filter(x => !/Bobr Cloud/.test(x));
+  if (rest.length) return modal({ title: 'Нужна настройка', icon: ['sliders', 'warn'], body: 'Чтобы ставить ноды, сначала: ' + iss.join(', ') + '.',
     actions: [{ l: 'Отмена' }, { l: 'Открыть настройки', cls: 'primary', fn: c => { c(); go('settings/connections'); } }] });
   const p = parse();
-  UI.wiz = { step: 0, pid: pid || (p.name === 'group' && +p.arg) || groups()[0].id, src: 'buy', locs: [], offer: {}, count: {}, period: '1m', sel: new Set(),
-    domains: {}, err: '', extras: { psi: false, warp: false, xh: false }, port: '', ids: null };
+  UI.wiz = { step: 0, pid: pid || (p.name === 'group' && +p.arg) || groups()[0].id, src: noBc ? 'ssh' : 'buy', locs: [], offer: {}, count: {}, period: '1m', sel: new Set(),
+    domains: {}, err: '', extras: { psi: false, warp: false, xh: false }, port: '', ids: null,
+    ssh: { ip: '', cc: '', other: '', hoster: '', user: 'root', port: '22', auth: 'password', password: '', key_text: '' } };
   wizLoad(); go('deploy');
 }
 function wizLoad() {
@@ -41,12 +44,15 @@ function closeWizard() {
   else leave();
 }
 const L = code => ((UI.wiz.cat && UI.wiz.cat.locations) || []).find(l => l.code === code) || { code, name: code, flag: '', offers: [] };
+const sshCC = w => (w.ssh.cc === 'other' ? w.ssh.other : w.ssh.cc).trim().toLowerCase();
+const sshReady = w => /^\d{1,3}(\.\d{1,3}){3}$/.test(w.ssh.ip.trim()) && /^[a-z]{2}$/.test(sshCC(w)) && !!(w.ssh.auth === 'key' ? w.ssh.key_text.trim() : w.ssh.password);
 function wizItems(w) {  // [{loc, n}] — сколько нод в какой локации
+  if (w.src === 'ssh') return sshCC(w) ? [{ loc: sshCC(w), n: 1 }] : [];
   if (w.src === 'own') { const by = {}; (w.own || []).filter(s => w.sel.has(s.id)).forEach(s => { by[s.location] = (by[s.location] || 0) + 1; }); return Object.entries(by).map(([loc, n]) => ({ loc, n })); }
   return w.locs.map(loc => ({ loc, n: w.count[loc] || 1 }));
 }
 function wizCost(w) {
-  if (w.src === 'own' || !w.cat) return 0;
+  if (w.src !== 'buy' || !w.cat) return 0;
   const per = w.cat.periods.find(p => p.code === w.period) || { months: 1, pct: 0 };
   return w.locs.reduce((s, loc) => { const o = L(loc).offers.find(x => x.idx === w.offer[loc]); return s + (o ? periodPrice(o.price_kop, per.months, per.pct) * (w.count[loc] || 1) : 0); }, 0);
 }
@@ -61,18 +67,18 @@ async function wizNames(w) {  // автоимена для каждой лока
   for (const k of Object.keys(w.domains)) if (!items.some(i => i.loc === k)) delete w.domains[k];
 }
 function wizard() {
-  const w = UI.wiz, own = w.src === 'own';
+  const w = UI.wiz, own = w.src !== 'buy';  // уже купленный или свой сервер: без тарифа и оплаты
   const STEPS = own ? ['Куда', 'Имена', 'Проверка'] : ['Куда', 'Тариф', 'Имена', 'Проверка'];
   const kind = own ? ['where', 'names', 'review'][w.step] : ['where', 'tariff', 'names', 'review'][w.step];
   const items = wizItems(w), total = items.reduce((s, x) => s + x.n, 0), cost = wizCost(w);
   const bal = w.cat && w.cat.balance_kop;
   const ok = {
-    where: own ? w.sel.size > 0 : w.locs.length > 0,
+    where: w.src === 'ssh' ? sshReady(w) : own ? w.sel.size > 0 : w.locs.length > 0,
     tariff: w.locs.every(l => w.offer[l] != null),
     names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy && w.squads && w.squads.size > 0,
     review: own || bal == null || bal >= cost,
   }[kind];
-  const why = { where: own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: w.squads && w.squads.size ? 'Нужно имя для каждой ноды' : 'Выберите хотя бы один сквад', review: 'Не хватает денег на балансе' }[kind];
+  const why = { where: w.src === 'ssh' ? 'Укажите IP, страну и пароль или ключ' : own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: w.squads && w.squads.size ? 'Нужно имя для каждой ноды' : 'Выберите хотя бы один сквад', review: 'Не хватает денег на балансе' }[kind];
   const next = async e => {
     w.err = '';
     if (kind === 'tariff' || (kind === 'where' && own)) {  // дальше — имена: подбираем автоматически
@@ -90,8 +96,9 @@ function wizard() {
     } else w.step++;
     render();
   };
-  const body = w.ids ? wizProgress(w) : !w.cat && !w.catErr ? h('div', { class: 'sk', style: 'height:240px' })
-    : w.catErr ? empty('alert', 'Bobr Cloud не ответил', w.catErr, btn('Повторить', () => { wizLoad(); render(); }, 'primary', 'retry'))
+  const body = w.ids ? wizProgress(w) : w.src !== 'ssh' && !w.cat && !w.catErr ? h('div', { class: 'sk', style: 'height:240px' })
+    : w.src !== 'ssh' && w.catErr ? empty('alert', 'Bobr Cloud не ответил', w.catErr, h('div', { class: 'chips' }, btn('Повторить', () => { wizLoad(); render(); }, 'primary', 'retry'),
+      btn('Поставить на свой сервер', () => { w.src = 'ssh'; render(); }, '', 'server')))
     : { where: wizWhere, tariff: wizTariff, names: wizNamesStep, review: wizReview }[kind](w, items, cost);
   return h('div', { class: 'wizard', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Добавить ноды' },
     h('div', { class: 'wiz-top' },
@@ -102,7 +109,7 @@ function wizard() {
       h('button', { type: 'button', class: 'icon-btn x-close', onclick: closeWizard, 'aria-label': 'Закрыть' }, ic('x'))),
     h('div', { class: 'wiz-body', 'data-keep': 'wiz' + w.step }, h('div', { class: 'wiz-in' }, body,
       w.err ? h('div', { class: 'notice', role: 'alert', style: 'margin-top:16px' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, 'Не получилось'), w.err)) : null)),
-    w.ids || !w.cat ? null : h('div', { class: 'wiz-foot' },
+    w.ids || (!w.cat && w.src !== 'ssh') ? null : h('div', { class: 'wiz-foot' },
       h('div', { class: 'sum' }, cost ? ['Итого ', h('b', null, rubK(cost)), ' · ', pl(total, 'нода', 'ноды', 'нод')] : total ? pl(total, 'нода', 'ноды', 'нод') : h('span', { class: 'faint' }, why)),
       h('span', { class: 'sp' }),
       w.step ? btn('Назад', () => { w.step--; w.err = ''; render(); }) : null,
@@ -110,26 +117,47 @@ function wizard() {
         : btn(own ? 'Установить' : `Купить и установить · ${rubK(cost)}`, e => busyBtn(e, () => wizSubmit(w, items)), 'primary', null, { disabled: !ok })));
 }
 function wizWhere(w) {
-  const own = w.src === 'own', p = G(w.pid);
+  const own = w.src === 'own', p = G(w.pid), cat = w.cat || { locations: [], buyer: '' };
   if (own) wizLoadOwn();
   const minPrice = l => Math.min(...l.offers.map(o => o.price_kop));
-  return [h('h3', null, 'Куда ставим'), h('p', null, own ? 'Отметьте серверы — бот поставит на них ноды.' : 'Выберите группу и страны. Тариф для каждой страны — на следующем шаге.'),
+  return [h('h3', null, 'Куда ставим'), h('p', null, w.src === 'ssh' ? 'Сервер у любого хостера: бот зайдёт по SSH, поставит ноду, пропишет DNS и добавит в панель.'
+      : own ? 'Отметьте серверы — бот поставит на них ноды.' : 'Выберите группу и страны. Тариф для каждой страны — на следующем шаге.'),
     groups().length > 1 ? h('div', { class: 'block' }, h('h4', null, 'Группа'), h('div', { class: 'chips' }, groups().map(g => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(w.pid === g.id),
       onclick: () => { if (w.pid !== g.id) { w.pid = g.id; wizLoad(); render(); } } }, g.name)))) : null,
     h('div', { class: 'block' }, h('h4', null, 'Серверы'), h('div', { class: 'choice' },
-      opt(!own, 'Купить в Bobr Cloud', `Бот купит серверы (${w.cat.buyer}), поставит ноды, пропишет DNS и добавит в панель`, () => { w.src = 'buy'; render(); }),
-      opt(own, 'Уже купленные', 'Свободные серверы в Bobr Cloud — без новой покупки', () => { w.src = 'own'; render(); }))),
+      w.cat ? opt(w.src === 'buy', 'Купить в Bobr Cloud', `Бот купит серверы (${cat.buyer}), поставит ноды, пропишет DNS и добавит в панель`, () => { w.src = 'buy'; render(); }) : null,
+      w.cat ? opt(own, 'Уже купленные', 'Свободные серверы в Bobr Cloud — без новой покупки', () => { w.src = 'own'; render(); }) : null,
+      opt(w.src === 'ssh', 'Свой сервер', 'Купили у другого хостера — укажите IP и доступ по SSH', () => { w.src = 'ssh'; render(); }))),
+    w.src === 'ssh' ? wizSsh(w, cat) : null,
     own ? h('div', { class: 'block' }, h('h4', null, 'Свободные серверы'),
       w.own == null ? h('div', { class: 'sk', style: 'height:120px' }) : w.ownErr ? h('div', { class: 'err' }, w.ownErr)
         : !w.own.length ? empty('server', 'Серверов нет', 'В Bobr Cloud у покупателя этой группы нет купленных серверов.')
         : h('div', { class: 'list' }, w.own.map(s => h('label', { class: 'switch', style: s.ready ? '' : 'opacity:.55;cursor:default' },
           h('input', { type: 'checkbox', class: 'cb', disabled: !s.ready, checked: w.sel.has(s.id), onchange: e => { e.target.checked ? w.sel.add(s.id) : w.sel.delete(s.id); render(); } }),
           h('span', { class: 'grow' }, h('b', null, `${s.flag || ''} ${s.name || s.ip}`), h('span', null, `${s.loc_name} · ${s.cpu} vCPU, ${s.ram} ГБ, ${s.disk} ГБ · ${s.ip}` + (s.ready ? '' : ` · ${s.why}`))))))) : null,
-    !own ? h('div', { class: 'block' }, h('h4', null, 'Страны'), !w.cat.locations.length ? h('div', { class: 'muted' }, 'В Bobr Cloud сейчас нет доступных локаций.')
+    w.src === 'buy' ? h('div', { class: 'block' }, h('h4', null, 'Страны'), !w.cat.locations.length ? h('div', { class: 'muted' }, 'В Bobr Cloud сейчас нет доступных локаций.')
       : h('div', { class: 'chips' }, w.cat.locations.map(l => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(w.locs.includes(l.code)),
         onclick: () => { w.locs = w.locs.includes(l.code) ? w.locs.filter(x => x !== l.code) : [...w.locs, l.code]; render(); } },
         l.flag ? h('span', { class: 'flag' }, l.flag) : null, l.name, l.offers.length ? h('span', { class: 's' }, 'от ' + rubK(minPrice(l))) : null)))) : null,
     p.script ? h('div', { class: 'muted' }, `Скрипт установки группы: ${p.script}.`) : null];
+}
+/* свой сервер: IP, страна (как в Bobr Cloud или любой код), хостер и доступ по SSH */
+function wizSsh(w, cat) {
+  const x = w.ssh, set = (k, rerender) => e => { x[k] = e.target.value; if (rerender) render(); };
+  const inp = (k, ph, extra) => h('input', { class: 'inp' + (extra && extra.mono ? ' mono' : ''), 'data-k': 'ssh-' + k, value: x[k], placeholder: ph, oninput: set(k, true), ...(extra || {}), mono: null });
+  return h('div', { class: 'block' }, h('h4', null, 'Сервер'), h('div', { class: 'sheet form', style: 'padding:16px' },
+    fld('IP сервера', inp('ip', '203.0.113.10', { mono: true, inputmode: 'decimal' }), 'Публичный IPv4. Систему лучше свежую: Ubuntu или Debian.'),
+    fld('Страна', h('select', { class: 'sel', style: 'width:100%', 'aria-label': 'Страна', onchange: set('cc', true) },
+      h('option', { value: '', selected: !x.cc || null }, 'Выберите страну'),
+      cat.locations.map(l => h('option', { value: l.code, selected: x.cc === l.code || null }, `${l.flag || ''} ${l.name}`)),
+      h('option', { value: 'other', selected: x.cc === 'other' || null }, 'Другая — ввести код')),
+      x.cc === 'other' ? inp('other', 'Код страны, например DE', { maxlength: 2, style: 'margin-top:8px;max-width:160px;text-transform:uppercase' }) : 'Для флага, имени хоста и статистики по странам.'),
+    fld('Хостер', inp('hoster', 'например, Aeza'), 'Необязательно: подпись для статистики блокировок по хостерам.'),
+    h('div', { style: 'display:grid;grid-template-columns:1fr 110px;gap:12px' }, fld('Пользователь', inp('user', 'root')), fld('SSH-порт', inp('port', '22', { mono: true, inputmode: 'numeric' }))),
+    fld('Вход', seg([{ v: 'password', l: 'Пароль' }, { v: 'key', l: 'Ключ' }], x.auth, v => { x.auth = v; render(); }, 'Вход')),
+    x.auth === 'key' ? fld('Закрытый ключ', h('textarea', { class: 'inp mono', rows: 4, 'data-k': 'ssh-key', placeholder: '-----BEGIN OPENSSH PRIVATE KEY-----', oninput: set('key_text', true) }, x.key_text))
+      : fld('Пароль', h('input', { class: 'inp', type: 'password', 'data-k': 'ssh-pw', autocomplete: 'off', value: x.password, oninput: set('password', true) }),
+        x.user && x.user !== 'root' ? 'Пользователь не root — бот будет работать через sudo.' : null)));
 }
 function opt(on, t, s, onclick, extra) {
   return h('button', { type: 'button', class: 'opt', 'aria-pressed': String(on), onclick }, h('span', { class: 'ck' }, ic('check')), h('b', null, t), h('span', { class: 's' }, s), extra || null);
@@ -180,10 +208,11 @@ function switchRow(title, text, checked, onchange) {
   return h('label', { class: 'switch' }, h('span', { class: 'grow' }, h('b', null, title), text ? h('span', null, text) : null), toggle(checked, onchange, title));
 }
 function wizReview(w, items, cost) {
-  const own = w.src === 'own', per = (w.cat.periods.find(p => p.code === w.period) || { months: 1, pct: 0 }), bal = w.cat.balance_kop;
+  const own = w.src !== 'buy', cat = w.cat || { periods: [] }, per = (cat.periods.find(p => p.code === w.period) || { months: 1, pct: 0 }), bal = cat.balance_kop;
   const row = (l, v, cls) => h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, l), h('span', { class: 'num ' + (cls || '') }, v));
   const ex = [w.extras.psi && 'Psiphon', w.extras.warp && 'WARP', w.extras.xh && 'XHTTP'].filter(Boolean);
-  return [h('h3', null, 'Проверьте и запустите'), h('p', null, own ? 'Покупки нет: нода ставится поверх системы сервера.' : `Деньги спишутся с баланса: ${w.cat.buyer}. Если что-то пойдёт не так, повтор не купит сервер второй раз.`),
+  return [h('h3', null, 'Проверьте и запустите'), h('p', null, w.src === 'ssh' ? `Покупки нет: бот зайдёт на ${w.ssh.ip.trim()} по SSH и поставит ноду поверх системы сервера.`
+      : own ? 'Покупки нет: нода ставится поверх системы сервера.' : `Деньги спишутся с баланса: ${w.cat.buyer}. Если что-то пойдёт не так, повтор не купит сервер второй раз.`),
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row(h('span', null, 'Группа ', h('b', null, G(w.pid).name)), ''),
       items.map(({ loc, n }) => { const o = !own && L(loc).offers.find(x => x.idx === w.offer[loc]);
@@ -201,6 +230,7 @@ function wizReview(w, items, cost) {
       : h('div', { class: 'muted' }, `На балансе ${rubK(bal)}, после покупки останется ${rubK(bal - cost)}.`)) : null];
 }
 async function wizSubmit(w, items) {
+  if (w.src === 'ssh') return wizSubmitSsh(w, items);
   const own = w.src === 'own';
   const payload = { pid: w.pid, period: w.period, port: w.port || null, squads: [...w.squads],
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
@@ -208,6 +238,17 @@ async function wizSubmit(w, items) {
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
     xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, stealth: !!w.stealth };
   try { const r = await api('deploy', 'POST', payload); w.ids = r.ids; w.err = ''; toast(`Запущено: ${pl(r.ids.length, 'установка', 'установки', 'установок')}`); refreshSoon(); }
+  catch (e) { w.err = e.message; }
+  render();
+}
+async function wizSubmitSsh(w, items) {
+  const x = w.ssh, loc = items[0].loc;
+  const payload = { pid: w.pid, ip: x.ip.trim(), country: loc, hoster: x.hoster.trim(), user: x.user.trim() || 'root', port: x.port || 22,
+    ...(x.auth === 'key' ? { key: 'own', key_text: x.key_text } : { key: '', password: x.password }),
+    domain: (w.domains[loc] || [])[0], squads: [...w.squads], stealth: !!w.stealth, ...(w.stealth ? {} : { port_client: w.port || null }),
+    psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined };
+  try { const r = await api('deploy/own', 'POST', payload); w.ids = r.ids; w.err = ''; x.password = x.key_text = ''; toast('Установка запущена', r.domain); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();
 }

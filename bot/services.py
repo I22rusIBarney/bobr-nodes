@@ -104,6 +104,8 @@ def node_ssh(store: Store, runner: Runner, pid: int, uuid: str, ip: str) -> dict
         target = (bot_jobs_by_ip(store, pid).get(ip) or {}).get('ip') or ip
         return guard_bot_key(store, store.profile(pid), saved, target, runner.admins)
     d = bot_jobs_by_ip(store, pid).get(ip)
+    if d and d.get('ssh'):  # свой сервер: доступ, с которым его ставили
+        return d['ssh']
     return {'user': 'root', 'port': 22, 'password': d.get('password', ''), 'key': ''} if d else {}
 
 
@@ -419,10 +421,13 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
                       period: str, domains: list[str], squads: list[str] | None = None, remark: str = '',
                       host: dict | None = None, lang: str = 'ru', places: dict | None = None,
                       extras: dict | None = None, custom: dict | None = None, servers: list[dict] | None = None,
-                      script_id: object = 'group', note: dict | None = None) -> list[int]:
+                      script_id: object = 'group', note: dict | None = None, own: dict | None = None) -> list[int]:
     """Задачи установки. custom — своя конфигурация (покупка по cpu/ram/disk); servers — уже купленные серверы
-    Bobr Cloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из Bobr Cloud."""
-    if servers:
+    Bobr Cloud по порядку доменов: покупки нет, сервер, IP и root-пароль берутся из Bobr Cloud.
+    own — свой сервер у другого хостера: {ip, ssh, loc, hoster}; Bobr Cloud не участвует, вход — по ssh."""
+    if own:
+        q = {'loc': own['loc'], 'one_kop': 0}
+    elif servers:
         if len(servers) != len(domains):
             raise ValueError(f'серверов {len(servers)}, доменов {len(domains)}')
         s0 = servers[0]
@@ -441,12 +446,15 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
     for i, dom in enumerate(domains, 1):
         name = naming.node_name(dom)
         srv = servers[i - 1] if servers else None
-        offer = srv or q['offer']
+        offer = srv or q.get('offer') or {}
         data = {'location': location, 'loc_name': loc['name'], 'flag': loc['flag'], 'country': cc, 'idx': None if srv else idx,
-                'spec': spec_text(offer), 'os': srv['os'] if srv else cat['os_code'], 'period': period, 'domain': dom, 'name': name,
+                'spec': 'свой сервер' + (f' · {own["hoster"]}' if own.get('hoster') else '') if own else spec_text(offer),
+                'os': srv['os'] if srv else cat.get('os_code', ''), 'period': period, 'domain': dom, 'name': name,
                 'remark': render_remark(remark, loc, name, dom, i, lang), 'password': (srv or {}).get('root_password') or gen_password(),
                 **({'custom': {k: custom[k] for k in ('cpu', 'ram', 'disk')}} if custom and not srv else {}),
                 **({'server_id': int(srv['id']), 'existing': True, 'skipped_stages': ['buy']} if srv else {}),
+                **({'own': True, 'ip': own['ip'], 'ssh': own['ssh'], 'hoster': own.get('hoster') or '', 'skipped_stages': ['buy', 'ip']}
+                   if own else {}),
                 'host': host, 'squads': squads, 'place': (places or {}).get(dom),
                 'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id') if script_id == 'group' else script_id,
                 **(note or {}),
