@@ -510,6 +510,7 @@ function nodeOverview(n, det) {
       kv('Версия', h('span', null, verCell(n), d && d.xray ? h('span', { class: 'faint' }, ' · Xray ' + d.xray) : null)),
       d && d.inbound_port ? kv('Порт', h('span', { class: 'mono' }, d.inbound_port)) : null,
       d ? kv('Хосты', `${pl(d.hosts.length, 'хост', 'хоста', 'хостов')}` + (d.hosts.some(x => x.final_mask) ? ' · Final Mask' : '')) : null,
+      nodeNet(n, d),
       r ? kv('Аренда', h('span', { style: 'display:grid;gap:8px' },
         h('span', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap' },
           h('span', { class: rentSoon(n) ? 'tag warn' : '' }, 'ещё ' + pl(Math.max(0, Math.round(r.days_left)), 'день', 'дня', 'дней')),

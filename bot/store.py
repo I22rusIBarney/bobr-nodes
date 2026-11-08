@@ -68,6 +68,10 @@ class Store:
         with self.lock:
             self.db.executescript(SCHEMA)
             self.db.execute('PRAGMA journal_mode=WAL')
+            have = {r[1] for r in self.db.execute('PRAGMA table_info(blocks)')}
+            for col, typ in self.BLOCK_SNAP.items():  # снимок ноды в момент блокировки — колонки добавлены позже
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE blocks ADD COLUMN {col} {typ}")
 
     def _q(self, sql, args=()):
         with self.lock:
@@ -300,7 +304,12 @@ class Store:
 
     # ── лента уведомлений ──
     # ── история блокировок ──
-    BLOCK_COLS = ('name', 'location', 'loc_name', 'flag', 'config', 'born', 'cause')
+    # снимок ноды: IP, сеть (ASN, владелец, /24), хостер, порт и отпечаток хоста, уникальные настройки, онлайн,
+    # итог проверки соседей по /24 (neigh: subnet | single | mixed | unknown)
+    BLOCK_SNAP = {'ip': "TEXT NOT NULL DEFAULT ''", 'asn': "TEXT NOT NULL DEFAULT ''", 'holder': "TEXT NOT NULL DEFAULT ''",
+                  'net24': "TEXT NOT NULL DEFAULT ''", 'hoster': "TEXT NOT NULL DEFAULT ''", 'port': 'INTEGER',
+                  'fp': "TEXT NOT NULL DEFAULT ''", 'stealth': 'INTEGER', 'users': 'INTEGER', 'neigh': "TEXT NOT NULL DEFAULT ''"}
+    BLOCK_COLS = ('name', 'location', 'loc_name', 'flag', 'config', 'born', 'cause', *BLOCK_SNAP)
 
     def block_open(self, pid: int, addr: str, start: float | None = None, **kw) -> None:
         """Начало блокировки; уже открытую не дублируем — только уточняем причину."""
@@ -314,6 +323,16 @@ class Store:
             cols = ['pid', 'addr', 'start', *kw]
             self.db.execute(f'INSERT INTO blocks({",".join(cols)}) VALUES({",".join("?" * len(cols))})',
                             (pid, addr, start or time.time(), *kw.values()))
+
+    def block_update(self, pid: int, addr: str, **kw) -> None:
+        """Дописать снимок в открытую (или последнюю) блокировку ноды."""
+        kw = {k: v for k, v in kw.items() if k in self.BLOCK_SNAP and v is not None}
+        if not kw:
+            return
+        with self.lock:
+            row = self.db.execute('SELECT id FROM blocks WHERE pid=? AND addr=? ORDER BY start DESC LIMIT 1', (pid, addr)).fetchone()
+            if row:
+                self.db.execute(f'UPDATE blocks SET {",".join(k + "=?" for k in kw)} WHERE id=?', (*kw.values(), row[0]))
 
     def block_close(self, pid: int, addr: str, fix: str = '', end: float | None = None) -> None:
         with self.lock:

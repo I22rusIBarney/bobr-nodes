@@ -12,14 +12,19 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
     По локациям и конфигурациям: сколько нод, нод-месяцев наблюдения, блокировок, блокировок на ноду в месяц (rate),
     сколько нода в среднем живёт до блокировки, сколько длится блокировка и что помогало."""
     since = now - days * 86400
+    # хостер — подписанный вручную, иначе владелец сети по ASN
+    blocks = [{**b, 'hoster': b.get('hoster') or b.get('holder') or ''} for b in blocks]
+    nodes = [{**n, 'hoster': n.get('hoster') or n.get('holder') or ''} for n in nodes]
 
-    def group(key: str) -> list[dict]:
+    def group(key: str, skip_empty: bool = False) -> list[dict]:
         out: dict[str, dict] = {}
 
-        def g(x: dict) -> dict:
-            k = x.get(key) or ''
+        def g(x: dict) -> dict | None:
+            k = '' if x.get(key) is None else str(x.get(key))
+            if skip_empty and k == '':
+                return None
             if k not in out:
-                out[k] = {'key': k, 'label': (x.get('loc_name') or k.upper()) if key == 'location' else k,
+                out[k] = {'key': k, 'label': (x.get('loc_name') or k.upper()) if key == 'location' else LABELS.get(key, str)(x) if key in LABELS else k,
                           'flag': x.get('flag') or '' if key == 'location' else '', 'nodes': 0, 'months': 0.0,
                           'blocks': 0, 'outages': 0, 'fixes': {}, '_dur': [], '_life': []}
             elif key == 'location' and not out[k]['flag'] and x.get('flag'):
@@ -27,10 +32,14 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
             return out[k]
         for n in nodes:
             r = g(n)
+            if r is None:
+                continue
             r['nodes'] += 1
             r['months'] += max(0.0, now - max(n.get('born') or since, since)) / MONTH
         for b in blocks:
             r = g(b)
+            if r is None:
+                continue
             if b.get('cause') in OUTAGE:
                 r['outages'] += 1
                 continue
@@ -50,7 +59,22 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
             res.append(r)
         res.sort(key=lambda r: (-r['nodes'], -r['blocks'], r['label']))
         return res
-    return {'days': days, 'locations': group('location'), 'configs': group('config'), 'total': sum(1 for b in blocks if b.get('cause') not in OUTAGE)}
+    from .banlab import clusters
+    real = [b for b in blocks if b.get('cause') not in OUTAGE]
+    neigh: dict[str, int] = {}
+    for b in real:
+        if b.get('neigh'):
+            neigh[b['neigh']] = neigh.get(b['neigh'], 0) + 1
+    return {'days': days, 'locations': group('location'), 'configs': group('config'),
+            'hosters': group('hoster', True), 'asns': group('asn', True), 'nets': group('net24', True),
+            'ports': group('port', True), 'fps': group('fp', True), 'stealth': group('stealth', True),
+            'clusters': clusters(real, 'net24') + clusters(real, 'asn'), 'neighbors': neigh, 'total': len(real)}
+
+
+LABELS = {'asn': lambda x: f"{x.get('asn')} {x.get('holder') or ''}".strip(),
+          'port': lambda x: f"порт {x.get('port')}",
+          'fp': lambda x: f"отпечаток {x.get('fp')}",
+          'stealth': lambda x: 'уникальные настройки' if str(x.get('stealth')) == '1' else 'обычные настройки'}
 
 
 def advice(stats: dict, location: str) -> dict | None:

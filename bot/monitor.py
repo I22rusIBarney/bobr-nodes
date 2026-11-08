@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import html
 import logging
@@ -340,6 +341,38 @@ class Monitor:
                         await self.check_group(prof, results)
                     except engine.StepError as e:  # панель группы недоступна — в следующий раз
                         log.info('monitor group %s: %s', prof['id'], e)
+        self.ai_watch()
+
+    AI_EVERY = 7 * 86400
+
+    def ai_watch(self, now: float | None = None) -> asyncio.Task | None:
+        """Раз в неделю нейросеть разбирает блокировки (если ключ Gemini задан и с прошлого разбора их было хотя бы 3)
+        и присылает администраторам итог. Неудачную попытку повторяем не чаще раза в сутки."""
+        from .blockstats import OUTAGE
+        now = now or time.time()
+        if not self.store.get('gemini_key') or self.store.get('banlab_auto') == 'off' or getattr(self, '_ai_task', None) and not self._ai_task.done():
+            return None
+        last = int((json.loads(self.store.get('banlab_ai') or 'null') or {}).get('ts') or 0)
+        tried = int(self.store.get('banlab_ai_try') or 0)
+        if now - last < self.AI_EVERY or now - tried < 86400:
+            return None
+        if sum(1 for b in self.store.blocks(last) if b['start'] >= last and b.get('cause') not in OUTAGE) < 3:
+            return None
+        self.store.set('banlab_ai_try', str(int(now)))
+        self._ai_task = self._bg_task(self._ai_report())
+        return self._ai_task
+
+    async def _ai_report(self) -> None:
+        from . import banlab
+        from . import scripts as sc
+        try:
+            g = sc.Gemini(self.store.get('gemini_key'), self.store.get('gemini_model'), self.store.get('gemini_proxy'),
+                          base=self.store.get('gemini_base') or None)
+            r = await banlab.ai_report(self.store, g, self.store.profiles())
+        except sc.ScriptError as e:
+            log.info('banlab ai: %s', e)
+            return
+        await self.notify.emit('stats.ai', banlab.ai_text(r))
 
     @staticmethod
     def skip_group(group: str, skip: str) -> bool:
@@ -611,10 +644,61 @@ class Monitor:
         """Запись в историю блокировок: где стоит нода, как поставлена, когда установлена — для статистики по локациям."""
         bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(st['addr']) or {}
         job = self.store.job(int(bd['_job'])) if bd.get('_job') else None
+        names = {st['addr'], bd.get('domain'), bd.get('ip')} - {None, ''}
+        mine = sorted((h for h in CACHE.peek(prof, 'hosts') or [] if h.get('address') in names), key=lambda h: bool(h.get('isHidden')))
+        h = mine[0] if mine else {}
         self.store.block_open(prof['id'], st['addr'], start=st.get('since'), name=st.get('name') or '',
                               location=bd.get('location') or (st.get('country') or '').lower(), loc_name=bd.get('loc_name') or '',
                               flag=bd.get('flag') or '', config=svc.config_label(self.store, bd) if bd else '',
-                              born=job['updated_at'] if job else None, cause=st.get('diag') or st.get('cause') or '')
+                              born=job['updated_at'] if job else None, cause=st.get('diag') or st.get('cause') or '',
+                              hoster=self.store.get(f'hoster:{prof["id"]}:{st["addr"]}'), port=int(h['port']) if h.get('port') else None,
+                              fp=h.get('fingerprint') or '', stealth=int(bool((bd.get('host') or {}).get('stealth'))) if bd else None,
+                              users=st.get('online_users'))
+        self._bg_task(self._investigate_safe(prof, st['addr'], bd.get('ip') or ''))
+
+    async def _investigate_safe(self, prof: dict, addr: str, ip: str) -> None:
+        try:
+            await self.investigate(prof, addr, ip)
+        except Exception:  # noqa: BLE001 — разбор вспомогательный, мониторинг не роняет
+            log.exception('banlab investigate %s', addr)
+
+    async def investigate(self, prof: dict, addr: str, ip: str = '') -> dict | None:
+        """Разбор блокировки в фоне: чья сеть у IP и что с соседями по /24 из России — в историю блокировок."""
+        from . import banlab
+        from . import diagnose as dg
+        if not ip:
+            ip = addr if engine.is_ip(addr) else next(iter(await asyncio.to_thread(dg.resolve_all, addr)), '')
+        if not banlab.is_public(ip):
+            return None
+        info = await asyncio.to_thread(banlab.cached_info, self.store, ip) or {}
+        self.store.block_update(prof['id'], addr, ip=ip, net24=banlab.net24(ip), asn=info.get('asn'), holder=info.get('holder'))
+        v = await self.probe_neighbors(ip)
+        if v:
+            self.store.block_update(prof['id'], addr, neigh=v['kind'])
+        return v
+
+    async def probe_neighbors(self, ip: str) -> dict | None:
+        """Соседи ноды по /24: живые из-за рубежа (с сервера бота) — открываются ли из России (с первого ответившего чекера).
+        None — нет работающих чекеров."""
+        from . import banlab
+        from . import diagnose as dg
+        cks = [c for c in self.store.checkers() if c.get('status') == 'running']
+        if not cks or not banlab.is_public(ip):
+            return None
+        abroad = await banlab.alive_abroad(banlab.neighbors(ip), dg.tcp_open)
+        if len(abroad) < 2:
+            return banlab.verdict(abroad, {})
+        path, _, kh = self.keyfiles()
+        cmd = banlab.ru_probe_cmd(abroad)
+        for ch in cks:
+            try:
+                _, out = await asyncio.to_thread(lambda: ck.remote(ch, path, kh).run(cmd, 60))
+            except (engine.StepError, OSError):
+                continue
+            ru = banlab.parse_probe(engine.strip_ansi(out))
+            if ru:
+                return {**banlab.verdict(abroad, ru), 'checker': ch.get('name') or ch.get('ip')}
+        return None
 
     async def degradation(self, prof: dict, st: dict, cfg: dict, now: float) -> None:
         """Нода ещё проходит, но хуже обычного: задержка из России выросла вдвое (и хотя бы на 150 мс) против её же
