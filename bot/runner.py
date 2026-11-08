@@ -473,7 +473,7 @@ class Runner:
         """Новая версия remnawave/node на ноде: образ, перезапуск, проверка связи с панелью, откат при неудаче."""
         loop = asyncio.get_running_loop()
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''), 'tag': d.get('tag') or 'latest',
-                **self._node_ssh(d, prof)}
+                'xray': d.get('xray'), **self._node_ssh(d, prof)}
         self.last[jid] = 'ждём свободный слот'
         await self.render(jid)
         async with self.sem():
@@ -490,8 +490,9 @@ class Runner:
                 loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self.render(jid)))
 
             with open(self.log_path(jid), 'a', encoding='utf-8') as lf:
-                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} обновление ноды #{jid}: {d.get("name")} → {node["tag"]}\n')
-                res = await asyncio.to_thread(self.upgrade_node, node, prof, lf, on_log, on_stage)
+                lf.write(f'\n\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} обновление ноды #{jid}: {d.get("name")} → {d.get("xray") or node["tag"]}\n')
+                fn = upgrade.xray_node if d.get('xray') else self.upgrade_node  # своя версия Xray — та же задача «обновление»
+                res = await asyncio.to_thread(fn, node, prof, lf, on_log, on_stage)
         self.store.patch_job_data(jid, result=res)
 
     async def _lost_purchase(self, jid: int, bc, d: dict) -> int | None:

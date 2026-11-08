@@ -304,7 +304,7 @@ function attnRow(a) {
     h('div', { class: 'what' }, h('b', null, a.title), h('span', null, a.text)),
     h('div', { class: 'acts' }, a.acts.map(x => btn(x.l, x.fn, 's ' + (x.p ? 'primary' : '')))));
 }
-const jobTitle = j => (j.spec && j.spec.startsWith('обновление') ? 'Обновление ' : j.spec === 'смена IP' ? 'Смена IP ' : j.spec === 'дополнения на ноде' ? 'Дополнения ' : 'Установка ') + (j.loc_name && !/[А-я]/.test(j.loc_name) ? j.loc_name : j.domain);
+const jobTitle = j => (j.spec && j.spec.startsWith('Xray') ? j.spec.split(' ').slice(0, 2).join(' ') + ' · ' : j.spec && j.spec.startsWith('обновление') ? 'Обновление ' : j.spec === 'смена IP' ? 'Смена IP ' : j.spec === 'дополнения на ноде' ? 'Дополнения ' : 'Установка ') + (j.loc_name && !/[А-я]/.test(j.loc_name) ? j.loc_name : j.domain);
 
 /* ── Обзор ── */
 function vOverview() {
@@ -376,7 +376,22 @@ const FILTERS = [
 ];
 const SORTS = { attn: 'Сначала проблемные', name: 'По имени', load: 'По нагрузке', online: 'По онлайну' };
 const rank = n => (offline(n) ? 0 : ruState(n) === 'bad' ? 1 : rentSoon(n) ? 2 : n.busy ? 3 : outdated(n) ? 4 : n.disabled ? 6 : 5);
+/* вход моста — сразу под своей нодой выхода (если та тоже в списке) */
+function pairBridges(list) {
+  const ids = new Set(list.map(n => n.pid + '~' + n.uuid)), out = [];
+  const under = n => n.bridge_exit && ids.has(n.pid + '~' + n.bridge_exit);
+  for (const n of list) {
+    if (under(n)) continue;
+    out.push(n);
+    out.push(...list.filter(e => e.pid === n.pid && e.bridge_exit === n.uuid));
+  }
+  return out;
+}
+const bridgeExit = n => n.bridge_exit ? N(n.pid + '~' + n.bridge_exit) : null;
 function filtered(ns, f) {
+  return pairBridges(sortedNodes(ns, f));
+}
+function sortedNodes(ns, f) {
   const q = f.q.trim().toLowerCase(), F = (FILTERS.find(x => x.v === f.status) || FILTERS[0]).f;
   return ns.filter(n => F(n) && (f.group === 'all' || String(n.pid) === f.group) && (!f.cc || (n.country || '—') === f.cc) &&
     (!q || [n.name, n.address, n.domain, n.country, n.group].some(s => (s || '').toLowerCase().includes(q))))
@@ -436,7 +451,8 @@ function nodesTable(list, groupCol) {
       h('th', { class: 'r' }, 'Онлайн'), h('th', null, 'Версия'), h('th', null, 'Нагрузка'))),
     h('tbody', null, list.map(n => h('tr', { class: UI.sel.has(n.id) ? 'sel' : '', tabindex: '0', onclick: () => go('node/' + n.id), onkeydown: e => { if (e.key === 'Enter') go('node/' + n.id); } },
       h('td', { onclick: e => e.stopPropagation() }, h('input', { type: 'checkbox', class: 'cb', 'aria-label': 'Выбрать ' + n.name, checked: UI.sel.has(n.id), onchange: () => toggleSel(n.id) })),
-      h('td', null, h('div', { class: 'node-cell' }, h('span', { class: 'flag', title: n.country }, flag(n.country)), h('div', { style: 'min-width:0' }, h('b', null, n.name), h('span', null, n.domain || n.address)))),
+      h('td', null, h('div', { class: 'node-cell', style: n.bridge_exit ? 'padding-left:18px' : '' }, h('span', { class: 'flag', title: n.country }, flag(n.country)),
+        h('div', { style: 'min-width:0' }, h('b', null, n.name), h('span', null, bridgeExit(n) ? `вход моста → ${bridgeExit(n).name}` : n.domain || n.address)))),
       groupCol ? h('td', { class: 'muted c-group' }, n.group) : null,
       h('td', null, stChip(n)), h('td', null, ruCell(n)),
       h('td', { class: 'r num' }, n.online ?? '—'), h('td', null, verCell(n)), h('td', null, loadBar(n.load)))))));
@@ -445,7 +461,7 @@ function nodeCards(list) {
   return h('div', { class: 'cards' }, list.map(n => h('button', { type: 'button', class: 'node-card' + (UI.sel.has(n.id) ? ' sel' : ''), onclick: () => UI.selMode ? toggleSel(n.id) : go('node/' + n.id) },
     UI.selMode ? h('span', { class: 'cb-m' + (UI.sel.has(n.id) ? ' on' : '') }, UI.sel.has(n.id) ? ic('check') : null) : h('span', { class: 'flag' }, flag(n.country)),
     h('div', { class: 'grow' }, h('div', { class: 't' }, n.name, outdated(n) ? h('span', { class: 'tag warn mono' }, n.version) : null, rentSoon(n) ? h('span', { class: 'tag warn' }, 'аренда') : null),
-      h('div', { class: 's' }, n.domain || n.address)),
+      h('div', { class: 's' }, bridgeExit(n) ? `↳ вход моста → ${bridgeExit(n).name}` : n.domain || n.address)),
     h('div', { class: 'side' }, stChip(n), h('span', { class: 'faint num', style: 'font-size:12.5px' }, n.connected && n.online != null ? `${n.online} онлайн` : '')))));
 }
 function bulkBar() {
@@ -581,15 +597,18 @@ function removeNode(n) {
     fn: async () => { const r = await api(`profiles/${n.pid}/nodes/${n.uuid}`, 'DELETE'); toast(r.message || `${n.name} убрана`); closeOverlay(); refreshSoon(); } });
 }
 function nodeHistory(n) {  // события мониторинга, задачи и действия людей по этой ноде — одной лентой, по дням
+  // мост: вход и выход — одна связка, история общая
+  const linked = [n, bridgeExit(n), ...(n.bridge_entries || []).map(u => N(n.pid + '~' + u))].filter(Boolean);
   const key = n.id, H = D.hist[key];
   if (!H || (!H.loading && Date.now() - H.at > 60000)) {
     D.hist[key] = { ...(H || {}), loading: true, at: Date.now() };
-    const q = encodeURIComponent(n.name);
-    Promise.all([api('notify/feed?q=' + q).then(r => r.items || []).catch(() => []), isAdmin() ? api('audit?q=' + q).then(r => r.items || []).catch(() => []) : Promise.resolve([])])
+    const many = path => Promise.all(linked.map(m => api(path + encodeURIComponent(m.name)).then(r => r.items || []).catch(() => []))).then(rs => rs.flat());
+    Promise.all([many('notify/feed?q='), isAdmin() ? many('audit?q=') : Promise.resolve([])])
       .then(([feed, aud]) => { D.hist[key] = { feed, aud, at: Date.now() }; render(true); });
   }
-  const js = D.jobs.filter(j => j.profile_id === n.pid && (j.domain === n.domain || j.domain === n.address || j.loc_name === n.name));
-  const own = t => new RegExp('(^|[^\\w.-])' + n.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^\\w-]|$)').test(t || '');  // de5, но не de55
+  const js = D.jobs.filter(j => j.profile_id === n.pid && linked.some(m => j.domain === m.domain || j.domain === m.address || j.loc_name === m.name));
+  const esc_ = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const own = t => linked.some(m => new RegExp('(^|[^\\w.-])' + esc_(m.name) + '([^\\w-]|$)').test(t || ''));  // de5, но не de55
   const H2 = D.hist[key] || {};
   const seenEv = {}, ev = (H2.feed || []).filter(e => { if (!own(e.text)) return false; const k = e.type + '|' + e.text, prev = seenEv[k]; seenEv[k] = e.ts; return !(prev && Math.abs(prev - e.ts) < 300); }),  // одно событие дважды подряд (повтор опроса) — одной строкой
     au = (H2.aud || []).filter(a => own(a.label + ' ' + (a.detail || '')));
