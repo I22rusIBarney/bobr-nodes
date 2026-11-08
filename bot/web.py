@@ -822,6 +822,30 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     _xmap_task: list = []
 
+    @r.get('/api/profiles/{pid}/panel-release')
+    async def panel_release(request):
+        """Версия панели группы и последняя вышедшая; ?report=1 — разбор: что изменится с этой версии, совместимость
+        с ботом и сторонними интеграциями по API, обновлять ли ноды."""
+        from . import panelwatch as pw
+        p = profile_or_404(request.match_info['pid'], request)
+        try:
+            cur = await asyncio.to_thread(up.panel_version, panel_of(p))
+        except engine.StepError:
+            cur = ''
+        out = {'current': cur, 'latest': '', 'behind': False}
+        try:
+            rels = await asyncio.to_thread(pw.releases)
+        except Exception:  # noqa: BLE001 — GitHub недоступен: покажем только текущую версию
+            return J({**out, 'error': 'GitHub не ответил — новые версии проверю позже'})
+        if rels:
+            out.update(latest=rels[0]['tag'], url=rels[0]['url'],
+                       behind=bool(pw.semver(cur) and pw.semver(rels[0]['tag']) > pw.semver(cur)))
+        if out['behind'] and request.query.get('report'):
+            got = await pw.report(store, rels, cur, [cur])
+            if got:
+                out.update(rel=got[0], report=got[1])
+        return J(out)
+
     @r.get('/api/xray/versions')
     async def xray_versions(request):
         """Релизы Xray-core (GitHub XTLS) для выбора своей версии на ноде, с версиями ноды, в которые каждый вшит,

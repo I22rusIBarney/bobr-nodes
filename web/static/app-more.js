@@ -332,10 +332,14 @@ function vGroup(arg) {
   const content = { nodes: () => [D.nerr[pid] ? nodesErrors() : null, ns.length ? [nodesTable(filtered(ns, f), false), nodeCards(filtered(ns, f)), bulkBar()]
       : D.nodes[pid] ? empty('server', 'В группе нет нод', 'Добавьте первые — выберите страны и тариф.', btn('Добавить ноды', () => openDeploy(pid), 'primary', 'plus')) : skeleton()],
     conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), rent: () => groupRent(g), plugins: () => groupPlugins(g), clean: () => groupCleanup(g) }[tab]();
+  D.prel = D.prel || {};
+  if (!D.prel[pid]) { D.prel[pid] = { loading: true }; api(`profiles/${pid}/panel-release`).then(r => { D.prel[pid] = r; }, () => { D.prel[pid] = {}; }).then(() => render(true)); }
+  const PR = D.prel[pid];
   return [h('button', { type: 'button', class: 'back', onclick: () => go('groups') }, ic('chevL'), 'Группы'),
-    pageH(g.name, `${(g.panel_url || '').replace(/^https?:\/\//, '')} · ${pl(ns.length, 'нода', 'ноды', 'нод')}`
+    pageH(g.name, `${(g.panel_url || '').replace(/^https?:\/\//, '')}` + (PR.current ? ` · панель ${PR.current}` : '') + ` · ${pl(ns.length, 'нода', 'ноды', 'нод')}`
       + (ns.some(n => n.online != null) ? ` · ${ns.reduce((s, n) => s + (n.online || 0), 0)} онлайн` : '') + (g.created_by_label ? ` · ${g.created_by_label}` : ''),
-      [btn('Ноды в эту группу', () => openDeploy(pid), '', 'plus')]),
+      [PR.behind ? btn(`Есть панель ${PR.latest}`, () => panelRelease(pid), 's', 'up', { style: 'color:var(--warn);border-color:var(--warn)' }) : null,
+        btn('Ноды в эту группу', () => openDeploy(pid), '', 'plus')]),
     h('div', { class: 'tabs page-tabs', role: 'tablist' }, TABS.map(([v, l]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(v === tab), onclick: () => { UI.tabs['g' + pid] = v; render(); } }, l))),
     content];
 }
@@ -548,4 +552,29 @@ function invite() {
           actions: [{ l: 'Скопировать', cls: 'primary', fn: cc => { copy(r.link, 'Ссылка'); cc(); } }] });
       } catch (x) { err.textContent = x.message; b.classList.remove('busy'); }
     } }] });
+}
+
+/* что изменится при обновлении панели группы: разбор релизов Remnawave от её версии */
+async function panelRelease(pid) {
+  const body = h('div', null, h('div', { class: 'sk', style: 'height:160px' }));
+  modal({ title: `Панель Remnawave ${(D.prel[pid] || {}).latest || ''}`, icon: ['up', 'run'], body });
+  let r; try { r = await api(`profiles/${pid}/panel-release?report=1`); } catch (e) { body.replaceChildren(h('div', { class: 'err' }, e.message)); return; }
+  const x = r.report, rel = r.rel || {};
+  if (!x) { body.replaceChildren(h('div', null, r.error || 'Панель уже на последней версии.')); return; }
+  const RISK = { none: ['ok', 'не затронет'], low: ['warn', 'вряд ли затронет'], high: ['bad', 'может сломать'] };
+  const line = (label, risk, why) => h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, label),
+    why ? h('div', { class: 's', style: 'white-space:normal' }, why) : null), h('span', { class: 'st ' + RISK[risk][0], style: 'flex:none' }, RISK[risk][1]));
+  body.replaceChildren(h('div', null,  // h() раскрывает вложенные списки и пропускает пустое
+    h('p', { class: 'muted', style: 'margin:0 0 10px' }, `У группы ${r.current} → новая ${r.latest}` + ((rel.span || []).length > 1 ? ` · изменения за ${rel.span.length} релиза` : '')),
+    x.summary ? h('p', { style: 'margin:0 0 12px' }, x.summary) : null,
+    x.changes.length ? [h('b', null, 'Что поменялось' + (x.plain ? ' (из заметок релиза, на английском)' : '')),
+      h('ul', { style: 'margin:6px 0 12px;padding-left:20px' }, x.changes.map(c => h('li', { style: 'margin:3px 0' }, c)))] : null,
+    h('div', { class: 'list', style: 'margin-bottom:12px' },
+      line('Работа этого бота', x.bot_risk, x.bot_why),
+      x.api_risk ? line('Интеграции по API (боты продажи подписок и т.п.)', x.api_risk, x.api_why) : null,
+      x.plain ? null : h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't' }, 'Ноды'),
+        x.node_why ? h('div', { class: 's', style: 'white-space:normal' }, x.node_why) : null), h('span', { class: 'st ' + (x.node_update ? 'warn' : 'ok'), style: 'flex:none' }, x.node_update ? 'обновить' : 'не обязательно'))),
+    x.actions.length ? [h('b', null, 'Что сделать'), h('ol', { style: 'margin:6px 0 12px;padding-left:20px' }, x.actions.map(a => h('li', { style: 'margin:3px 0' }, a)))] : null,
+    x.plain ? h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Подробный разбор на русском появится, когда администратор подключит Gemini.') : null,
+    rel.url ? h('a', { href: rel.url, target: '_blank', rel: 'noopener' }, 'Заметки релиза на GitHub') : null));
 }
