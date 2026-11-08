@@ -15,11 +15,30 @@ let pollTimer = 0;
 const EVERY = { nodes: 60e3, monitor: 60e3, scale: 120e3, wallet: 300e3, rent: 600e3 };
 const AT = {};
 const due = (k, force) => force || !AT[k] || Date.now() - AT[k] >= EVERY[k];
+/* бот обновился (другая сборка, чем у этой страницы) — перезагрузить; если человек что-то вводит, предложить */
+const PAGE_VER = (document.querySelector('meta[name=app-ver]') || {}).content || '';
+function pollFast() { clearTimeout(pollTimer); pollTimer = setTimeout(loadAll, 5000); }
+function newBuild() {
+  const v = D.st && D.st.app_ver;
+  if (!v || !PAGE_VER || v === PAGE_VER) return false;
+  const busy = UI.wiz || document.querySelector('.modal, .palette') || (document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName));
+  let tried = ''; try { tried = sessionStorage.getItem('bn:reloaded') || ''; } catch (e) { /* без хранилища */ }
+  if ((!busy || UI.updating) && tried !== v) {  // один раз на версию: если что-то не так, не перезагружаем по кругу
+    try { sessionStorage.setItem('bn:reloaded', v); } catch (e) { /* без хранилища */ }
+    location.reload(); return true;
+  }
+  if (!UI.newBuildSaid) { UI.newBuildSaid = true; toast('Бот обновился', 'Обновите страницу, чтобы увидеть новую версию', 'info', { l: 'Обновить', fn: () => location.reload() }); }
+  return false;
+}
 async function loadAll(force) {
   clearTimeout(pollTimer);
   if (document.hidden && !force) return;  // вернётся к окну — обновим сразу (visibilitychange)
   try { D.st = await api('state'); D.err = null; }
-  catch (e) { D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return; }
+  catch (e) {
+    if (UI.updating && !D.loading) { pollTimer = setTimeout(loadAll, 5000); return; }  // бот перезапускается после обновления — ждём молча
+    D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return;
+  }
+  if (newBuild()) return;
   if (D.st.role === 'paused') { D.loading = false; render(true); return; }  // подписка на паузе — только экран оплаты
   try { localStorage.setItem('bn:ui', D.st.theme && D.st.theme.ui === 'classic' ? 'classic' : 'new'); } catch (e) {}  // /admin откроет сразу нужный
   if (D.st.theme) syncTheme(D.st.theme.mode);
@@ -38,7 +57,7 @@ async function loadAll(force) {
   // аренда — из Bobr Cloud (по 2 запроса на группу): после первой отрисовки, раз в 10 минут или если её сбросили (продление)
   const rentFor = groups().filter(p => due('rent', first) || D.rent[p.id] == null);
   if (rentFor.length) { if (due('rent', first)) mark('rent'); Promise.all(rentFor.map(p => api(`profiles/${p.id}/rent`).then(r => { D.rent[p.id] = r.servers || []; }).catch(() => {}))).then(() => render(true)); }
-  pollTimer = setTimeout(loadAll, activeJobs().length ? 6000 : 30000);
+  pollTimer = setTimeout(loadAll, UI.updating ? 5000 : activeJobs().length ? 6000 : 30000);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && D.st) loadAll(); });
 async function loadNodes(pid, fresh) {
