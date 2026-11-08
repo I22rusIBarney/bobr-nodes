@@ -75,10 +75,10 @@ function wizard() {
   const ok = {
     where: w.src === 'ssh' ? sshReady(w) : own ? w.sel.size > 0 : w.locs.length > 0,
     tariff: w.locs.every(l => w.offer[l] != null),
-    names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy && w.squads && w.squads.size > 0,
+    names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy && w.squads && w.squads.size > 0 && !wizHostsBad(w, items),
     review: own || bal == null || bal >= cost,
   }[kind];
-  const why = { where: w.src === 'ssh' ? 'Укажите IP, страну и пароль или ключ' : own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: w.squads && w.squads.size ? 'Нужно имя для каждой ноды' : 'Выберите хотя бы один сквад', review: 'Не хватает денег на балансе' }[kind];
+  const why = { where: w.src === 'ssh' ? 'Укажите IP, страну и пароль или ключ' : own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: wizHostsBad(w, items) || (w.squads && w.squads.size ? 'Нужно имя для каждой ноды' : 'Выберите хотя бы один сквад'), review: 'Не хватает денег на балансе' }[kind];
   const next = async e => {
     w.err = '';
     if (kind === 'tariff' || (kind === 'where' && own)) {  // дальше — имена: подбираем автоматически
@@ -209,31 +209,47 @@ function wizNamesStep(w, items) {
 /* хосты в панели: обычные, общий балансировщик по тегу (NORMAL) или балансировщик страны (скрытые хосты с тегом
    страны и, по желанию, NORMAL; шаблон Balancer_<тег> и видимый хост бот создаст, если их ещё нет). Выбор — на группу. */
 const HKEY = pid => 'bn:hosts:' + pid;
+const TAG_RE = /^[A-Z0-9_:]{1,36}$/;
+const tagList = v => String(v || '').toUpperCase().split(/[\s,]+/).filter(Boolean);
 function wizHostsState(w) {
   if (w.hosts && w.hosts.pid === w.pid) return w.hosts;
   let saved = {}; try { saved = JSON.parse(localStorage.getItem(HKEY(w.pid)) || '{}'); } catch (e) { /* без хранилища */ }
-  return (w.hosts = { pid: w.pid, mode: saved.mode || 'simple', tags: saved.tags || 'NORMAL', normal: saved.normal !== false, tag: '' });
+  // extra — теги вдобавок к тегу страны («Ещё теги»); раньше был переключатель NORMAL
+  const extra = saved.extra != null ? saved.extra : saved.normal === false ? '' : 'NORMAL';
+  return (w.hosts = { pid: w.pid, mode: saved.mode || 'simple', tags: saved.tags || 'NORMAL', extra, ctags: saved.ctags || {} });
 }
-function wizHostsSave(H) { try { localStorage.setItem(HKEY(H.pid), JSON.stringify({ mode: H.mode, tags: H.tags, normal: H.normal })); } catch (e) { /* без хранилища */ } }
+function wizHostsSave(H) { try { localStorage.setItem(HKEY(H.pid), JSON.stringify({ mode: H.mode, tags: H.tags, extra: H.extra, ctags: H.ctags })); } catch (e) { /* без хранилища */ } }
+const ctagOf = (H, loc) => (H.ctags[loc] || loc).toUpperCase();
+function wizHostsBad(w, items) {  // неверные теги — текст ошибки или ''
+  const H = wizHostsState(w);
+  const all = H.mode === 'normal' ? tagList(H.tags) : H.mode === 'balancer' ? [...items.map(i => ctagOf(H, i.loc)), ...tagList(H.extra)] : [];
+  const bad = all.filter(t => !TAG_RE.test(t));
+  return bad.length ? 'Теги: латиница, цифры, подчёркивание — ' + bad.join(', ') : H.mode === 'normal' && !all.length ? 'Укажите хотя бы один тег' : '';
+}
 function wizHosts(w, items) {
   const H = wizHostsState(w), set = p => { Object.assign(H, p); wizHostsSave(H); render(); };
-  const one = items.length === 1, ctag = one ? (H.tag || items[0].loc).toUpperCase() : '';
-  const tagsOf = () => items.map(i => (one ? ctag : i.loc.toUpperCase()) + (H.normal ? ' + NORMAL' : '')).join(', ');
+  const bad = wizHostsBad(w, items);
+  const tagIn = (val, ph, on, k, wide) => h('input', { class: 'inp mono', 'data-k': k, value: val, placeholder: ph, spellcheck: 'false', style: `max-width:${wide ? 320 : 160}px;text-transform:uppercase`,
+    oninput: e => { on(e.target.value.toUpperCase()); wizHostsSave(H); } });
   return h('div', { class: 'block' }, h('h4', null, 'Хосты в панели'),
     h('div', { class: 'seg-row', style: 'margin-bottom:10px' }, seg([{ v: 'simple', l: 'Обычные' }, { v: 'normal', l: 'Общий тег' }, { v: 'balancer', l: 'По стране' }], H.mode, v => set({ mode: v }), 'Хосты')),
-    H.mode === 'normal' ? [fld('Теги хостов', h('input', { class: 'inp mono', 'data-k': 'wtags', value: H.tags, placeholder: 'NORMAL', style: 'max-width:240px',
-        oninput: e => { H.tags = e.target.value.toUpperCase(); wizHostsSave(H); } }), 'Видимые хосты с этим тегом подхватит ваш общий балансировщик (авто-выбор).')]
+    H.mode === 'normal' ? fld('Теги хостов', tagIn(H.tags, 'NORMAL', v => { H.tags = v; }, 'wtags', true),
+      'Через запятую. Видимые хосты с этими тегами подхватят ваши балансировщики (например, авто-выбор по NORMAL).')
     : H.mode === 'balancer' ? [
-      one ? fld('Тег страны', h('input', { class: 'inp mono', 'data-k': 'wctag', value: ctag, style: 'max-width:160px', oninput: e => { H.tag = e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''); } }),
-        'Обычно — код страны. Если балансировщика с этим тегом в панели ещё нет, бот создаст шаблон и видимый хост страны.') : null,
-      h('div', { class: 'list', style: 'margin-bottom:8px' }, switchRow('Ещё и тег NORMAL', 'Чтобы нода попала и в общий авто-выбор', H.normal, v => set({ normal: v }))),
-      h('div', { class: 'hint' }, `Хосты нод — скрытые, теги: ${tagsOf()}. Клиенты видят хост-балансировщик страны.`)]
-    : h('div', { class: 'hint' }, 'Видимые хосты без тегов — по одному на ноду.'));
+      fld(items.length > 1 ? 'Тег балансировщика каждой страны' : 'Тег балансировщика страны', h('div', { style: 'display:grid;gap:8px' }, items.map(({ loc }) =>
+        h('div', { style: 'display:flex;align-items:center;gap:10px' }, L(loc).flag ? h('span', { class: 'flag' }, L(loc).flag) : null, h('span', { style: 'min-width:90px' }, L(loc).name || loc.toUpperCase()),
+          tagIn(H.ctags[loc] || loc.toUpperCase(), loc.toUpperCase(), v => { H.ctags[loc] = v.trim(); }, 'wct-' + loc)))),
+        'Обычно — код страны. Если балансировщика с этим тегом в панели ещё нет, бот создаст шаблон и видимый хост страны.'),
+      fld('Ещё теги', tagIn(H.extra, 'NORMAL', v => { H.extra = v; }, 'wextra', true), 'Через запятую, можно пусто. Например NORMAL — чтобы нода попала и в общий авто-выбор.'),
+      h('div', { class: 'hint' }, 'Хосты нод — скрытые, клиенты видят хост-балансировщик страны.')]
+    : h('div', { class: 'hint' }, 'Видимые хосты без тегов — по одному на ноду.'),
+    bad ? h('div', { class: 'err', role: 'alert', style: 'margin-top:8px' }, bad) : null);
 }
 function wizHostsPayload(w, items) {
   const H = wizHostsState(w);
-  if (H.mode === 'normal') return { host_mode: 'normal', tags: H.tags || 'NORMAL' };
-  if (H.mode === 'balancer') return { host_mode: 'balancer', tags: H.normal ? undefined : '', balancer_tag: items.length === 1 ? (H.tag || items[0].loc).toUpperCase() : '' };
+  if (H.mode === 'normal') return { host_mode: 'normal', tags: tagList(H.tags).join(',') };
+  if (H.mode === 'balancer') return { host_mode: 'balancer', tags: tagList(H.extra).join(','),
+    balancer_tags: Object.fromEntries(items.map(i => [i.loc, ctagOf(H, i.loc)])), balancer_tag: items.length === 1 ? ctagOf(H, items[0].loc) : '' };
   return { host_mode: 'simple' };
 }
 function switchRow(title, text, checked, onchange) {
@@ -254,7 +270,8 @@ function wizReview(w, items, cost) {
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row('Адреса', items.flatMap(({ loc }) => w.domains[loc]).join(', '), 'mono'),
       row('Сквады', (w.meta && w.meta.squads || []).filter(s => w.squads.has(s.uuid)).map(s => s.name).join(', ') || '—'),
-      row('Хосты', { simple: 'обычные', normal: 'тег ' + (wizHostsState(w).tags || 'NORMAL'), balancer: 'по стране, скрытые' }[wizHostsState(w).mode]),
+      row('Хосты', (H => H.mode === 'normal' ? 'теги ' + tagList(H.tags).join(', ') : H.mode === 'balancer'
+        ? 'скрытые, теги ' + [...new Set([...items.map(i => ctagOf(H, i.loc)), ...tagList(H.extra)])].join(', ') : 'обычные')(wizHostsState(w))),
       row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.stealth ? 'свой у каждой ноды' : w.port || '443')),
     (w.dnsWarn || []).length ? h('div', { class: 'notice', style: 'background:var(--warn-soft);margin-bottom:16px' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
       h('div', { class: 'grow' }, h('b', null, 'Проверьте имена'), w.dnsWarn.map(x => h('div', null, x)))) : null,

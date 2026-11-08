@@ -2550,10 +2550,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Выберите хотя бы один сквад — без него пользователи не увидят новые ноды')
         mode = b.get('host_mode') or 'simple'
         multi = len(plan) > 1
-        hosts = [svc.host_options(loc, mode, b.get('tags'),
-                                  '' if multi else str(b.get('balancer_tag') or ''),  # несколько стран — тег у каждой свой
-                                  str(b.get('balancer_remark') or ''), b.get('balancer_template'))
-                 for loc, *_ in plan]
+        btags = b.get('balancer_tags') if isinstance(b.get('balancer_tags'), dict) else {}  # свой тег балансировщика у каждой страны
+        try:
+            hosts = [svc.host_options(loc, mode, b.get('tags'),
+                                      str(btags.get(loc) or ('' if multi else b.get('balancer_tag') or '')),  # нет своего — код страны
+                                      str(b.get('balancer_remark') or ''), b.get('balancer_template'))
+                     for loc, *_ in plan]
+        except ValueError as e:
+            raise ApiError(str(e)) from None
         places = {}
         order = b.get('host_order')
         if isinstance(order, list) and order:
