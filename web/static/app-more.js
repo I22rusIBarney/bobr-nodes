@@ -15,7 +15,7 @@ function openDeploy(pid) {
     actions: [{ l: 'Отмена' }, { l: 'Открыть настройки', cls: 'primary', fn: c => { c(); go('settings/connections'); } }] });
   const p = parse();
   UI.wiz = { step: 0, pid: pid || (p.name === 'group' && +p.arg) || groups()[0].id, src: noBc ? 'ssh' : 'buy', locs: [], offer: {}, count: {}, period: '1m', sel: new Set(),
-    domains: {}, err: '', extras: { psi: false, warp: false, xh: false }, port: '', ids: null,
+    domains: {}, err: '', extras: { psi: false, warp: false, xh: false, hy: false }, port: '', ids: null,
     ssh: { ip: '', cc: '', other: '', hoster: '', user: 'root', port: '22', auth: 'password', password: '', key_text: '' } };
   wizLoad(); go('deploy');
 }
@@ -200,6 +200,7 @@ function wizNamesStep(w, items) {
         switchRow('Psiphon', 'Запасной выход, когда сайты блокируют IP хостера', w.extras.psi, v => { w.extras.psi = v; }),
         switchRow('WARP', 'Выход через Cloudflare для сервисов, которые не любят IP дата-центров', w.extras.warp, v => { w.extras.warp = v; }),
         p.script ? null : switchRow('Запасной XHTTP', 'Второй способ подключения напрямую, если основной режут', w.extras.xh, v => { w.extras.xh = v; }),
+        p.script ? null : switchRow('Hysteria2', 'Второй протокол на UDP 443. Делит IP с VLESS: если его распознают и забанят IP, отвалятся оба', w.extras.hy, v => { w.extras.hy = v; }),
         switchRow('Уникальные настройки', 'У каждой ноды свой порт, TLS-отпечаток, маска и параметры XHTTP — без общего шаблона', w.stealth, v => { w.stealth = v; render(); })),
       w.stealth ? null : fld('Порт для клиентов', h('input', { class: 'inp mono', 'data-k': 'wport', style: 'max-width:160px', inputmode: 'numeric', placeholder: '443', value: w.port, oninput: e => { w.port = e.target.value.trim(); } }),
         'Пусто — 443, как у обычного HTTPS.'))];
@@ -210,7 +211,7 @@ function switchRow(title, text, checked, onchange) {
 function wizReview(w, items, cost) {
   const own = w.src !== 'buy', cat = w.cat || { periods: [] }, per = (cat.periods.find(p => p.code === w.period) || { months: 1, pct: 0 }), bal = cat.balance_kop;
   const row = (l, v, cls) => h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, l), h('span', { class: 'num ' + (cls || '') }, v));
-  const ex = [w.extras.psi && 'Psiphon', w.extras.warp && 'WARP', w.extras.xh && 'XHTTP'].filter(Boolean);
+  const ex = [w.extras.psi && 'Psiphon', w.extras.warp && 'WARP', w.extras.xh && 'XHTTP', w.extras.hy && 'Hysteria2'].filter(Boolean);
   return [h('h3', null, 'Проверьте и запустите'), h('p', null, w.src === 'ssh' ? `Покупки нет: бот зайдёт на ${w.ssh.ip.trim()} по SSH и поставит ноду поверх системы сервера.`
       : own ? 'Покупки нет: нода ставится поверх системы сервера.' : `Деньги спишутся с баланса: ${w.cat.buyer}. Если что-то пойдёт не так, повтор не купит сервер второй раз.`),
     h('div', { class: 'list', style: 'margin-bottom:16px' },
@@ -236,7 +237,7 @@ async function wizSubmit(w, items) {
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
       ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : { idx: w.offer[loc] }) })),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
-    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, stealth: !!w.stealth };
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined, stealth: !!w.stealth };
   try { const r = await api('deploy', 'POST', payload); w.ids = r.ids; w.err = ''; toast(`Запущено: ${pl(r.ids.length, 'установка', 'установки', 'установок')}`); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();
@@ -247,7 +248,7 @@ async function wizSubmitSsh(w, items) {
     ...(x.auth === 'key' ? { key: 'own', key_text: x.key_text } : { key: '', password: x.password }),
     domain: (w.domains[loc] || [])[0], squads: [...w.squads], stealth: !!w.stealth, ...(w.stealth ? {} : { port_client: w.port || null }),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
-    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined };
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined };
   try { const r = await api('deploy/own', 'POST', payload); w.ids = r.ids; w.err = ''; x.password = x.key_text = ''; toast('Установка запущена', r.domain); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();

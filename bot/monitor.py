@@ -680,8 +680,18 @@ class Monitor:
                               born=job['updated_at'] if job else None, cause=st.get('diag') or st.get('cause') or '',
                               hoster=self.store.get(f'hoster:{prof["id"]}:{st["addr"]}'), port=int(h['port']) if h.get('port') else None,
                               fp=h.get('fingerprint') or '', stealth=int(bool((bd.get('host') or {}).get('stealth'))) if bd else None,
-                              users=st.get('online_users'))
+                              users=st.get('online_users'), hy2=self.has_hy2(prof, st, bd))
         self._bg_task(self._investigate_safe(prof, st['addr'], bd.get('ip') or ''))
+
+    @staticmethod
+    def has_hy2(prof: dict, st: dict, bd: dict) -> int | None:
+        """Есть ли у ноды Hysteria2: по профилю из кэша панели, иначе — по задаче установки; None — неизвестно."""
+        pn = next((n for n in CACHE.peek(prof, 'nodes') or [] if n['uuid'] == st.get('uuid')), None)
+        profs = (CACHE.peek(prof, 'profiles') or {}).get('configProfiles') or []
+        pr = next((x for x in profs if pn and x['uuid'] == (pn.get('configProfile') or {}).get('activeConfigProfileUuid')), None)
+        if pr:
+            return int('hy2' in engine.features_of(pr.get('config')))
+        return int(bool(bd.get('hy2'))) if bd else None
 
     async def _investigate_safe(self, prof: dict, addr: str, ip: str) -> None:
         try:

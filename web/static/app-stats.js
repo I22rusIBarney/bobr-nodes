@@ -116,7 +116,7 @@ function recentBlocks(B) {
     rs.length > 10 ? h('div', { class: 'chips', style: 'margin-top:10px' }, btn(UI.recentAll ? 'Свернуть' : `Показать все (${rs.length})`, () => { UI.recentAll = !UI.recentAll; render(); }, 's ghost')) : null);
 }
 const STATS_BY = [['locations', 'Локации'], ['hosters', 'Хостеры'], ['asns', 'Сети (ASN)'], ['nets', 'Подсети /24'], ['configs', 'Тарифы'],
-  ['stealth', 'Уникальные настройки'], ['ports', 'Порты'], ['fps', 'TLS-отпечатки']];
+  ['stealth', 'Уникальные настройки'], ['hy2', 'Hysteria2'], ['ports', 'Порты'], ['fps', 'TLS-отпечатки']];
 const NEIGH = { subnet: 'режут и соседей — бан подсети или хостера', single: 'соседи открываются — узнали именно ноду',
   mixed: 'часть соседей тоже недоступна', unknown: 'живых соседей мало — вывода нет' };
 /* сигналы из истории: пачки блокировок в одной сети за сутки и итоги проверок соседей по /24 */

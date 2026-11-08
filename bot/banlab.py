@@ -137,7 +137,8 @@ def clusters(blocks: list[dict], key: str, window: float = 86400) -> list[dict]:
 
 AI_SYSTEM = """Ты аналитик сети VPN-нод (Xray VLESS, панель Remnawave), которые блокирует ТСПУ в России: IP ноды
 перестаёт открываться из России целиком. Тебе дают статистику бота: частоту блокировок на ноду в месяц в разных
-разрезах (хостер, ASN, подсеть /24, локация, тариф, порт для клиентов, TLS-отпечаток, «уникальные настройки»),
+разрезах (хостер, ASN, подсеть /24, локация, тариф, порт для клиентов, TLS-отпечаток, «уникальные настройки»,
+есть ли на ноде Hysteria2 — второй протокол на UDP того же IP),
 пачки блокировок в одной сети за сутки, проверки соседей по /24 из России (subnet — соседей режут тоже, single — только ноду)
 и последние блокировки со снимком ноды (пользователи онлайн, возраст).
 
@@ -158,7 +159,7 @@ def ai_input(stats: dict, recent: list[dict], question: str = '') -> str:
     data = {'days': stats.get('days'), 'total_blocks': stats.get('total'), 'tables': tables,
             'clusters': stats.get('clusters', [])[:15], 'neighbors': stats.get('neighbors', {}),
             'recent': [{k: b.get(k) for k in ('start', 'name', 'holder', 'asn', 'net24', 'location', 'config', 'port', 'fp',
-                                             'stealth', 'users', 'born', 'cause', 'neigh', 'end', 'fix')} for b in recent[-40:]]}
+                                             'stealth', 'users', 'born', 'cause', 'neigh', 'hy2', 'end', 'fix')} for b in recent[-40:]]}
     q = question.strip()[:1000] or 'Что приводит к блокировкам нод и что сделать в первую очередь?'
     return q + '\n\n<<<DATA\n' + json.dumps(data, ensure_ascii=False, default=str) + '\nDATA>>>'
 
@@ -198,7 +199,8 @@ def collect(store, ps: list[dict], days: int) -> tuple[dict, list[dict], list[st
                 'config': svc.config_label(store, d), 'born': j['updated_at'],
                 'hoster': store.get(f'hoster:{p["id"]}:{d.get("domain") or d["ip"]}'),
                 'asn': (info or {}).get('asn') or None, 'holder': (info or {}).get('holder') or '', 'net24': net24(d['ip']) or None,
-                'port': h.get('port'), 'fp': h.get('fingerprint') or None, 'stealth': int(bool((d.get('host') or {}).get('stealth')))}
+                'port': h.get('port'), 'fp': h.get('fingerprint') or None, 'stealth': int(bool((d.get('host') or {}).get('stealth'))),
+                'hy2': int(bool(d.get('hy2')))}
     blocks = store.blocks(now - days * 86400, [p['id'] for p in ps])
     return bs.summarize(blocks, list(nodes.values()), now, days), blocks, list(dict.fromkeys(missing))
 

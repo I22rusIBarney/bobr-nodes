@@ -308,7 +308,7 @@ class Store:
     # итог проверки соседей по /24 (neigh: subnet | single | mixed | unknown)
     BLOCK_SNAP = {'ip': "TEXT NOT NULL DEFAULT ''", 'asn': "TEXT NOT NULL DEFAULT ''", 'holder': "TEXT NOT NULL DEFAULT ''",
                   'net24': "TEXT NOT NULL DEFAULT ''", 'hoster': "TEXT NOT NULL DEFAULT ''", 'port': 'INTEGER',
-                  'fp': "TEXT NOT NULL DEFAULT ''", 'stealth': 'INTEGER', 'users': 'INTEGER', 'neigh': "TEXT NOT NULL DEFAULT ''"}
+                  'fp': "TEXT NOT NULL DEFAULT ''", 'stealth': 'INTEGER', 'users': 'INTEGER', 'neigh': "TEXT NOT NULL DEFAULT ''", 'hy2': 'INTEGER'}
     BLOCK_COLS = ('name', 'location', 'loc_name', 'flag', 'config', 'born', 'cause', *BLOCK_SNAP)
 
     def block_open(self, pid: int, addr: str, start: float | None = None, **kw) -> None:

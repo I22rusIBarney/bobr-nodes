@@ -3,7 +3,8 @@
 
 /* ═════════ Настройки ноды ═════════ */
 const EXTRAS = [['psiphon', 'Psiphon', 'Запасной выход, когда сайты блокируют IP хостера'], ['warp', 'WARP', 'Выход через Cloudflare для сервисов, которые не любят IP дата-центров'],
-  ['xhttp', 'Запасной XHTTP', 'Второй способ подключения напрямую, если основной режут']];
+  ['xhttp', 'Запасной XHTTP', 'Второй способ подключения напрямую, если основной режут'],
+  ['hy2', 'Hysteria2', 'Второй протокол на UDP 443, быстрый на плохих каналах. Делит IP с основным входом: если его распознают и забанят IP, отвалится и VLESS']];
 function nodeSettings(n, det) {
   const d = det.d;
   if (!d) return det.err ? empty('alert', 'Не загрузилось', det.err) : h('div', { class: 'sk', style: 'height:280px' });
@@ -20,7 +21,7 @@ function nodeSettings(n, det) {
       const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/apply`, 'POST', { stealth: !!st.stealth || undefined,
         port: st.stealth ? undefined : st.port || undefined, final_mask: st.stealth || st.mask == null ? undefined : st.mask,
         psiphon: st.add.psiphon ? { enabled: true, region: '', domains: '' } : undefined, warp: st.add.warp ? { enabled: true, domains: '' } : undefined,
-        xhttp: st.add.xhttp ? { enabled: true, mode: 'direct' } : undefined });
+        xhttp: st.add.xhttp ? { enabled: true, mode: 'direct' } : undefined, hy2: st.add.hy2 ? { enabled: true } : undefined });
       UI.ns = null; jobToast(`${n.name}: настройки применяются`, r.id); refreshSoon();
     } });
   const hasFM = (d.hosts || []).some(x => x.final_mask);

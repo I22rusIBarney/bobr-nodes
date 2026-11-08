@@ -735,6 +735,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         xh = b.get('xhttp')
         if isinstance(xh, dict) and xh.get('enabled'):
             out['xhttp'] = {'port': engine.XHTTP_PORT, 'mode': engine.xhttp_mode(xh.get('mode'))}
+        hy = b.get('hy2')
+        if isinstance(hy, dict) and hy.get('enabled'):
+            out['hy2'] = {'port': engine.HY2_PORT}
         return out
 
     # ── ноды панели: дополнения на уже работающих нодах ──
@@ -2156,7 +2159,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         data = {'kind': 'node', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
                 'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
                 'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
-                'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'xhttp': extras.get('xhttp'),
+                'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'xhttp': extras.get('xhttp'), 'hy2': extras.get('hy2'),
                 'port': port, 'final_mask': fm, **({'stealth': True, 'spec': 'уникальные настройки'} if stealth else {})}
         jid = store.add_job('node-' + n['uuid'][:8], p['id'], uid, data)
         await runner.render(jid, force=True)
@@ -2444,8 +2447,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         if not (acc.get('password') or acc.get('key')):
             raise ApiError('Укажите пароль или ключ для входа по SSH')
-        if extras.get('xhttp') and p.get('script_id'):
-            raise ApiError('Запасной XHTTP ставится только встроенным установщиком — у группы свой скрипт')
+        if (extras.get('xhttp') or extras.get('hy2')) and p.get('script_id'):
+            raise ApiError('Запасной XHTTP и Hysteria2 ставятся только встроенным установщиком — у группы свой скрипт')
         squads = b.get('squads')
         if squads is not None and (not isinstance(squads, list) or not squads or not all(isinstance(x, str) for x in squads)):
             raise ApiError('Выберите хотя бы один сквад — без него пользователи не увидят новую ноду')
@@ -2486,8 +2489,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             port = engine.public_port(b.get('port'), int(p.get('node_port') or 2222))
         except engine.StepError as e:
             raise ApiError(str(e)) from None
-        if extras.get('xhttp') and p.get('script_id'):
-            raise ApiError('Запасной XHTTP ставится только встроенным установщиком — у группы свой скрипт')
+        if (extras.get('xhttp') or extras.get('hy2')) and p.get('script_id'):
+            raise ApiError('Запасной XHTTP и Hysteria2 ставятся только встроенным установщиком — у группы свой скрипт')
         if extras.get('xhttp') and port == engine.XHTTP_PORT and not b.get('stealth'):
             raise ApiError(f'Порт {engine.XHTTP_PORT} занят запасным XHTTP — выберите другой порт для клиентов')
         period = str(b.get('period') or '1m')

@@ -45,7 +45,11 @@ WARP_DOMAINS = ['geosite:tiktok', 'domain:cloudflare.com']
 # Final Mask хоста: фрагментация TLS ClientHello на клиенте (часть операторов режет его на 443/TCP)
 FINAL_MASK = {'tcp': [{'type': 'fragment', 'settings': {'length': '10-20', 'packets': 'tlshello', 'interval': '10-20'}}]}
 # дополнения ноды: ключ, название в имени профиля, код в теге inbound
-EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP'), ('xhttp', 'XHTTP', 'XH')]
+EXTRAS = [('psiphon', 'Psiphon', 'PS'), ('warp', 'WARP', 'WP'), ('xhttp', 'XHTTP', 'XH'), ('hy2', 'Hysteria2', 'HY')]
+# Hysteria2: свой inbound на UDP (тот же номер, что у TCP-входа, не мешает), сертификат ноды, хост — домен ноды
+HY2_PORT = 443
+HY2_PREFIX = 'HY2-'          # тег inbound: HY2-<тег основного inbound>
+EXTRA_PREFIXES = ('XHTTP-', HY2_PREFIX)  # inbound'ы дополнений: на ноде вместе с основным, хосты — свои
 # запасной вход XHTTP: свой inbound на порту, который проксирует Cloudflare, с сертификатом ноды;
 # напрямую — домен ноды:порт, через CDN — cdn-<домен ноды> (Cloudflare на 443 → нода на порт по Origin Rule)
 XHTTP_PORT = 2083
@@ -431,6 +435,7 @@ def stealth(rng=_RNG) -> dict:
             'final_mask': {'tcp': [{'type': 'fragment', 'settings': {'length': span(5, 30), 'packets': 'tlshello',
                                                                      'interval': span(5, 25)}}]},
             'xhttp_port': xport, 'xhttp_fingerprint': rng.choice(FINGERPRINTS),
+            'hy2_port': rng.choice((443, 8443, 2053, 2096)) if rng.random() < .5 else rng.randint(20000, 60000),  # UDP
             # xPaddingBytes — внутри 100–1000: сервер Xray отклоняет padding вне своего диапазона по умолчанию
             'xhttp_extra': {'xPaddingBytes': span(100, 1000),
                             'xmux': {'maxConcurrency': span(4, 32), 'hMaxRequestTimes': span(300, 900),
@@ -499,7 +504,7 @@ def _main_tls(config) -> dict | None:
     """Основной inbound с TLS (его сертификат берёт XHTTP)."""
     for i in (config or {}).get('inbounds', []) if isinstance(config, dict) else []:
         st = i.get('streamSettings') or {}
-        if st.get('security') == 'tls' and st.get('network') != 'xhttp' and not str(i.get('tag', '')).startswith(XHTTP_PREFIX):
+        if st.get('security') == 'tls' and st.get('network') not in ('xhttp', 'hysteria') and not str(i.get('tag', '')).startswith(EXTRA_PREFIXES):
             return i
     return None
 
@@ -536,10 +541,41 @@ def add_xhttp(config: dict, port: int = XHTTP_PORT) -> dict:
     return cfg
 
 
+def hy2_of(config) -> dict | None:
+    """Inbound Hysteria2 профиля: {'tag', 'port'} или None."""
+    for i in (config or {}).get('inbounds', []) if isinstance(config, dict) else []:
+        if str(i.get('tag', '')).startswith(HY2_PREFIX):
+            return {'tag': i['tag'], 'port': int(i.get('port') or HY2_PORT)}
+    return None
+
+
+# параметры QUIC — как в рабочем профиле Remnawave с Hysteria2
+HY2_QUIC = {'congestion': 'bbr', 'maxIdleTimeout': 30, 'keepAlivePeriod': 10, 'maxIncomingStreams': 1024,
+            'initStreamReceiveWindow': 8388608, 'maxStreamReceiveWindow': 8388608,
+            'initConnectionReceiveWindow': 20971520, 'maxConnectionReceiveWindow': 20971520, 'disablePathMTUDiscovery': False}
+
+
+def add_hy2(config: dict, port: int = HY2_PORT) -> dict:
+    """Копия профиля с Hysteria2 на UDP port: сертификат — как у основного inbound (TLS), ALPN h3."""
+    cfg = json.loads(json.dumps(config))
+    main = _main_tls(cfg)
+    if not main:
+        raise StepError('Hysteria2: в профиле нет inbound с TLS-сертификатом (у Reality своего сертификата нет)')
+    tls = (main.get('streamSettings') or {}).get('tlsSettings') or {}
+    ib = {'tag': HY2_PREFIX + main['tag'], 'port': port, 'listen': '0.0.0.0', 'protocol': 'hysteria',
+          'settings': {'clients': [], 'version': 2},
+          'sniffing': json.loads(json.dumps(main.get('sniffing') or {'enabled': True, 'routeOnly': True, 'destOverride': ['http', 'tls', 'quic']})),
+          'streamSettings': {'network': 'hysteria', 'security': 'tls', 'hysteriaSettings': {'version': 2},
+                             'finalmask': {'quicParams': dict(HY2_QUIC)},
+                             'tlsSettings': {'alpn': ['h3'], 'certificates': json.loads(json.dumps(tls.get('certificates') or []))}}}
+    cfg['inbounds'] = [i for i in cfg['inbounds'] if not str(i.get('tag', '')).startswith(HY2_PREFIX)] + [ib]
+    return cfg
+
+
 def features_of(config) -> set[str]:
     """Какие дополнения уже прописаны в профиле."""
     return {k for k, f in (('psiphon', psiphon_of(config) is not None), ('warp', warp_of(config)),
-                           ('xhttp', xhttp_of(config) is not None)) if f}
+                           ('xhttp', xhttp_of(config) is not None), ('hy2', hy2_of(config) is not None)) if f}
 
 
 def apply_extras(config: dict, extras: dict) -> dict:
@@ -549,6 +585,8 @@ def apply_extras(config: dict, extras: dict) -> dict:
         config = add_warp(config, extras['warp']['domains'])
     if 'xhttp' in extras:
         config = add_xhttp(config, int(extras['xhttp'].get('port') or XHTTP_PORT))
+    if 'hy2' in extras:
+        config = add_hy2(config, int(extras['hy2'].get('port') or HY2_PORT))
     return config
 
 
@@ -565,6 +603,8 @@ def extras_problem(config, extras: dict, pname: str) -> str:
         return f'в профиле «{pname}» нет выхода {WARP_TAG} — добавьте его в панели или удалите профиль, бот создаст заново'
     if 'xhttp' in extras and not xhttp_of(config):
         return f'в профиле «{pname}» нет inbound {XHTTP_PREFIX}… — удалите профиль в панели, бот создаст заново'
+    if 'hy2' in extras and not hy2_of(config):
+        return f'в профиле «{pname}» нет inbound {HY2_PREFIX}… — удалите профиль в панели, бот создаст заново'
     return ''
 
 
@@ -856,7 +896,7 @@ class Panel:
         inbound = next((i for i in prof['inbounds'] if i['tag'] == tag), None)
         if not inbound:
             raise StepError(f'в профиле нет inbound {tag}')
-        xin = [i for i in prof['inbounds'] if i['tag'] == XHTTP_PREFIX + tag]
+        xin = [i for i in prof['inbounds'] if i['tag'] in {x + tag for x in EXTRA_PREFIXES}]
         self.attach(node, prof, [inbound], squads, node_port, log, tls=True, also=xin)
         return prof
 
@@ -914,9 +954,8 @@ class Panel:
         active = [umap[u] for u in active_inbounds(pnode) if u in umap]
         if not active:
             raise StepError(f'в профиле «{vname}» нет inbound для этой ноды')
-        xh = next((i['uuid'] for i in prof['inbounds'] if i['tag'].startswith(XHTTP_PREFIX)), None)
-        if xh and xh not in active:  # запасной XHTTP — тоже на ноде
-            active.append(xh)
+        extra_in = [i['uuid'] for i in prof['inbounds'] if i['tag'].startswith(EXTRA_PREFIXES)]
+        active += [u for u in extra_in if u not in active]  # запасной XHTTP и Hysteria2 — тоже на ноде
         # Сначала сквады: панель собирает пользователей ноды из сквадов в момент смены профиля.
         # Если inbound в сквады попадёт позже, нода поднимется с новым профилем без пользователей —
         # и подключиться к ней нельзя, пока её не перезапустят.
@@ -925,8 +964,8 @@ class Panel:
             for sq in self.call('GET', '/api/internal-squads')['internalSquads']:
                 ids = [i['uuid'] for i in sq.get('inbounds', [])]
                 add = [umap[u] for u in ids if u in umap and umap[u] not in ids]
-                if xh and xh not in ids and xh not in add and (add or any(u in umap or u in targets for u in ids)):
-                    add.append(xh)
+                if add or any(u in umap or u in targets for u in ids):
+                    add += [u for u in extra_in if u not in ids and u not in add]
                 if add:
                     self.call('PATCH', '/api/internal-squads', {'uuid': sq['uuid'], 'inbounds': ids + add})
                     log(f'панель: inbound «{vname}» добавлен в сквад «{sq["name"]}»')
@@ -1010,6 +1049,35 @@ class Panel:
                 cf.xhttp_rules(cdn, (x or {}).get('port', XHTTP_PORT), log, add=False)
             except StepError as e:
                 log(f'⚠️ Cloudflare: {e}')
+
+    def hy2_publish(self, prof: dict, domain: str, remark: str, port: int | None, log) -> None:
+        """Хост Hysteria2 ноды: домен ноды, UDP-порт (свой при уникальных настройках), SNI — домен, ALPN h3."""
+        x = hy2_of(prof.get('config'))
+        hin = next((i for i in prof['inbounds'] if x and i['tag'] == x['tag']), None)
+        if not x or not hin:
+            raise StepError(f'в профиле «{prof["name"]}» нет Hysteria2')
+        port = int(port or x['port'])
+        mine = [h for h in self.call('GET', '/api/hosts')
+                if (h.get('inbound') or {}).get('configProfileInboundUuid') == hin['uuid'] and h.get('address') == domain]
+        if mine:
+            self.call('PATCH', '/api/hosts', {'uuid': mine[0]['uuid'], 'port': port})
+            log(f'панель: хост «{mine[0].get("remark", domain)}» обновлён ({domain}:{port}/udp)')
+            return
+        body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': hin['uuid']},
+                'remark': f'{remark} HY2'[:100], 'address': domain, 'port': port, 'sni': domain, 'alpn': 'h3', 'securityLayer': 'TLS'}
+        self.call('POST', '/api/hosts', body)
+        log(f'панель: хост «{body["remark"]}» создан ({domain}:{port}/udp)')
+
+    def hy2_unpublish(self, cur: dict, domain: str, ip: str, log) -> None:
+        """Убрать хосты Hysteria2 ноды (её домен или IP) с inbound'а профиля cur."""
+        x = hy2_of(cur.get('config'))
+        hin = next((i['uuid'] for i in cur.get('inbounds', []) if x and i['tag'] == x['tag']), None)
+        if not hin:
+            return
+        for h in self.call('GET', '/api/hosts'):
+            if (h.get('inbound') or {}).get('configProfileInboundUuid') == hin and h.get('address') in {domain, ip} - {''}:
+                self.call('DELETE', f'/api/hosts/{h["uuid"]}')
+                log(f'панель: хост «{h.get("remark", "")}» удалён (Hysteria2)')
 
     def restart_node(self, pnode: dict, log) -> None:
         """Перезапуск ноды из панели: Xray получает актуальный профиль и список пользователей."""
@@ -1400,13 +1468,15 @@ def install_warp(r: 'Remote', opts: dict, log) -> None:
     log(f'WARP работает: трафик с меткой {WARP_MARK} уходит в туннель')
 
 
-def setup_port(r: 'Remote', public: int, target: int, log) -> None:
+def setup_port(r: 'Remote', public: int, target: int, log, proto: str = 'tcp') -> None:
     """Клиенты подключаются на public, ядро переадресует его на target (порт Xray). Фаервол и Traffic Control видят
-    уже target, поэтому открывать ничего не нужно; target тоже продолжает работать. Правило переживает перезагрузку."""
+    уже target, поэтому открывать ничего не нужно; target тоже продолжает работать. Правило переживает перезагрузку.
+    proto — tcp или udp (Hysteria2)."""
     if public == target:
         return
-    unit = f'bnodes-port-{public}'
-    rule = f'PREROUTING -p tcp --dport {public} -j REDIRECT --to-ports {target}'
+    assert proto in ('tcp', 'udp')
+    unit = f'bnodes-port-{public}' + ('-udp' if proto == 'udp' else '')
+    rule = f'PREROUTING -p {proto} --dport {public} -j REDIRECT --to-ports {target}'
     body = (f'[Unit]\nDescription=Bobr Nodes: port {public} -> {target}\n'
             'After=network-online.target docker.service ufw.service nftables.service\n'
             f'[Service]\nType=oneshot\nRemainAfterExit=yes\n'
@@ -1415,7 +1485,7 @@ def setup_port(r: 'Remote', public: int, target: int, log) -> None:
             f"ExecStop=/bin/sh -c 'iptables -t nat -D {rule}; ip6tables -t nat -D {rule}; true'\n"
             '[Install]\nWantedBy=multi-user.target\n')
     rc, out = r.run(
-        f'if ss -ltnH "sport = :{public}" 2>/dev/null | grep -q .; then echo PORT_BUSY; exit 0; fi; '
+        f'if ss -{"l" + proto[0]}nH "sport = :{public}" 2>/dev/null | grep -q .; then echo PORT_BUSY; exit 0; fi; '
         'command -v iptables >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables >/dev/null; }; '
         f'printf "{body}" > /etc/systemd/system/{unit}.service && systemctl daemon-reload && '
         f'systemctl enable -q {unit} && systemctl restart {unit} && iptables -t nat -C {rule} && echo PORT_OK; true', 300)
@@ -1423,7 +1493,7 @@ def setup_port(r: 'Remote', public: int, target: int, log) -> None:
         raise StepError(f'порт {public} на ноде уже занят другой программой — выберите другой')
     if 'PORT_OK' not in out:
         raise StepError(f'не удалось переадресовать порт {public} → {target}: {strip_ansi(out).strip()[-200:]}')
-    log(f'порт {public} переадресован на {target} (служба {unit})')
+    log(f'порт {public}{"/udp" if proto == "udp" else ""} переадресован на {target} (служба {unit})')
 
 
 def add_keys(r: 'Remote', keys: str, log) -> None:
@@ -1446,7 +1516,23 @@ def install_extras(r: 'Remote', node: dict, log) -> dict:
     if node.get('xhttp'):
         extras['xhttp'] = {'port': open_xhttp_port(r, XHTTP_PORT, log), 'mode': xhttp_mode((node['xhttp'] or {}).get('mode')
                                                                                          if isinstance(node['xhttp'], dict) else None)}
+    if node.get('hy2'):
+        extras['hy2'] = {'port': open_udp_port(r, HY2_PORT, log)}
     return extras
+
+
+def open_udp_port(r: 'Remote', port: int, log) -> int:
+    """UDP-порт Hysteria2: свободен (или его уже слушает Xray) и открыт в ufw, если тот включён."""
+    rc, out = r.run(f'L=$(ss -lunpH "sport = :{port}" 2>/dev/null); '
+                    f'if [ -n "$L" ] && ! echo "$L" | grep -q xray; then echo HY_BUSY; exit 0; fi; '
+                    f'if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then ufw allow {port}/udp >/dev/null && echo HY_UFW; fi; '
+                    'echo HY_OK')
+    if 'HY_BUSY' in out:
+        raise StepError(f'UDP-порт {port} на ноде занят другой программой — Hysteria2 не поставить')
+    if 'HY_OK' not in out:
+        raise StepError(f'не удалось проверить UDP-порт {port}: {strip_ansi(out).strip()[-200:]}')
+    log(f'UDP-порт {port} для Hysteria2 свободен' + (', открыт в ufw' if 'HY_UFW' in out else ''))
+    return port
 
 
 def open_xhttp_port(r: 'Remote', port: int, log) -> int:
@@ -1519,13 +1605,15 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
             + (f', XHTTP на {host["xhttp_port"]}' if node.get('xhttp') else ''))
     port = host.get('port')
     extras = {}
-    if node.get('psiphon') or node.get('warp') or node.get('xhttp') or port:
+    if node.get('psiphon') or node.get('warp') or node.get('xhttp') or node.get('hy2') or port:
         stage('extras')
         extras = install_extras(r, node, log)
         if port:
             setup_port(r, int(port), 443, log)
         if 'xhttp' in extras and host.get('xhttp_port'):
             setup_port(r, int(host['xhttp_port']), extras['xhttp']['port'], log)
+        if 'hy2' in extras and host.get('hy2_port'):
+            setup_port(r, int(host['hy2_port']), extras['hy2']['port'], log, 'udp')
     if panel is None:
         return 'установлено, панель пропущена'
     stage('panel')
@@ -1548,6 +1636,8 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         if 'xhttp' in extras:
             panel.xhttp_publish(pprof, node['domain'], node['ip'], node.get('remark') or node['name'],
                                 Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log, extras['xhttp']['mode'], host)
+        if 'hy2' in extras:
+            panel.hy2_publish(pprof, node['domain'], node.get('remark') or node['name'], host.get('hy2_port'), log)
 
     stage('check')
     for attempt in range(check_tries):
@@ -1762,6 +1852,8 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
             base = panel.downgrade_node(pnode, hosts, log)
             if was and xhttp_of(was.get('config')):
                 panel.xhttp_unpublish(was, domain, ipv4(), cf, log)
+            if was and hy2_of(was.get('config')):
+                panel.hy2_unpublish(was, domain, ipv4(), log)
         stage('check')
         for attempt in range(check_tries):
             time.sleep(check_every)
@@ -1780,7 +1872,9 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
         raise StepError('для запасного XHTTP нужен домен ноды: сертификат на ноде выпущен на домен, а не на IP')
     if isinstance(node.get('xhttp'), dict) and node['xhttp'].get('mode') == 'cdn' and cf is None:
         raise StepError('XHTTP через CDN: нужен токен Cloudflare (общий в «Подключениях» или у группы)')
-    need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or want_port not in (None, '', 443, '443'))
+    if node.get('hy2') and not domain:
+        raise StepError('для Hysteria2 нужен домен ноды: сертификат на ноде выпущен на домен, а не на IP')
+    need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or node.get('hy2') or want_port not in (None, '', 443, '443'))
     extras, r = {}, None
     if need_ssh:
         stage('ssh')
@@ -1804,6 +1898,11 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
             remark = next((h['remark'] for h in hosts if (h.get('inbound') or {}).get('configProfileInboundUuid') in main_in
                            and h.get('address') == domain), None) or pnode['name']
             panel.xhttp_publish(cur, domain, ipv4(), remark, cf, log, extras['xhttp']['mode'])
+        if 'hy2' in extras:
+            main_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if not i['tag'].startswith(EXTRA_PREFIXES)}
+            remark = next((h['remark'] for h in hosts if (h.get('inbound') or {}).get('configProfileInboundUuid') in main_in
+                           and h.get('address') == domain), None) or pnode['name']
+            panel.hy2_publish(cur, domain, remark, None, log)
         if want_port is not None and want_port != '':
             active = set(active_inbounds(pnode))
             ib = next((i for i in (cur or {}).get('inbounds', []) if i['uuid'] in active and i.get('port')), None)
@@ -1811,17 +1910,21 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
             public = public_port(want_port, int(prof.get('node_port') or 2222)) or target
             if public != target:
                 setup_port(r, public, target, log)
-            xh_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if i['tag'].startswith(XHTTP_PREFIX)}
-            for h in hosts:  # у хостов запасного XHTTP свой порт — его не трогаем
+            xh_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if i['tag'].startswith(EXTRA_PREFIXES)}
+            for h in hosts:  # у хостов запасного XHTTP и Hysteria2 свой порт — его не трогаем
                 if h.get('port') != public and (h.get('inbound') or {}).get('configProfileInboundUuid') not in xh_in:
                     panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'port': public})
             log(f'панель: порт хостов — {public}' + ('' if public == target else f' (на ноде → {target})'))
+        # отпечаток и маска (фрагментация TCP) — не для QUIC: хосты Hysteria2 пропускаем
+        hy_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if i['tag'].startswith(HY2_PREFIX)}
+        tcp_hosts = [h for h in hosts if (h.get('inbound') or {}).get('configProfileInboundUuid') not in hy_in]
         if fp:
-            for h in hosts:
+            for h in tcp_hosts:
                 panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'fingerprint': fp})
-            log(f'панель: отпечаток {fp} на хостах ({len(hosts)})')
+            log(f'панель: отпечаток {fp} на хостах ({len(tcp_hosts)})')
         if node.get('final_mask') is not None:
             mask = node['final_mask'] or None
+            hosts = tcp_hosts
             for h in hosts:
                 panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'finalMask': mask})
             log('панель: Final Mask ' + ('поставлен' if mask else 'убран') + f' на хостах ({len(hosts)})')
@@ -1829,7 +1932,7 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
     if extras and r is not None:
         stage('check')
         port = next((int(i['port']) for i in (cur or {}).get('inbounds', []) if i['uuid'] in active_inbounds(pnode) and i.get('port')
-                     and not i['tag'].startswith(XHTTP_PREFIX)), 443)
+                     and not i['tag'].startswith(EXTRA_PREFIXES)), 443)
         problem = xray_problem(r, port, log, tries=check_tries, every=check_every)
         xh = xhttp_of((cur or {}).get('config'))
         if not problem and xh:
@@ -1844,6 +1947,8 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
                                                         if base(i['tag']) in back}, hosts, log, squads=False)
                     if xh and not xhttp_of(before.get('config')):
                         panel.xhttp_unpublish(cur, domain, ipv4(), cf, log)
+                    if hy2_of(cur.get('config')) and not hy2_of(before.get('config')):
+                        panel.hy2_unpublish(cur, domain, ipv4(), log)
             raise StepError(f'{problem}. Нода возвращена в профиль «{before["name"]}», клиенты снова подключаются. '
                             'Строки ошибок Xray — в журнале задачи')
     if extras:
