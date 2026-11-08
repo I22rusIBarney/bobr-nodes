@@ -3653,7 +3653,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         """Где и как поставленные ноды блокируют реже: по локациям, конфигурациям, хостерам, сетям и настройкам
         за days дней, пачки блокировок и проверки соседей, плюс советы для покупки."""
         from . import blockstats as bs
-        res, _ = block_stats(my_profiles(request), stats_days(request))
+        res, blocks = block_stats(my_profiles(request), stats_days(request))
+        keep = ('pid', 'name', 'start', 'end', 'cause', 'fix', 'flag', 'loc_name', 'hoster', 'holder', 'asn', 'net24', 'port',
+                'stealth', 'users', 'neigh')
+        res['recent'] = [{k: b.get(k) for k in keep} for b in sorted(blocks, key=lambda b: -b['start'])[:40]]
         res['advice'] = {r['key']: a for r in res['locations'] if (a := bs.advice(res, r['key']))}
         res['ai'] = json.loads(store.get('banlab_ai') or 'null')
         res['ai_ready'] = bool(store.get('gemini_key'))
