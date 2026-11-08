@@ -716,22 +716,51 @@ function openBell() {
 /* ── Поиск и команды ⌘K ── */
 function openPalette() {
   if ($('.palette')) return;
+  // синонимы: по ним раздел находится, даже если в названии этих слов нет
+  const KW = { bot: 'обновить бота версия апдейт update автообновление', backup: 'бэкап копия восстановление пароль', connections: 'cloudflare токен gemini ключ bobr cloud подключить',
+    notifications: 'телеграм оповещения тихие часы', checkers: 'чекер россия мониторинг проверка', health: 'ssh безопасность нагрузка ресурсы vps', audit: 'лог журнал история кто',
+    scripts: 'установщик github скрипт', transfer: 'перенести хосты панель', routing: 'xray json шаблон архив zip', migrate: 'перенос сервер переезд',
+    users: 'приглашение доступ инвайт', tariff: 'цена подписка оплата', look: 'тема тёмная светлая классический' };
+  const GTABS = [['conn', 'Подключение', 'панель токен домен сквады'], ['mon', 'Проверка и починка', 'мониторинг подписка чекеры починка замена'], ['auto', 'Автоматизация', 'автообновление нагрузка докупка'],
+    ['rent', 'Аренда', 'продление сервер оплата'], ['plugins', 'Плагины', 'torrent blocker'], ['clean', 'Уборка', 'удалить лишнее серверы']];
+  const tabGo = (pid, t) => () => { UI.tabs['g' + pid] = t; go('group/' + pid); };
+  groups().forEach(p => loadHosts(p.id));  // хосты — для поиска; пока печатают, успеют загрузиться
+  const hostCmds = () => groups().flatMap(p => ((D.hw || {})[p.id] || {}).hosts || []).slice(0, 500).map(x => ({ g: 'Хосты', l: x.remark || x.address,
+    s: x.address + (x.port ? ':' + x.port : ''), i: 'radar', fn: () => { UI.nodesTab = 'hosts'; UI.hq = x.remark || x.address; go('nodes'); }, q: [x.remark, x.address, ...(x.tags || [])].join(' ') }));
   const cmds = [
     ...NAV.map(x => ({ g: 'Разделы', l: x.l, i: x.i, fn: () => go(x.id) })),
-    { g: 'Действия', l: 'Добавить ноды', i: 'plus', fn: () => openDeploy() },
-    { g: 'Действия', l: 'Новая группа', i: 'layers', fn: () => newGroup() },
+    { g: 'Действия', l: 'Добавить ноды', i: 'plus', fn: () => openDeploy(), q: 'купить установить новая нода' },
+    { g: 'Действия', l: 'Поставить ноду на свой сервер', i: 'server', fn: () => { openDeploy(); if (UI.wiz) { UI.wiz.src = 'ssh'; render(); } }, q: 'свой сервер ssh другой хостер' },
+    { g: 'Действия', l: 'Новая группа', i: 'layers', fn: () => newGroup(), q: 'панель remnawave подключить' },
     { g: 'Действия', l: 'Обновить устаревшие ноды', i: 'up', fn: () => updateNodes(allNodes().filter(outdated)) },
     { g: 'Действия', l: 'Проверить ноды из России', i: 'shield', fn: () => api('monitor/check', 'POST').then(() => toast('Проверка запущена', 'Результат — через 1–2 минуты')).catch(e => toast('Не получилось', e.message, 'bad')) },
-    { g: 'Действия', l: 'Интерфейс и тема', i: 'contrast', fn: () => go('settings/look') },
+    { g: 'Действия', l: 'Хосты: что проверять из России', i: 'radar', fn: () => { UI.nodesTab = 'hosts'; go('nodes'); }, q: 'хосты белые списки балансировщик теги' },
+    { g: 'Действия', l: 'Разбор блокировок нейросетью', i: 'chart', fn: () => go('stats'), q: 'ии ai gemini почему банят статистика хостеры' },
+    ...SETTINGS().map(x => ({ g: 'Настройки', l: x.l, s: x.s, i: x.i, fn: () => go('settings/' + x.id), q: [x.l, x.s, KW[x.id] || ''].join(' ') })),
     ...groups().map(p => ({ g: 'Группы', l: p.name, s: (p.panel_url || '').replace(/^https?:\/\//, ''), i: 'layers', fn: () => go('group/' + p.id) })),
+    ...groups().flatMap(p => GTABS.map(([t, l, kw]) => ({ g: 'Группы', l: `${p.name}: ${l}`, i: 'layers', fn: tabGo(p.id, t), q: [p.name, l, kw].join(' ') }))),
     ...allNodes().map(n => ({ g: 'Ноды', l: n.name, s: (n.domain || n.address) + ' · ' + n.group, flag: n.country, fn: () => go('node/' + n.id), q: [n.name, n.address, n.domain, n.country, n.group].join(' ') })),
+    ...D.jobs.slice(0, 30).map(j => ({ g: 'Задачи', l: jobTitle(j), s: j.domain || '', i: 'activity', fn: () => go('task/' + j.id), q: [jobTitle(j), j.domain, j.spec].join(' ') })),
   ];
+  // поиск по словам в любом порядке; выше — где запрос в начале названия
+  const score = (c, words, s) => {
+    const hay = (c.q || c.l + ' ' + (c.s || '')).toLowerCase() + ' ' + c.l.toLowerCase();
+    if (!words.every(w => hay.includes(w))) return -1;
+    const l = c.l.toLowerCase();
+    return (l.startsWith(s) ? 3 : 0) + (l.includes(s) ? 2 : 0) + (words.every(w => l.includes(w)) ? 1 : 0);
+  };
   let q = '', idx = 0, shown = [];
   const list = h('div', { class: 'pal-list', role: 'listbox', id: 'pal-list' });
   const draw = () => {
-    const s = q.trim().toLowerCase();
-    shown = cmds.filter(c => !s ? c.g !== 'Ноды' : (c.q || c.l + ' ' + (c.s || '')).toLowerCase().includes(s));
-    shown = [...shown.filter(c => c.g !== 'Ноды'), ...shown.filter(c => c.g === 'Ноды').slice(0, 8)];
+    const s = q.trim().toLowerCase(), words = s.split(/\s+/).filter(Boolean);
+    if (!s) shown = cmds.filter(c => c.g === 'Разделы' || c.g === 'Действия');
+    else {
+      const hits = [...cmds, ...hostCmds()].map(c => [c, score(c, words, s)]).filter(([, v]) => v >= 0);
+      const order = ['Действия', 'Настройки', 'Разделы', 'Ноды', 'Хосты', 'Группы', 'Задачи'];
+      const best = Object.fromEntries(order.map(g => [g, Math.max(-1, ...hits.filter(([c]) => c.g === g).map(([, v]) => v))]));
+      const groupsSorted = [...order].sort((a, b) => best[b] - best[a] || order.indexOf(a) - order.indexOf(b));
+      shown = groupsSorted.flatMap(g => hits.filter(([c]) => c.g === g).sort((a, b) => b[1] - a[1]).map(([c]) => c).slice(0, g === 'Ноды' || g === 'Хосты' ? 8 : 6));
+    }
     idx = Math.min(idx, Math.max(0, shown.length - 1));
     let g = '';
     list.replaceChildren(...(shown.length ? shown.flatMap((c, i) => [c.g !== g ? (g = c.g, h('div', { class: 'pal-g' }, c.g)) : null,
@@ -742,7 +771,7 @@ function openPalette() {
     inp.setAttribute('aria-activedescendant', 'pi' + idx);
   };
   const run = c => { close(); c.fn(); };
-  const inp = h('input', { placeholder: 'Нода или действие…', 'aria-label': 'Поиск', role: 'combobox', 'aria-controls': 'pal-list', 'aria-expanded': 'true',
+  const inp = h('input', { placeholder: 'Нода, хост, настройка или действие…', 'aria-label': 'Поиск', role: 'combobox', 'aria-controls': 'pal-list', 'aria-expanded': 'true',
     oninput: e => { q = e.target.value; idx = 0; draw(); },
     onkeydown: e => {
       if (e.key === 'ArrowDown') { idx = (idx + 1) % shown.length; draw(); e.preventDefault(); }
