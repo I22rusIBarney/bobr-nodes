@@ -80,6 +80,7 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('DELETE', r'/api/invites/(?P<iid>\d+)', 'invite.delete', 'Отозвал приглашение'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/hoster', 'node.hoster', 'Подписал хостера ноды'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/hosts/watch', 'host.watch', 'Выбрал хосты для проверки из России'),
+    ('POST', r'/api/deploy/own', 'deploy.own', 'Поставил ноду на свой сервер'),
     ('POST', r'/api/stats/ask', 'stats.ai', 'Спросил нейросеть о блокировках'),
     ('POST', r'/api/users/(?P<tg>\d+)/block', 'user.block', 'Заблокировал или разблокировал пользователя'),
     ('DELETE', r'/api/users/(?P<tg>\d+)', 'user.delete', 'Удалил пользователя'),

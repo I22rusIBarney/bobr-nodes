@@ -2413,6 +2413,65 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         warns: list[str] = []
         return J({'domains': await svc.check_domains(store, p, b.get('domains') or '', int(b.get('count') or 0), warns), 'warnings': warns})
 
+    @r.post('/api/deploy/own')
+    async def deploy_own(request):
+        """Нода на своём сервере (куплен у другого хостера): IP и доступ по SSH, страна, хостер. Покупки нет —
+        дальше всё как у обычной установки: DNS, установщик, панель, проверка из России."""
+        from . import sshaccess
+        b = await body(request)
+        p = profile_or_404(b.get('pid', 0), request)
+        ip = str(b.get('ip') or '').strip()
+        if not engine.is_ip(ip) or ':' in ip:
+            raise ApiError('IP сервера: адрес IPv4, например 203.0.113.10')
+        from . import banlab
+        if not banlab.is_public(ip):
+            raise ApiError('Это внутренний адрес — нужен публичный IPv4 сервера')
+        if ip in {d.get('ip') for d in bot_jobs_by_ip(p['id']).values()}:
+            raise ApiError('На этом IP уже стоит нода бота в этой группе')
+        if any(j['status'] in ACTIVE and j['data'].get('ip') == ip for j in store.active_jobs()):
+            raise ApiError('По этому IP уже идёт установка')
+        cc = str(b.get('country') or '').strip().lower()
+        if not re.fullmatch(r'[a-z]{2}', cc):
+            raise ApiError('Страна: двухбуквенный код, например DE')
+        hoster = re.sub(r'\s+', ' ', str(b.get('hoster') or '')).strip()[:60]
+        no_foreign_bot_key(request, b, p, ip)
+        try:
+            acc = sshaccess.clean(b, None, runner.keydir)  # port здесь — SSH-порт; порт для клиентов — port_client
+            extras = parse_extras(b)
+            mask = engine.final_mask(b.get('final_mask_json') or None) if b.get('final_mask') else None
+            port = engine.public_port(b.get('port_client'), int(p.get('node_port') or 2222))
+        except (ValueError, engine.StepError) as e:
+            raise ApiError(str(e)) from None
+        if not (acc.get('password') or acc.get('key')):
+            raise ApiError('Укажите пароль или ключ для входа по SSH')
+        if extras.get('xhttp') and p.get('script_id'):
+            raise ApiError('Запасной XHTTP ставится только встроенным установщиком — у группы свой скрипт')
+        squads = b.get('squads')
+        if squads is not None and (not isinstance(squads, list) or not squads or not all(isinstance(x, str) for x in squads)):
+            raise ApiError('Выберите хотя бы один сквад — без него пользователи не увидят новую ноду')
+        cat = {'locations': []}
+        try:  # русское название и флаг — как у локаций Bobr Cloud, если такая страна там есть
+            cat = await svc.load_catalog(store, p)
+        except Exception:  # noqa: BLE001 — Bobr Cloud не подключён или не ответил: название — по коду страны
+            pass
+        L = next((x for x in cat.get('locations', []) if x['code'] == cc), None)
+        loc = {'code': cc, 'name': (L or {}).get('name') or svc.country_name({'code': cc}, 'en') or cc.upper(),
+               'flag': (L or {}).get('flag') or ''.join(chr(0x1F1E6 + ord(c) - 97) for c in cc)}
+        try:
+            dom = str(b.get('domain') or '').strip()
+            doms = await svc.check_domains(store, p, [dom], 1) if dom else await svc.auto_domains(store, p, cc, 1)
+            host = svc.host_options(cc, b.get('host_mode') or 'simple', b.get('tags'), str(b.get('balancer_tag') or ''),
+                                    str(b.get('balancer_remark') or ''), b.get('balancer_template'))
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        host.update({'stealth': True} if b.get('stealth') else {'final_mask': mask, 'port': port})
+        if hoster:  # для статистики блокировок — сразу подписан
+            store.set(f'hoster:{p["id"]}:{doms[0]}', hoster)
+        ids = await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], {**cat, 'locations': [loc]}, cc, None, '1m', doms,
+                                    squads, str(b.get('remark') or '')[:100], host, 'en' if b.get('remark_lang') == 'en' else 'ru',
+                                    extras=extras, own={'ip': ip, 'ssh': acc, 'loc': loc, 'hoster': hoster})
+        return J({'ids': ids, 'domain': doms[0]})
+
     @r.post('/api/deploy')
     async def deploy(request):
         """Одна или несколько локаций: items = [{location, idx, domains}], либо старый вид location/idx/domains."""

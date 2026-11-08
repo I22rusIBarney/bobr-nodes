@@ -411,7 +411,7 @@ class Runner:
         res = await self._ip_blocked(jid, d['ip'], prof)
         if not res:
             return self.store.patch_job_data(jid, ip_checked=d['ip'])
-        if settings_of(prof)['mon_precheck'] == 'reip' and d.get('server_id') and not d.get('precheck_reip'):
+        if settings_of(prof)['mon_precheck'] == 'reip' and d.get('server_id') and bc is not None and not d.get('precheck_reip'):
             old = d['ip']
             d = self.store.patch_job_data(jid, precheck_reip=True)  # до запроса: повтор не спишет деньги второй раз
             try:
@@ -434,6 +434,9 @@ class Runner:
                     raise Fail('Bobr Cloud так и не сообщил новый IP — проверьте сервер в Bobr Cloud и нажмите «Повторить»')
                 await asyncio.sleep(self.poll_every * 3)
             return await self._precheck(jid, d, prof, bc)
+        if d.get('own'):  # свой сервер: IP знаем только мы — менять его вам у своего хостера
+            raise Fail(f'IP сервера {d["ip"]} уже заблокирован в России (проверили {res["checkers"]} чекера) — нода на нём работать не будет. '
+                       'Смените IP у своего хостера или возьмите другой сервер')
         # повтор возьмёт IP из Bobr Cloud заново: сменили его там — проверим новый
         self.store.patch_job_data(jid, ip=None)
         raise Fail(f'IP сервера {d["ip"]} уже заблокирован в России (проверили {res["checkers"]} чекера) — нода на нём работать не будет. '
@@ -537,79 +540,86 @@ class Runner:
                 await self._run_node(jid, d, prof)
                 await self._set(jid, status='done', error='')
                 return
-            bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
+            bc = None
+            if not d.get('own'):  # свой сервер у другого хостера: покупки и Bobr Cloud нет, IP и доступ уже известны
+                bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
 
-            # Bobr Cloud (Astra) иногда не выдаёт сервер — деньги возвращаются, а бот сам пробует купить ещё раз;
-            # после второй неудачи предлагает другую конфигурацию или локацию
-            while True:
-                if not d.get('server_id') and d.get('buy_tried'):
-                    sid = await self._lost_purchase(jid, bc, d)  # прошлая покупка могла пройти без ответа
-                    if sid:
-                        d = self.store.patch_job_data(jid, server_id=sid)
-                        self.last[jid] = 'сервер из прошлой попытки уже куплен — продолжаю с ним'
-                    elif job['status'] == 'buying' and not d.get('create_tries'):
-                        raise Fail('бот перезапустился во время покупки, а сервера в Bobr Cloud пока нет — '
-                                   'проверьте «Мои серверы» в Bobr Cloud. Повтор купит новый сервер.')
-                if not d.get('server_id'):
-                    await self._set(jid, status='buying', stage='buy', error='')
-                    d = self.store.patch_job_data(jid, buy_tried=True, buy_at=int(time.time()))  # до запроса: ответ может не дойти
-                    srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
-                    d = self.store.patch_job_data(jid, server_id=srv['id'])
+                # Bobr Cloud (Astra) иногда не выдаёт сервер — деньги возвращаются, а бот сам пробует купить ещё раз;
+                # после второй неудачи предлагает другую конфигурацию или локацию
+                while True:
+                    if not d.get('server_id') and d.get('buy_tried'):
+                        sid = await self._lost_purchase(jid, bc, d)  # прошлая покупка могла пройти без ответа
+                        if sid:
+                            d = self.store.patch_job_data(jid, server_id=sid)
+                            self.last[jid] = 'сервер из прошлой попытки уже куплен — продолжаю с ним'
+                        elif job['status'] == 'buying' and not d.get('create_tries'):
+                            raise Fail('бот перезапустился во время покупки, а сервера в Bobr Cloud пока нет — '
+                                       'проверьте «Мои серверы» в Bobr Cloud. Повтор купит новый сервер.')
+                    if not d.get('server_id'):
+                        await self._set(jid, status='buying', stage='buy', error='')
+                        d = self.store.patch_job_data(jid, buy_tried=True, buy_at=int(time.time()))  # до запроса: ответ может не дойти
+                        srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
+                        d = self.store.patch_job_data(jid, server_id=srv['id'])
 
-                await self._set(jid, status='provisioning', stage='ip', error='')
-                self.last[jid] = 'ждём, пока Bobr Cloud создаст сервер'
-                end = time.monotonic() + self.ip_timeout
-                rebuy = False
-                while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
-                    try:
-                        srv = await bc.server(d['server_id'])
-                    except BcloudUnavailable as e:
-                        if time.monotonic() > end:
-                            raise Fail(f'{e} — проверьте, что Bobr Cloud запущен, и нажмите «Повторить»') from e
-                        self.last[jid] = 'Bobr Cloud не отвечает — жду'
-                        await self.render(jid)
-                        await asyncio.sleep(self.poll_every)
-                        continue
-                    if srv['status'] == 'active' and srv.get('ip'):
-                        if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
-                            engine.forget_host(self.known_hosts(), srv['ip'])
-                        d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
-                        break
-                    if srv['status'] in ('deleted', 'failed', 'error'):
-                        if d.get('existing'):
-                            raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
-                        tries = int(d.get('create_tries') or 0) + 1
-                        if tries < CREATE_TRIES:
-                            d = self.store.patch_job_data(jid, server_id=None, create_tries=tries)
-                            self.last[jid] = 'Bobr Cloud не смог создать сервер — покупаю ещё раз'
+                    await self._set(jid, status='provisioning', stage='ip', error='')
+                    self.last[jid] = 'ждём, пока Bobr Cloud создаст сервер'
+                    end = time.monotonic() + self.ip_timeout
+                    rebuy = False
+                    while not d.get('ip'):  # IP уже известен (повтор, перезапуск бота) — bcloud больше не нужен
+                        try:
+                            srv = await bc.server(d['server_id'])
+                        except BcloudUnavailable as e:
+                            if time.monotonic() > end:
+                                raise Fail(f'{e} — проверьте, что Bobr Cloud запущен, и нажмите «Повторить»') from e
+                            self.last[jid] = 'Bobr Cloud не отвечает — жду'
                             await self.render(jid)
-                            await asyncio.sleep(self.rebuy_wait)  # пусть Bobr Cloud вернёт деньги за первую попытку
-                            rebuy = True
+                            await asyncio.sleep(self.poll_every)
+                            continue
+                        if srv['status'] == 'active' and srv.get('ip'):
+                            if d.get('ip') != srv['ip']:  # новый сервер: прежний ключ этого IP (если был) больше не его
+                                engine.forget_host(self.known_hosts(), srv['ip'])
+                            d = self.store.patch_job_data(jid, ip=srv['ip'], password=srv.get('root_password') or d['password'])
                             break
-                        # следующий «Повторить» — снова с двумя попытками
-                        d = self.store.patch_job_data(jid, server_id=None, create_tries=0, create_failed=True)
-                        raise Fail(f'Bobr Cloud дважды не смог создать сервер (статус {srv["status"]}) — похоже, в этой локации '
-                                   'сейчас нет мощностей под такую конфигурацию. Выберите другую конфигурацию или локацию. '
-                                   'Деньги за обе попытки Bobr Cloud возвращает сам')
-                    if time.monotonic() > end:
-                        raise Fail('сервер слишком долго создаётся — проверьте его в Bobr Cloud и нажмите «Повторить»')
-                    await asyncio.sleep(self.poll_every)
-                if not rebuy:
-                    break
-            if not d.get('renamed'):
-                try:
-                    await bc.rename(d['server_id'], d['name'])
-                    d = self.store.patch_job_data(jid, renamed=True)
-                except BcloudError as e:  # имя в bcloud — удобство, не повод останавливать установку
-                    log.info('rename %s: %s', jid, e)
+                        if srv['status'] in ('deleted', 'failed', 'error'):
+                            if d.get('existing'):
+                                raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
+                            tries = int(d.get('create_tries') or 0) + 1
+                            if tries < CREATE_TRIES:
+                                d = self.store.patch_job_data(jid, server_id=None, create_tries=tries)
+                                self.last[jid] = 'Bobr Cloud не смог создать сервер — покупаю ещё раз'
+                                await self.render(jid)
+                                await asyncio.sleep(self.rebuy_wait)  # пусть Bobr Cloud вернёт деньги за первую попытку
+                                rebuy = True
+                                break
+                            # следующий «Повторить» — снова с двумя попытками
+                            d = self.store.patch_job_data(jid, server_id=None, create_tries=0, create_failed=True)
+                            raise Fail(f'Bobr Cloud дважды не смог создать сервер (статус {srv["status"]}) — похоже, в этой локации '
+                                       'сейчас нет мощностей под такую конфигурацию. Выберите другую конфигурацию или локацию. '
+                                       'Деньги за обе попытки Bobr Cloud возвращает сам')
+                        if time.monotonic() > end:
+                            raise Fail('сервер слишком долго создаётся — проверьте его в Bobr Cloud и нажмите «Повторить»')
+                        await asyncio.sleep(self.poll_every)
+                    if not rebuy:
+                        break
+                if not d.get('renamed'):
+                    try:
+                        await bc.rename(d['server_id'], d['name'])
+                        d = self.store.patch_job_data(jid, renamed=True)
+                    except BcloudError as e:  # имя в bcloud — удобство, не повод останавливать установку
+                        log.info('rename %s: %s', jid, e)
 
             d = await self._precheck(jid, d, prof, bc)
             self.last[jid] = 'ждём свободный слот установки'
             await self.render(jid)
             async with self.sem():
                 await self._set(jid, status='deploying', stage='dns')
+                login = {'ssh_user': 'root', 'ssh_password': d['password']}
+                if d.get('own'):
+                    from . import services, sshaccess
+                    acc = services.guard_bot_key(self.store, prof, d.get('ssh') or {}, d['ip'], self.admins)
+                    login = sshaccess.to_node(acc, self.bot_key()[0])
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
-                        'remark': d.get('remark', ''), 'ssh_user': 'root', 'ssh_password': d['password'],
+                        'remark': d.get('remark', ''), **login,
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
                         'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
                         'traffic_control': prof.get('traffic_control', True), 'known_hosts': self.known_hosts()}
