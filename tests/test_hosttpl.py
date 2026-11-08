@@ -97,3 +97,36 @@ def test_apply_checks_everything_before_changing():
     with pytest.raises(StepError, match='нет Xray JSON-шаблона'):
         ht.apply(p, [('h7', '1.json', cfg('x', 'x')), ('h9', '2.json', cfg('y', 'y'))], print)
     assert not p.patches                                          # ни одной правки в панели
+
+
+def test_upload_body_read_whole_across_chunks():
+    """Архив приходит по сети кусками: читаем до конца, иначе zip без оглавления — «архив повреждён»."""
+    import asyncio
+    from unittest import mock
+
+    from aiohttp import streams
+
+    from bot.web import read_body
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        for i in range(30):
+            z.writestr(f'{i}.json', json.dumps({'outbounds': [{'protocol': 'vless', 'tag': 'proxy', 'pad': 'x' * 4000 + str(i)}]}))
+    raw = buf.getvalue()
+
+    async def go(limit):
+        proto = mock.Mock(_reading_paused=False)
+        sr = streams.StreamReader(proto, 2 ** 16, loop=asyncio.get_running_loop())
+        async def net():  # куски по 1000 байт приходят со временем, как из сети
+            for k in range(0, len(raw), 1000):
+                sr.feed_data(raw[k:k + 1000])
+                await asyncio.sleep(0)
+            sr.feed_eof()
+        t = asyncio.create_task(net())
+        await asyncio.sleep(0)
+        data = await read_body(mock.Mock(content=sr), limit)
+        t.cancel()
+        return data
+    data = asyncio.run(go(10 ** 7))
+    assert data == raw and len(ht.read_files('a.zip', data)) == 30
+    assert len(asyncio.run(go(5000))) == 5001  # превышение лимита видно по лишнему байту
