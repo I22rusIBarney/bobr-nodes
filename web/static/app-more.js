@@ -171,8 +171,9 @@ function wizNamesStep(w, items) {
       h('div', { class: 'list', style: 'margin:12px 0' },
         switchRow('Psiphon', 'Запасной выход, когда сайты блокируют IP хостера', w.extras.psi, v => { w.extras.psi = v; }),
         switchRow('WARP', 'Выход через Cloudflare для сервисов, которые не любят IP дата-центров', w.extras.warp, v => { w.extras.warp = v; }),
-        p.script ? null : switchRow('Запасной XHTTP', 'Второй способ подключения, если основной режут', w.extras.xh, v => { w.extras.xh = v; })),
-      fld('Порт для клиентов', h('input', { class: 'inp mono', 'data-k': 'wport', style: 'max-width:160px', inputmode: 'numeric', placeholder: '443', value: w.port, oninput: e => { w.port = e.target.value.trim(); } }),
+        p.script ? null : switchRow('Запасной XHTTP', 'Второй способ подключения напрямую, если основной режут', w.extras.xh, v => { w.extras.xh = v; }),
+        switchRow('Уникальные настройки', 'У каждой ноды свой порт, TLS-отпечаток, маска и параметры XHTTP — без общего шаблона', w.stealth, v => { w.stealth = v; render(); })),
+      w.stealth ? null : fld('Порт для клиентов', h('input', { class: 'inp mono', 'data-k': 'wport', style: 'max-width:160px', inputmode: 'numeric', placeholder: '443', value: w.port, oninput: e => { w.port = e.target.value.trim(); } }),
         'Пусто — 443, как у обычного HTTPS.'))];
 }
 function switchRow(title, text, checked, onchange) {
@@ -192,7 +193,7 @@ function wizReview(w, items, cost) {
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row('Адреса', items.flatMap(({ loc }) => w.domains[loc]).join(', '), 'mono'),
       row('Сквады', (w.meta && w.meta.squads || []).filter(s => w.squads.has(s.uuid)).map(s => s.name).join(', ') || '—'),
-      row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.port || '443')),
+      row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.stealth ? 'свой у каждой ноды' : w.port || '443')),
     (w.dnsWarn || []).length ? h('div', { class: 'notice', style: 'background:var(--warn-soft);margin-bottom:16px' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
       h('div', { class: 'grow' }, h('b', null, 'Проверьте имена'), w.dnsWarn.map(x => h('div', null, x)))) : null,
     !own && bal != null ? (bal < cost ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('wallet')), h('div', { class: 'grow' }, h('b', null, `Не хватает ${rubK(cost - bal)}`),
@@ -205,7 +206,7 @@ async function wizSubmit(w, items) {
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
       ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : { idx: w.offer[loc] }) })),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
-    xhttp: w.extras.xh ? { enabled: true, mode: 'both' } : undefined };
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, stealth: !!w.stealth };
   try { const r = await api('deploy', 'POST', payload); w.ids = r.ids; w.err = ''; toast(`Запущено: ${pl(r.ids.length, 'установка', 'установки', 'установок')}`); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();

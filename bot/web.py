@@ -2364,7 +2364,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError(str(e)) from None
         if extras.get('xhttp') and p.get('script_id'):
             raise ApiError('Запасной XHTTP ставится только встроенным установщиком — у группы свой скрипт')
-        if extras.get('xhttp') and port == engine.XHTTP_PORT:
+        if extras.get('xhttp') and port == engine.XHTTP_PORT and not b.get('stealth'):
             raise ApiError(f'Порт {engine.XHTTP_PORT} занят запасным XHTTP — выберите другой порт для клиентов')
         period = str(b.get('period') or '1m')
         all_domains = [d for it in items for d in (it.get('domains') or [])]
@@ -2438,8 +2438,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             for loc, _, doms, *_ in plan:
                 doms_of.setdefault(loc, []).extend(doms)
             places = svc.host_places(order, doms_of, {x['uuid'] for x in meta['hosts']})
-        for host in hosts:
-            host.update({'final_mask': mask, 'port': port})
+        for host in hosts:  # уникальные настройки: порт, отпечаток и маску каждая нода выберет сама при установке
+            host.update({'stealth': True} if b.get('stealth') else {'final_mask': mask, 'port': port})
         ids = []
         for (loc, idx, doms, custom, servers), host in zip(plan, hosts):
             ids += await svc.create_jobs(store, runner, int(request['user']['id']), p['id'], cat, loc, idx, period, doms,

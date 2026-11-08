@@ -29,7 +29,8 @@ def xhttp_label(x) -> str:
 def extras_label(d: dict) -> str:
     port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
     parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + ([xhttp_label(d['xhttp'])] if d.get('xhttp') else []) + \
-        ([f'порт {port}'] if port not in (None, '', 443, '443') else [])
+        ([f'порт {port}'] if port not in (None, '', 443, '443') else []) + \
+        (['уникальные настройки'] if d.get('kind') != 'node' and (d.get('host') or {}).get('stealth') else [])
     return ', '.join(parts)
 
 
