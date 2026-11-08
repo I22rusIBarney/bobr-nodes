@@ -478,7 +478,8 @@ function vSettings(sec) {
 function setConnections() {
   const st = GD.set || (GD.set = { val: {}, res: {} }), S = D.st.settings || {};
   const groupsOf = [['Bobr Cloud', 'bcloud', ['bcloud_url', 'bcloud_token', 'bcloud_tg_id']], ['Cloudflare', 'cloudflare', ['cf_token']],
-    ['Gemini — разбор своих скриптов', 'gemini', ['gemini_key', 'gemini_model', 'gemini_proxy']], ['Установка', null, ['parallel', 'ssh_pubkey']]];
+    ['Gemini — разбор своих скриптов', 'gemini', ['gemini_key', 'gemini_model', 'gemini_proxy']],
+    ['GitHub — обновления бота, версии Xray и панели', 'github', ['github_token']], ['Установка', null, ['parallel', 'ssh_pubkey']]];
   const input = k => { const f = S[k]; if (!f) return null;
     return fld(f.label, h('input', { class: 'inp' + (k === 'parallel' ? '' : ' mono'), 'data-k': 'st-' + k, type: f.secret ? 'password' : 'text', autocomplete: 'off',
       value: st.val[k] ?? (f.secret ? '' : f.value || ''), placeholder: f.secret && f.set ? `сохранён ${f.hint} · введите новый, чтобы заменить` : '', oninput: e => { st.val[k] = e.target.value; } }), rich(f.help)); };

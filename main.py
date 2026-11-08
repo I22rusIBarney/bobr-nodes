@@ -60,6 +60,8 @@ async def main():
     if restored:
         logging.warning('восстановлено из копии: %s', backup.describe(restored))
     store = Store(f'{data_dir}/bot.db')
+    from bot import ghapi
+    ghapi.load(store)  # токен GitHub из «Подключений» — для всех запросов к API GitHub
     for env_key, key in SEED.items():
         # из .env берём, только если в админке ещё пусто или установщик выдал новый токен bcloud
         v = os.environ.get(env_key, '')

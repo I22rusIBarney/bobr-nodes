@@ -219,7 +219,8 @@ def xray_releases(timeout: float = 20) -> list[dict]:
     """Релизы Xray-core: [{tag, pre, date}], новые сверху; кэш на час."""
     if _xcache['list'] and time.time() - _xcache['at'] < 3600:
         return _xcache['list']
-    req = urllib.request.Request(XRAY_RELEASES, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
+    from . import ghapi
+    req = urllib.request.Request(XRAY_RELEASES, headers=ghapi.headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.loads(r.read().decode())
     out = [{'tag': x['tag_name'], 'pre': bool(x.get('prerelease')), 'date': (x.get('published_at') or '')[:10]}
