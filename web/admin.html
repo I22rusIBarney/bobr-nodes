@@ -1054,6 +1054,14 @@ function themeView() {
     row({ title: 'Новый', sub: 'пробная версия: обзор с проблемами и кнопками починки, все ноды одной таблицей', cls: 'wrap',
       right: ui === 'new' ? icon('check', 'check') : null, chevron: false, onClick: () => pickUi('new') })],
     'Можно переключаться в любой момент. Разделы, которых ещё нет в новом интерфейсе, открываются здесь.'));
+  if (isAdmin()) v.append(group('Для всех пользователей', [
+    row({ title: 'Применить моё оформление ко всем', sub: 'фон, эффект, прозрачность и картинка на главной станут у всех пользователей бота', cls: 'wrap',
+      onClick: async () => {
+        if (!await UI.ask({ title: 'Применить ко всем?', message: 'Личные настройки фона, эффекта, прозрачности и картинки у пользователей сбросятся на ваши. Потом каждый сможет поменять у себя.', buttons: [{ id: 'y', text: 'Применить' }] })) return;
+        const t = ST.theme, r = await UI.run(() => api('theme', 'POST', { scope: 'all', bg: t.bg, effect: t.effect, glass: t.glass, hero: t.hero }));
+        if (r) UI.toast('Оформление применено для всех');
+      } })],
+    'Тему и интерфейс для всех можно выбрать в новом интерфейсе: «Интерфейс и тема».'));
   if (!window.FX) { v.append(h('div', { class: 'notice bad' }, 'Не загрузился модуль оформления. Обновите страницу.')); return v; }
   const save = async patch => {
     const r = await UI.run(() => api('theme', 'POST', patch));

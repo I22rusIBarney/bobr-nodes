@@ -37,6 +37,7 @@ STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
           **{f'hero-{k}.webp': 'image/webp' for k in (f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night'))}}
 # картинка на главной: по сезону и времени суток (auto), одна из восьми или без картинки
 THEME_UIS = ('classic', 'new')  # интерфейс: классический или новый — каждый выбирает сам
+THEME_MODES = ('auto', 'light', 'dark')  # тема нового интерфейса: как в Telegram, светлая, тёмная
 THEME_HEROES = ('auto', 'none', *(f'{s}-{t}' for s in ('spring', 'summer', 'autumn', 'winter') for t in ('day', 'night')))
 # оформление, как в bcloud: фон и сезонные эффекты (auto — по календарю)
 THEME_BGS = ('none', 'aurora', 'night', 'ocean', 'sunset', 'forest', 'image')
@@ -314,18 +315,22 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         ctype = next(t for e, t in IMG_TYPES.values() if f.suffix == '.' + e)
         return web.FileResponse(f, headers={'Content-Type': ctype, 'Cache-Control': 'public, max-age=31536000, immutable'})
 
-    def theme_raw(uid: int) -> dict:
+    # оформление: общее (theme:global, задаёт администратор) и личное (theme:{uid} — только то, что пользователь менял сам);
+    # личное главнее общего. Старые общие ключи theme_bg и т.п. — самый нижний слой.
+    def theme_json(key: str) -> dict:
         try:
-            own = json.loads(store.get(f'theme:{uid}') or 'null')
+            v = json.loads(store.get(key) or 'null')
         except ValueError:
-            own = None
-        if isinstance(own, dict):
-            return own
-        return {'bg': store.get('theme_bg'), 'effect': store.get('theme_effect'), 'glass': store.get('theme_glass'),
-                'image': store.get('theme_bg_image')}
+            v = None
+        return v if isinstance(v, dict) else {}
 
-    def theme(uid: int = 0) -> dict:
-        t = theme_raw(uid)
+    def theme_raw(uid: int) -> dict:
+        legacy = {'bg': store.get('theme_bg'), 'effect': store.get('theme_effect'), 'glass': store.get('theme_glass'),
+                  'image': store.get('theme_bg_image')}
+        return {**{k: v for k, v in legacy.items() if v}, **theme_json('theme:global'), **theme_json(f'theme:{uid}')}
+
+    def theme(uid: int = 0, t: dict | None = None) -> dict:
+        t = theme_raw(uid) if t is None else t
         bg, effect = t.get('bg') or 'none', t.get('effect') or 'none'  # эффекты — только если выбрали сами
         try:
             glass = max(0, min(GLASS_MAX, int(t.get('glass') or 0)))
@@ -333,44 +338,79 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             glass = 0
         return {'bg': bg if bg in THEME_BGS else 'none', 'effect': effect if effect in THEME_EFFECTS else 'none',
                 'image': t.get('image') or '', 'glass': glass, 'hero': t.get('hero') if t.get('hero') in THEME_HEROES else 'auto',
-                'ui': t.get('ui') if t.get('ui') in THEME_UIS else 'classic'}
+                'ui': t.get('ui') if t.get('ui') in THEME_UIS else 'classic',
+                'mode': t.get('mode') if t.get('mode') in THEME_MODES else None}  # None — не выбрана: устройство решает само
 
-    def theme_put(uid: int, t: dict) -> dict:
-        store.set(f'theme:{uid}', json.dumps(t))
+    def theme_own_put(uid: int, ch: dict) -> dict:
+        own = theme_json(f'theme:{uid}')
+        own.update(ch)
+        store.set(f'theme:{uid}', json.dumps(own))
         return theme(uid)
 
+    def theme_global_put(ch: dict) -> None:
+        """Общее оформление: записать и снять у всех пользователей их личные значения этих же настроек —
+        чтобы изменение дошло до каждого сразу; дальше любой может снова поменять у себя."""
+        g = theme_json('theme:global')
+        g.update(ch)
+        store.set('theme:global', json.dumps(g))
+        for row in store._q("SELECT key FROM settings WHERE key LIKE 'theme:%' AND key != 'theme:global'"):
+            own = theme_json(row['key'])
+            if any(k in own for k in ch):
+                store.set(row['key'], json.dumps({k: v for k, v in own.items() if k not in ch}))
+
+    def theme_global_view() -> dict:
+        """Общее оформление для экрана администратора; set — какие настройки заданы (остальные — по умолчанию)."""
+        g = theme_json('theme:global')
+        return {**theme(t=g), 'set': sorted(g)}
+
     def own_bg(image: str) -> Path | None:
-        """Файл своей картинки пользователя (общая старая /media/bg — не его, её не удаляем)."""
+        """Файл своей картинки пользователя (общая старая /media/bg и картинка общего оформления — не его, их не удаляем)."""
         name = image.split('?')[0].rsplit('/', 1)[-1]
+        if image and image == theme_json('theme:global').get('image'):
+            return None
         return media / name if image.startswith('/media/bg/') and BG_NAME.fullmatch(name) else None
 
     @r.post('/api/theme')
     async def theme_save(request):
+        """Своё оформление; scope=all (только администратор) — общее для всех пользователей."""
         uid = uid_of(request)
         data = await body(request)
-        t = theme(uid)
+        everyone = data.get('scope') == 'all'
+        if everyone and not is_admin(request):
+            raise ApiError('Оформление для всех меняет только администратор', 403)
+        t, ch = theme(uid), {}
         if 'bg' in data:
             if data['bg'] not in THEME_BGS or (data['bg'] == 'image' and not t['image']):
                 raise ApiError('Такого фона нет')
-            t['bg'] = data['bg']
+            ch['bg'] = data['bg']
+            if everyone and data['bg'] == 'image':
+                ch['image'] = t['image']  # своя картинка администратора становится общей
         if 'effect' in data:
             if data['effect'] not in THEME_EFFECTS:
                 raise ApiError('Такого эффекта нет')
-            t['effect'] = data['effect']
+            ch['effect'] = data['effect']
         if 'hero' in data:
             if data['hero'] not in THEME_HEROES:
                 raise ApiError('Такой картинки нет')
-            t['hero'] = data['hero']
+            ch['hero'] = data['hero']
         if 'ui' in data:
             if data['ui'] not in THEME_UIS:
                 raise ApiError('Такого интерфейса нет')
-            t['ui'] = data['ui']
+            ch['ui'] = data['ui']
+        if 'mode' in data:
+            if data['mode'] not in THEME_MODES:
+                raise ApiError('Такой темы нет')
+            ch['mode'] = data['mode']
         if 'glass' in data:
             g = data['glass']
             if not isinstance(g, int) or isinstance(g, bool) or not 0 <= g <= GLASS_MAX:
                 raise ApiError(f'Прозрачность — от 0 до {GLASS_MAX}%')
-            t['glass'] = g
-        return J(theme_put(uid, t))
+            ch['glass'] = g
+        if everyone:
+            if ch:
+                theme_global_put(ch)
+            return J({**theme(uid), 'global': theme_global_view()})
+        return J(theme_own_put(uid, ch))
 
     @r.put('/api/theme/background')
     async def theme_bg_upload(request):
@@ -384,22 +424,21 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if not kind:
             raise ApiError('Подойдут JPG, PNG или WebP.')
         media.mkdir(parents=True, exist_ok=True)
-        t = theme(uid)
-        old = own_bg(t['image'])
+        old = own_bg(theme_json(f'theme:{uid}').get('image') or '')
         name = f'bg-{uid}-{secrets.token_hex(6)}.{kind[0]}'
         (media / name).write_bytes(data)
         if old:
             old.unlink(missing_ok=True)
-        return J(theme_put(uid, {**t, 'bg': 'image', 'image': f'/media/bg/{name}'}))
+        return J(theme_own_put(uid, {'bg': 'image', 'image': f'/media/bg/{name}'}))
 
     @r.delete('/api/theme/background')
     async def theme_bg_delete(request):
         uid = uid_of(request)
         t = theme(uid)
-        old = own_bg(t['image'])
+        old = own_bg(theme_json(f'theme:{uid}').get('image') or '')
         if old:
             old.unlink(missing_ok=True)
-        return J(theme_put(uid, {**t, 'image': '', 'bg': 'none' if t['bg'] == 'image' else t['bg']}))
+        return J(theme_own_put(uid, {'image': '', **({'bg': 'none'} if t['bg'] == 'image' else {})}))
 
     # ── состояние и настройки ──
     def settings_view() -> dict:
@@ -460,6 +499,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                for p in ps],
                   'issues': issues(request), 'bot_username': bot_username,
                   'security': security.info() if security and admin else None, 'theme': theme(uid_of(request)),
+                  'theme_global': theme_global_view() if admin else None,
                   'users': sum(1 for u in store.users() if not u.get('blocked')) if admin else None,
                   'host': ({'level': hostload.verdict()[0], 'cpu': hostload.now.get('cpu'), 'mem': hostload.now.get('mem')}
                            if admin and hostload else None),

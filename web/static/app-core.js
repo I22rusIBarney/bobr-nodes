@@ -239,7 +239,8 @@ document.addEventListener('keydown', e => {
 });
 window.addEventListener('scroll', () => { const t = $('.topbar'); t && t.classList.toggle('scrolled', window.scrollY > 4); }, { passive: true });
 
-/* ── тема: как в Telegram или своя (запоминается на этом устройстве) ── */
+/* ── тема: как в Telegram, светлая или тёмная. Выбор хранит бот (свой у каждого или общий от администратора),
+   устройство помнит копию — чтобы при открытии сразу показать нужную ── */
 const THEME_KEY = 'bn:app-theme';
 let themePref = 'auto';
 try { themePref = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) { /* без хранилища */ }
@@ -249,7 +250,12 @@ function applyTheme() {
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   try { if (tg && tg.isVersionAtLeast('6.1')) { const c = dark ? '#0E1421' : '#F3F4F7'; tg.setHeaderColor(c); tg.setBackgroundColor(c); } } catch (e) { /* старый клиент */ }
 }
-function setTheme(v) { themePref = v; try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* без хранилища */ } applyTheme(); }
+function setThemeLocal(v) { themePref = v; try { localStorage.setItem(THEME_KEY, v); } catch (e) { /* без хранилища */ } applyTheme(); }
+function setTheme(v) { setThemeLocal(v); api('theme', 'POST', { mode: v }).catch(() => {}); }
+function syncTheme(mode) {  // тема от бота; ещё не выбрана — выбор этого устройства запоминаем у бота
+  if (mode) { if (mode !== themePref) setThemeLocal(mode); }
+  else if (themePref !== 'auto') api('theme', 'POST', { mode: themePref }).catch(() => {});
+}
 mq.addEventListener('change', applyTheme);
 try { tg && tg.onEvent('themeChanged', applyTheme); } catch (e) { /* старый клиент */ }
 applyTheme();
