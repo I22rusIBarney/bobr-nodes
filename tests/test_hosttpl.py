@@ -130,3 +130,14 @@ def test_upload_body_read_whole_across_chunks():
     data = asyncio.run(go(10 ** 7))
     assert data == raw and len(ht.read_files('a.zip', data)) == 30
     assert len(asyncio.run(go(5000))) == 5001  # превышение лимита видно по лишнему байту
+
+
+def test_country_balancer_tags_from_wizard():
+    """Мастер: «По стране» с NORMAL (tags не передан) и без него (tags='') — теги хостов ноды."""
+    from bot import services as svc
+    with_n = svc.host_options('pl', 'balancer', None, 'PL')
+    without = svc.host_options('pl', 'balancer', '', 'PL')
+    multi = svc.host_options('de', 'balancer', None, '')
+    assert with_n['tags'] == ['PL', 'NORMAL'] and with_n['hidden'] and with_n['balancer']['tag'] == 'PL'
+    assert without['tags'] == ['PL'] and multi['tags'] == ['DE', 'NORMAL']
+    assert svc.host_options('pl', 'normal', 'NORMAL')['tags'] == ['NORMAL']
