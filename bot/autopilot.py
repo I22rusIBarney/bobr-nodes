@@ -926,44 +926,49 @@ class Autopilot:
 
     # ───────── новая версия бота ─────────
     async def check_panel_release(self) -> dict | None:
-        """Новый релиз панели Remnawave (новее и разобранного, и всех панелей групп) — разбор на русском администраторам:
-        что поменялось, не сломает ли бота, обновлять ли ноды. Без ключа Gemini — заметки релиза и проверка на «breaking»."""
+        """Новый релиз панели Remnawave — разбор на русском: что поменялось, не сломает ли бота и интеграции, обновлять
+        ли ноды. Администраторам — один раз на релиз (новее их панелей); владельцам своих групп — по их группе,
+        от версии их панели. Без ключа Gemini — пункты изменений и проверка на «breaking»."""
         from . import panelwatch as pw
-        from . import scripts as sc
         try:
             rels = await asyncio.to_thread(pw.releases)
         except Exception as e:  # noqa: BLE001 — GitHub недоступен: проверим в следующий раз
             log.info('panel releases: %s', e)
             return None
-        versions = []
+        if not rels:
+            return None
+        latest = rels[0]['tag']
+        ver_of: dict[int, str] = {}
         for prof in self.profiles():
             try:
-                v = await asyncio.to_thread(up.panel_version, self.panel(prof))
+                ver_of[prof['id']] = await asyncio.to_thread(up.panel_version, self.panel(prof))
             except Exception:  # noqa: BLE001
-                v = ''
-            if v and v not in versions:
-                versions.append(v)
+                ver_of[prof['id']] = ''
+        member = lambda p: bool(self.access and p.get('created_by') and self.access.member(int(p['created_by'])))  # noqa: E731
+        admin_vers = list(dict.fromkeys(v for p in self.profiles() if not member(p) and (v := ver_of.get(p['id']))))
         st = self.get(pw.KEY)
-        rel = pw.newer(rels, st.get('tag', ''), versions)
-        if rel:  # изменения всех релизов после вашей панели (или прошлого разбора) — из заметок backend
-            floor = max([v for v in versions + [st.get('tag', '')] if pw.semver(v)], key=pw.semver, default='')
-            rel = await asyncio.to_thread(pw.gather, rels, floor)
-        if not rel:
-            if not st.get('tag') and rels:  # первый запуск — запомнить, о прошлых релизах не сообщать
-                self.put(pw.KEY, {'tag': rels[0]['tag'], 'at': int(time.time())})
-            return None
-        ex = None
-        if self.store.get('gemini_key'):
-            try:
-                g = sc.Gemini(self.store.get('gemini_key'), self.store.get('gemini_model'), self.store.get('gemini_proxy'),
-                              base=self.store.get('gemini_base') or None)
-                ex = pw.clean(await g.ask(pw.SYSTEM, [{'role': 'user', 'text': pw.ai_input(rel, versions)}]))
-            except sc.ScriptError as e:
-                log.info('panel release ai: %s', e)
-        ex = ex or pw.plain(rel)
-        self.put(pw.KEY, {'tag': rel['tag'], 'at': int(time.time()), 'report': ex, 'versions': versions, 'url': rel['url']})
-        await self.notify.emit('panel.release', pw.text(rel, ex, versions))
-        return ex
+        out = None
+        rel = pw.newer(rels, st.get('tag', ''), admin_vers)
+        if rel:
+            floor = max([v for v in admin_vers + [st.get('tag', '')] if pw.semver(v)], key=pw.semver, default='')
+            got = await pw.report(self.store, rels, floor, admin_vers)
+            if got:
+                rel, out = got
+                self.put(pw.KEY, {'tag': latest, 'at': int(time.time()), 'report': out, 'versions': admin_vers, 'url': rel['url']})
+                await self.notify.emit('panel.release', pw.text(rel, out, admin_vers))
+        elif not st.get('tag'):  # первый запуск — запомнить, о прошлых релизах не сообщать
+            self.put(pw.KEY, {'tag': latest, 'at': int(time.time())})
+        for prof in self.profiles():  # свои группы пользователей: у них свои панели и свои версии
+            v = ver_of.get(prof['id'])
+            key = f'ap:prel:{prof["id"]}'
+            if not member(prof) or not pw.semver(v) or pw.semver(v) >= pw.semver(latest) or self.get(key).get('tag') == latest:
+                continue
+            got = await pw.report(self.store, rels, v, [v])
+            if got:
+                self.put(key, {'tag': latest, 'at': int(time.time())})
+                await self.notify.emit('panel.release_group', pw.text(got[0], got[1], [v]).replace(
+                    '🆕 <b>Вышла панель Remnawave', f'🆕 <b>{html.escape(prof.get("name", ""))}: вышла панель Remnawave', 1), prof)
+        return out
 
     async def check_new_version(self) -> None:
         """Вышла версия, прошедшая тесты, — один раз сказать администраторам с кнопками «сейчас» и «ночью»."""

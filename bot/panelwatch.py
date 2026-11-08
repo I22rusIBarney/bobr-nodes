@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -21,15 +22,22 @@ def semver(tag: str) -> tuple[int, int, int] | None:
     return tuple(int(x) for x in m.groups()) if m else None
 
 
+_rcache: dict = {'at': 0.0, 'list': []}
+
+
 def releases(timeout: float = 20) -> list[dict]:
-    """Стабильные релизы панели, новые сверху: [{tag, name, body, url, date}]."""
+    """Стабильные релизы панели, новые сверху: [{tag, name, body, url, date}]; кэш на час."""
+    if _rcache['list'] and time.time() - _rcache['at'] < 3600:
+        return _rcache['list']
     req = urllib.request.Request(RELEASES, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.loads(r.read().decode())
     out = [{'tag': x['tag_name'], 'name': x.get('name') or x['tag_name'], 'body': (x.get('body') or '')[:20000],
             'url': x.get('html_url') or '', 'date': (x.get('published_at') or '')[:10]}
            for x in data if isinstance(x, dict) and semver(x.get('tag_name')) and not x.get('prerelease') and not x.get('draft')]
-    return sorted(out, key=lambda x: semver(x['tag']), reverse=True)
+    out = sorted(out, key=lambda x: semver(x['tag']), reverse=True)
+    _rcache.update(at=time.time(), list=out)
+    return out
 
 
 BACKEND = 'https://api.github.com/repos/remnawave/backend/releases/tags/{tag}'
@@ -104,9 +112,13 @@ SYSTEM = """Ты помогаешь администратору Telegram-бот
 - bot_risk — "none" | "low" | "high": может ли это сломать работу бота (переименованы/удалены поля или методы из
   списка бота, изменился формат ответа, обязательные новые поля). Не выдумывай: если в заметках этого нет — "none" или "low";
 - bot_why — одно предложение, почему такая оценка (назови методы, если затронуты);
+- api_risk — "none" | "low" | "high": затронет ли изменение API сторонние интеграции — например Telegram-боты продажи
+  подписок, которые создают пользователей, продлевают подписки, меняют сквады и лимиты (методы users, subscriptions,
+  internal-squads, auth). api_why — одно предложение, что именно им проверить;
 - node_update — нужно ли обновлять ноды вместе с панелью (true/false) и node_why — коротко почему;
 - actions — 1–4 шага, что сделать администратору (например «обновить панель, потом ноды через бота»).
-Ответ — строго JSON: {"summary": "", "changes": [], "bot_risk": "", "bot_why": "", "node_update": false, "node_why": "", "actions": []}"""
+Ответ — строго JSON: {"summary": "", "changes": [], "bot_risk": "", "bot_why": "", "api_risk": "", "api_why": "",
+"node_update": false, "node_why": "", "actions": []}"""
 
 
 def ai_input(rel: dict, versions: list[str]) -> str:
@@ -117,8 +129,10 @@ def ai_input(rel: dict, versions: list[str]) -> str:
 
 def clean(raw: dict) -> dict:
     risk = raw.get('bot_risk') if raw.get('bot_risk') in ('none', 'low', 'high') else 'low'
+    api = raw.get('api_risk') if raw.get('api_risk') in ('none', 'low', 'high') else 'low'
     return {'summary': str(raw.get('summary') or '')[:1200], 'changes': [str(x)[:300] for x in (raw.get('changes') or [])][:8],
             'bot_risk': risk, 'bot_why': str(raw.get('bot_why') or '')[:400], 'node_update': bool(raw.get('node_update')),
+            'api_risk': api, 'api_why': str(raw.get('api_why') or '')[:400],
             'node_why': str(raw.get('node_why') or '')[:300], 'actions': [str(x)[:300] for x in (raw.get('actions') or [])][:4]}
 
 
@@ -128,11 +142,14 @@ def plain(rel: dict) -> dict:
     lines.sort(key=lambda x: not x.startswith('⚠️'))
     breaking = bool(re.search(r'breaking|deprecat|removed|renamed', rel['body'], re.I))
     return {'summary': '', 'changes': [x[:200] for x in lines[:10]], 'bot_risk': 'high' if breaking else 'none',
+            'api_risk': 'high' if breaking else 'none', 'api_why': 'есть ломающие изменения — проверьте свои интеграции' if breaking else '',
             'bot_why': 'в заметках есть «breaking/removed/renamed» — проверьте бота после обновления' if breaking else '',
             'node_update': False, 'node_why': '', 'actions': [], 'plain': True}
 
 
 RISK = {'none': '🟢 Бота не затронет', 'low': '🟡 Бота вряд ли затронет', 'high': '🔴 Может сломать работу бота'}
+API_RISK = {'none': '🟢 Интеграциям (ботам продажи подписок и т.п.) ничего не грозит', 'low': '🟡 Интеграции вряд ли заденет',
+            'high': '🔴 Интеграции по API стоит проверить'}
 
 
 def text(rel: dict, ex: dict, versions: list[str]) -> str:
@@ -147,6 +164,8 @@ def text(rel: dict, ex: dict, versions: list[str]) -> str:
         out += ['', '<b>Что нового' + (' (из заметок релиза, на английском)' if ex.get('plain') else '') + ':</b>']
         out += ['• ' + e(x) for x in ex['changes']]
     out += ['', RISK[ex['bot_risk']] + (f' — {e(ex["bot_why"])}' if ex.get('bot_why') else '')]
+    if ex.get('api_risk'):
+        out.append(API_RISK[ex['api_risk']] + (f' — {e(ex["api_why"])}' if ex.get('api_why') else ''))
     if not ex.get('plain'):
         out.append(('⬆️ Ноды стоит обновить вместе с панелью' if ex.get('node_update') else '✅ Ноды обновлять не обязательно')
                    + (f' — {e(ex["node_why"])}' if ex.get('node_why') else ''))
@@ -164,3 +183,30 @@ def newer(rels: list[dict], seen: str, versions: list[str]) -> dict | None:
     top = rels[0]
     floor = max([semver(v) for v in versions if semver(v)] + ([semver(seen)] if semver(seen) else []), default=None)
     return top if floor is not None and semver(top['tag']) > floor else None  # ничего не знаем — только запомнить
+
+
+async def report(store, rels: list[dict], floor: str, versions: list[str]) -> tuple[dict, dict] | None:
+    """Разбор последнего релиза для панели версии floor: (релиз с изменениями за все версии после floor, итог).
+    Кэш в базе по паре «релиз + floor»: одна версия — один запрос к нейросети на всех. None — floor уже последний."""
+    import asyncio
+
+    from . import scripts as sc
+    if not rels or (semver(floor) and semver(rels[0]['tag']) <= semver(floor)):
+        return None
+    key = f'{KEY}:{rels[0]["tag"]}:{floor or "-"}'
+    hit = json.loads(store.get(key) or 'null')
+    if hit:
+        return hit['rel'], hit['ex']
+    rel = await asyncio.to_thread(gather, rels, floor)
+    ex = None
+    if store.get('gemini_key'):
+        try:
+            g = sc.Gemini(store.get('gemini_key'), store.get('gemini_model'), store.get('gemini_proxy'), base=store.get('gemini_base') or None)
+            ex = clean(await g.ask(SYSTEM, [{'role': 'user', 'text': ai_input(rel, versions)}]))
+        except sc.ScriptError:
+            ex = None
+    ex = ex or plain(rel)
+    small = {k: rel[k] for k in ('tag', 'name', 'url', 'date', 'span')}
+    if not ex.get('plain'):  # без нейросети не кэшируем: появится ключ — разберём по-настоящему
+        store.set(key, json.dumps({'rel': small, 'ex': ex}, ensure_ascii=False))
+    return small, ex

@@ -74,3 +74,48 @@ def test_bullets_and_gather(monkeypatch):
     monkeypatch.setattr(pw, 'backend_notes', lambda tag: {'3.5.0': BACKEND}.get(tag, ''))
     g = pw.gather(R, '3.4.6')
     assert g['tag'] == '3.5.0' and g['span'] == ['3.5.0', '3.4.7'] and 'Add hosts bulk API' in g['body'] and '* fix' in g['body']
+
+
+def test_group_owner_notified_from_own_version(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    store.save_profile({'name': 'Моя', 'panel_url': 'https://admin', 'panel_token': 't'})
+    pid_u = store.save_profile({'name': 'Васина', 'panel_url': 'https://vasya', 'panel_token': 't', 'created_by': 77})
+
+    class Acc:
+        admins = {1}
+
+        def member(self, uid):
+            return uid == 77
+
+        def recipients(self, prof):
+            return [77] if prof.get('created_by') else [1]
+    pilot = ap.Autopilot(store, None, None, Acc())
+    sent = []
+
+    async def emit(type_, text, prof=None, *a, **k):
+        sent.append((type_, (prof or {}).get('id'), text))
+    pilot.notify.emit = emit
+    monkeypatch.setattr(pw, 'releases', lambda: R)
+    monkeypatch.setattr(pw, 'backend_notes', lambda tag: '')
+    monkeypatch.setattr(up, 'panel_version', lambda panel: '3.5.0' if 'admin' in panel.url else '3.4.7')
+    asyncio.run(pilot.check_panel_release())
+    assert [(t, p) for t, p, _ in sent] == [('panel.release_group', pid_u)]       # у админа уже 3.5.0 — ему не пишем
+    assert 'Васина: вышла панель Remnawave 3.5.0' in sent[0][2] and 'у вас 3.4.7' in sent[0][2]
+    asyncio.run(pilot.check_panel_release())
+    assert len(sent) == 1                                                          # второй раз — тишина
+
+
+def test_report_cache(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    calls = []
+
+    async def ask(self, system, turns):
+        calls.append(1)
+        return {'summary': 's', 'changes': [], 'bot_risk': 'none', 'api_risk': 'high', 'api_why': 'users'}
+    monkeypatch.setattr(sc.Gemini, 'ask', ask)
+    monkeypatch.setattr(pw, 'backend_notes', lambda tag: '')
+    store.set('gemini_key', 'k')
+    a = asyncio.run(pw.report(store, R, '3.4.7', ['3.4.7']))
+    b = asyncio.run(pw.report(store, R, '3.4.7', ['3.4.7']))
+    assert a == b and a[1]['api_risk'] == 'high' and calls == [1]                 # одна версия — один запрос
+    assert asyncio.run(pw.report(store, R, '3.5.0', [])) is None
