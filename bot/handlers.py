@@ -710,14 +710,15 @@ async def update_button(c: CallbackQuery, store: Store, role: str = 'admin', aut
     rem = await su.check_remote(data_dir, force=True)
     if rem['state'] == 'latest':
         msg = 'Уже стоит последняя версия'
-    elif rem['state'] != 'ready':
-        msg = 'Новая версия сейчас недоступна — попробуйте позже'
+    elif rem['state'] not in ('ready', 'testing'):  # идут тесты — обновление на сервере их дождётся
+        msg = 'Новая версия не прошла тесты — обновление недоступно' if rem['state'] == 'failed' else 'GitHub не ответил — попробуйте позже'
     elif c.data == 'upd:now':
         su.request_now(store, data_dir, rem['sha'])
         from . import audit
         audit.log(store, c.from_user.id, 'update', 'Обновил бота', detail=f'из Telegram, версия {rem.get("version") or rem["sha"]}',
                   who=audit.who_of(c.from_user))
-        msg = 'Обновляюсь — перезапуск через минуту, потом напишу, что нового'
+        msg = ('Новая версия ещё проходит тесты на GitHub — обновлюсь, как только они пройдут (обычно 2–3 минуты), потом напишу, что нового'
+               if rem['state'] == 'testing' else 'Обновляюсь — перезапуск через минуту, потом напишу, что нового')
     else:
         msg = f'Обновлюсь ночью в {su.request_night(store, rem["sha"])["hour"]:02d}:00'
     try:
