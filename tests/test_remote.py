@@ -140,3 +140,19 @@ def test_own_key_saved(tmp_path):
     subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', 'secret', '-f', str(tmp_path / 'enc')], check=True)
     with pytest.raises(ValueError, match='парольной фразой'):
         sshaccess.clean({'key': 'own', 'key_text': (tmp_path / 'enc').read_text()}, None, tmp_path)
+
+
+def test_resolve_many_slow_domain_does_not_block(monkeypatch):
+    """Медленный DNS одного домена не держит страницу: ждём не дольше timeout, остальные — как есть."""
+    import time
+
+    from bot import engine
+
+    def fake(h):
+        if h == 'slow.example':
+            time.sleep(2)
+        return {'1.2.3.4'}
+    monkeypatch.setattr(engine, '_resolve_v4', fake)
+    t = time.monotonic()
+    r = engine.resolve_many(['a.example', 'slow.example', '5.6.7.8'], timeout=0.3)
+    assert time.monotonic() - t < 1 and r['a.example'] == {'1.2.3.4'} and r['slow.example'] == set() and r['5.6.7.8'] == {'5.6.7.8'}

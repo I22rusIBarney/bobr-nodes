@@ -733,14 +733,18 @@ def _resolve_v4(host: str) -> set[str]:
     return ips
 
 
-def resolve_many(hosts) -> dict[str, set[str]]:
-    """IPv4 адреса доменов — параллельно и с кэшем на 2 минуты."""
+def resolve_many(hosts, timeout: float = 3) -> dict[str, set[str]]:
+    """IPv4 адреса доменов — параллельно и с кэшем на 2 минуты. Кто не ответил за timeout — пусто сейчас
+    (резолв доходит в фоне и ляжет в кэш): один медленный домен не держит страницу."""
     out = {h: {h} for h in set(hosts) if h and is_ip(h)}
     names = [h for h in set(hosts) if h and h not in out]
     if names:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=min(16, len(names))) as ex:
-            out.update(zip(names, ex.map(_resolve_v4, names)))
+        from concurrent.futures import ThreadPoolExecutor, wait
+        ex = ThreadPoolExecutor(max_workers=min(16, len(names)))
+        fs = {ex.submit(_resolve_v4, n): n for n in names}
+        done, _ = wait(fs, timeout=timeout)
+        out.update({fs[f]: f.result() if f in done else set() for f in fs})
+        ex.shutdown(wait=False)
     return out
 
 

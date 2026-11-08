@@ -15,7 +15,9 @@ let pollTimer = 0;
 const CACHE_KEY = 'bn:cache', CACHE_TTL = 86400e3;
 function cacheSave() {
   if (!D.st || D.st.role === 'paused') return;
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), me: D.st.me_id, st: D.st, nodes: D.nodes, mon: D.mon, jobs: D.jobs, wallet: D.wallet, rent: D.rent })); }
+  const detail = {};  // подробности открытых нод — повторное открытие без ожидания (в них нет секретов: доступ SSH — только вид)
+  for (const [k, v] of Object.entries(D.detail || {})) if (v && v.d) detail[k] = { d: v.d, at: 0 };
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), me: D.st.me_id, st: D.st, nodes: D.nodes, mon: D.mon, jobs: D.jobs, wallet: D.wallet, rent: D.rent, detail })); }
   catch (e) { /* переполнено или недоступно — без кэша */ }
 }
 function cacheLoad() {
@@ -23,7 +25,7 @@ function cacheLoad() {
   try { c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { return; }
   const me = tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id;
   if (!c || !c.st || Date.now() - c.at > CACHE_TTL || (me && c.me && me !== c.me)) return;
-  Object.assign(D, { st: c.st, nodes: c.nodes || {}, mon: c.mon, jobs: c.jobs || [], wallet: c.wallet, rent: c.rent || {}, loading: false, cachedAt: c.at });
+  Object.assign(D, { st: c.st, nodes: c.nodes || {}, mon: c.mon, jobs: c.jobs || [], wallet: c.wallet, rent: c.rent || {}, detail: c.detail || {}, loading: false, cachedAt: c.at });
 }
 cacheLoad();
 /* как часто что обновлять: статусы и задачи меняются часто, ноды — из кэша панели на сервере,
@@ -548,8 +550,10 @@ function postmark(n) {
 }
 function loadDetail(n) {
   if (D.detail[n.id] && (D.detail[n.id].loading || Date.now() - D.detail[n.id].at < 20000)) return;
-  D.detail[n.id] = { loading: true, at: Date.now() };
-  api(`profiles/${n.pid}/nodes/${n.uuid}`).then(r => { D.detail[n.id] = { d: r, at: Date.now() }; }).catch(e => { D.detail[n.id] = { err: e.message, at: Date.now() }; }).then(() => render(true));
+  const prev = (D.detail[n.id] || {}).d;  // прежние (из кэша) — на экране, пока грузятся свежие
+  D.detail[n.id] = { d: prev, loading: true, at: Date.now() };
+  api(`profiles/${n.pid}/nodes/${n.uuid}`).then(r => { D.detail[n.id] = { d: r, at: Date.now() }; cacheSave(); })
+    .catch(e => { D.detail[n.id] = prev ? { d: prev, at: Date.now() } : { err: e.message, at: Date.now() }; }).then(() => render(true));
 }
 function drawerNode(n) {
   loadDetail(n);

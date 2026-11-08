@@ -975,14 +975,19 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             if not bd.get('server_id'):
                 return None
             bc = {'server_id': bd['server_id'], 'price_kop': None}
-            try:
-                srv = await bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))
+            try:  # цена смены IP — подсказка, страницу дольше 5 с не держим
+                srv = await asyncio.wait_for(bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id'])), 5)
                 bc['price_kop'] = srv.get('change_ip_price_kop')
             except BcloudError as e:
                 bc['error'] = str(e)
+            except asyncio.TimeoutError:
+                pass
             return bc
-        try:  # поиск хостов ноды (DNS) и Bobr Cloud — тоже параллельно
-            (hosts, ip, dom), bc = await asyncio.gather(asyncio.to_thread(own_hosts), bcloud_info())
+
+        ip0 = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else '')
+        try:  # хосты ноды (DNS), Bobr Cloud и сеть ноды (RIPEstat) — одновременно
+            (hosts, ip, dom), bc, net = await asyncio.gather(asyncio.to_thread(own_hosts), bcloud_info(),
+                                                             node_net(p['id'], n['address'], ip0))
         except engine.StepError as e:
             raise ApiError(f'Панель: {e}') from None
         return J({'uuid': n['uuid'], 'name': n['name'], 'address': n['address'], 'connected': bool(n.get('isConnected')),
@@ -1001,7 +1006,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'load': autopilot.load_of(p['id'], uuid, hist=True) if autopilot else {},
                   'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),
                   'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']),
-                  'net': await node_net(p['id'], n['address'], ip),
+                  'net': net if ip0 or not ip else await node_net(p['id'], n['address'], ip),
                   'stale': stale})
 
     async def node_net(pid: int, addr: str, ip: str) -> dict:
@@ -1010,7 +1015,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         info = None
         if ip:  # RIPEstat отвечает не мгновенно: страницу не держим, ответ всё равно ляжет в кэш
             try:
-                info = await asyncio.wait_for(asyncio.to_thread(banlab.cached_info, store, ip), 4)
+                info = await asyncio.wait_for(asyncio.to_thread(banlab.cached_info, store, ip), 2)
             except asyncio.TimeoutError:
                 info = None
         return {**{k: (info or {}).get(k, '') for k in ('asn', 'holder', 'prefix')}, 'net24': banlab.net24(ip or ''),
