@@ -194,6 +194,7 @@ function wizNamesStep(w, items) {
       : !w.meta.squads.length ? h('div', { class: 'err' }, 'В панели нет сквадов — создайте сквад в Remnawave, иначе пользователи не увидят новые ноды.')
       : [h('div', { class: 'chips' }, w.meta.squads.map(s => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(w.squads.has(s.uuid)), onclick: () => { w.squads.has(s.uuid) ? w.squads.delete(s.uuid) : w.squads.add(s.uuid); render(); } }, s.name))),
         h('div', { class: 'hint', style: 'margin-top:8px' }, w.squads.size ? 'Пользователи этих сквадов увидят новые ноды.' : 'Выберите хотя бы один сквад — без него ноды не будут готовы.')]),
+    wizHosts(w, items),
     h('details', { class: 'more-opts', open: UI.advOpen || null, ontoggle: e => { UI.advOpen = e.target.open; } },
       h('summary', null, 'Дополнительно', h('span', { class: 'faint', style: 'font-weight:400' }, ' — дополнения и порт, у большинства не меняются')),
       h('div', { class: 'list', style: 'margin:12px 0' },
@@ -204,6 +205,36 @@ function wizNamesStep(w, items) {
         switchRow('Уникальные настройки', 'У каждой ноды свой порт, TLS-отпечаток, маска и параметры XHTTP — без общего шаблона', w.stealth, v => { w.stealth = v; render(); })),
       w.stealth ? null : fld('Порт для клиентов', h('input', { class: 'inp mono', 'data-k': 'wport', style: 'max-width:160px', inputmode: 'numeric', placeholder: '443', value: w.port, oninput: e => { w.port = e.target.value.trim(); } }),
         'Пусто — 443, как у обычного HTTPS.'))];
+}
+/* хосты в панели: обычные, общий балансировщик по тегу (NORMAL) или балансировщик страны (скрытые хосты с тегом
+   страны и, по желанию, NORMAL; шаблон Balancer_<тег> и видимый хост бот создаст, если их ещё нет). Выбор — на группу. */
+const HKEY = pid => 'bn:hosts:' + pid;
+function wizHostsState(w) {
+  if (w.hosts && w.hosts.pid === w.pid) return w.hosts;
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem(HKEY(w.pid)) || '{}'); } catch (e) { /* без хранилища */ }
+  return (w.hosts = { pid: w.pid, mode: saved.mode || 'simple', tags: saved.tags || 'NORMAL', normal: saved.normal !== false, tag: '' });
+}
+function wizHostsSave(H) { try { localStorage.setItem(HKEY(H.pid), JSON.stringify({ mode: H.mode, tags: H.tags, normal: H.normal })); } catch (e) { /* без хранилища */ } }
+function wizHosts(w, items) {
+  const H = wizHostsState(w), set = p => { Object.assign(H, p); wizHostsSave(H); render(); };
+  const one = items.length === 1, ctag = one ? (H.tag || items[0].loc).toUpperCase() : '';
+  const tagsOf = () => items.map(i => (one ? ctag : i.loc.toUpperCase()) + (H.normal ? ' + NORMAL' : '')).join(', ');
+  return h('div', { class: 'block' }, h('h4', null, 'Хосты в панели'),
+    h('div', { class: 'seg-row', style: 'margin-bottom:10px' }, seg([{ v: 'simple', l: 'Обычные' }, { v: 'normal', l: 'Общий тег' }, { v: 'balancer', l: 'По стране' }], H.mode, v => set({ mode: v }), 'Хосты')),
+    H.mode === 'normal' ? [fld('Теги хостов', h('input', { class: 'inp mono', 'data-k': 'wtags', value: H.tags, placeholder: 'NORMAL', style: 'max-width:240px',
+        oninput: e => { H.tags = e.target.value.toUpperCase(); wizHostsSave(H); } }), 'Видимые хосты с этим тегом подхватит ваш общий балансировщик (авто-выбор).')]
+    : H.mode === 'balancer' ? [
+      one ? fld('Тег страны', h('input', { class: 'inp mono', 'data-k': 'wctag', value: ctag, style: 'max-width:160px', oninput: e => { H.tag = e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ''); } }),
+        'Обычно — код страны. Если балансировщика с этим тегом в панели ещё нет, бот создаст шаблон и видимый хост страны.') : null,
+      h('div', { class: 'list', style: 'margin-bottom:8px' }, switchRow('Ещё и тег NORMAL', 'Чтобы нода попала и в общий авто-выбор', H.normal, v => set({ normal: v }))),
+      h('div', { class: 'hint' }, `Хосты нод — скрытые, теги: ${tagsOf()}. Клиенты видят хост-балансировщик страны.`)]
+    : h('div', { class: 'hint' }, 'Видимые хосты без тегов — по одному на ноду.'));
+}
+function wizHostsPayload(w, items) {
+  const H = wizHostsState(w);
+  if (H.mode === 'normal') return { host_mode: 'normal', tags: H.tags || 'NORMAL' };
+  if (H.mode === 'balancer') return { host_mode: 'balancer', tags: H.normal ? undefined : '', balancer_tag: items.length === 1 ? (H.tag || items[0].loc).toUpperCase() : '' };
+  return { host_mode: 'simple' };
 }
 function switchRow(title, text, checked, onchange) {
   return h('label', { class: 'switch' }, h('span', { class: 'grow' }, h('b', null, title), text ? h('span', null, text) : null), toggle(checked, onchange, title));
@@ -223,6 +254,7 @@ function wizReview(w, items, cost) {
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row('Адреса', items.flatMap(({ loc }) => w.domains[loc]).join(', '), 'mono'),
       row('Сквады', (w.meta && w.meta.squads || []).filter(s => w.squads.has(s.uuid)).map(s => s.name).join(', ') || '—'),
+      row('Хосты', { simple: 'обычные', normal: 'тег ' + (wizHostsState(w).tags || 'NORMAL'), balancer: 'по стране, скрытые' }[wizHostsState(w).mode]),
       row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.stealth ? 'свой у каждой ноды' : w.port || '443')),
     (w.dnsWarn || []).length ? h('div', { class: 'notice', style: 'background:var(--warn-soft);margin-bottom:16px' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
       h('div', { class: 'grow' }, h('b', null, 'Проверьте имена'), w.dnsWarn.map(x => h('div', null, x)))) : null,
@@ -237,7 +269,8 @@ async function wizSubmit(w, items) {
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
       ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : { idx: w.offer[loc] }) })),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
-    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined, stealth: !!w.stealth };
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined, stealth: !!w.stealth,
+    ...wizHostsPayload(w, items) };
   try { const r = await api('deploy', 'POST', payload); w.ids = r.ids; w.err = ''; toast(`Запущено: ${pl(r.ids.length, 'установка', 'установки', 'установок')}`); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();
@@ -248,7 +281,7 @@ async function wizSubmitSsh(w, items) {
     ...(x.auth === 'key' ? { key: 'own', key_text: x.key_text } : { key: '', password: x.password }),
     domain: (w.domains[loc] || [])[0], squads: [...w.squads], stealth: !!w.stealth, ...(w.stealth ? {} : { port_client: w.port || null }),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
-    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined };
+    xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined, ...wizHostsPayload(w, items) };
   try { const r = await api('deploy/own', 'POST', payload); w.ids = r.ids; w.err = ''; x.password = x.key_text = ''; toast('Установка запущена', r.domain); refreshSoon(); }
   catch (e) { w.err = e.message; }
   render();
