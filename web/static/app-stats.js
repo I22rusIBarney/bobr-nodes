@@ -207,7 +207,7 @@ function vHosts() {
     el.disabled = true;
     try { await api(`profiles/${p.id}/hosts/watch`, 'POST', { uuid: x.uuid, on }); x.watched = on; if (!on) x.mon = null;
       toast(on ? 'Хост проверяется' : 'Хост больше не проверяется', on ? 'Первые результаты — после следующего опроса чекеров (до 5 минут)' : ''); render(); }
-    catch (e) { toast('Не сохранилось', e.message, 'bad'); }
+    catch (e) { toast('Не сохранилось', e.message, 'bad'); el.checked = !on; }  // вернуть переключатель как было
     el.disabled = false;
   };
   const row = (p, x) => {

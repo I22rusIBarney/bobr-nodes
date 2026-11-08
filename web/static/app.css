@@ -288,7 +288,7 @@ textarea.inp { height: auto; padding: 10px 12px; resize: vertical; min-height: 8
 .switch span { color: var(--ink-2); font-size: 13px; }
 .tg { position: relative; width: 40px; height: 24px; flex: none; }
 .tg input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
-.tg i { position: absolute; inset: 0; border-radius: 12px; background: var(--rule-2); transition: background var(--t); }
+.tg i { position: absolute; inset: 0; pointer-events: none; border-radius: 12px; background: var(--rule-2); transition: background var(--t); }
 .tg i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, .25); transition: transform var(--t) var(--ease); }
 .tg input:checked + i { background: var(--air-blue); }
 .tg input:checked + i::after { transform: translateX(16px); }
