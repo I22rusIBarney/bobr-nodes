@@ -34,6 +34,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'node.version':     ('nodes', 'Новая версия ноды или Xray', BELL, False, False),
     'panel.down':       ('panels', 'Панель не отвечает', TG, True, False),
     'panel.up':         ('panels', 'Панель снова отвечает', TG, False, False),
+    'panel.release':    ('panels', 'Новый релиз панели Remnawave: что поменялось', TG, False, True),
     'panel.restart':    ('panels', 'Панель перезапустилась', BELL, False, False),
     'panel.version':    ('panels', 'Панель обновилась', TG, False, False),
     'task.autoupdate':  ('tasks', 'Итог автообновления нод', TG, False, False),

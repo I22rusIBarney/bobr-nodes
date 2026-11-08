@@ -353,6 +353,7 @@ class Autopilot:
             self._bg_task(self.check_rent())
             self._bg_task(self.check_new_version())
             self._bg_task(self.report_cleanup())
+            self._bg_task(self.check_panel_release())
         if now - self._preset_at >= PRESET_EVERY:
             self._preset_at = now
             self._bg_task(self.refresh_presets())
@@ -924,6 +925,46 @@ class Autopilot:
                 log.info('preset %s group %s: %d → %d', pid, prof['id'], len(old or []), len(fresh))
 
     # ───────── новая версия бота ─────────
+    async def check_panel_release(self) -> dict | None:
+        """Новый релиз панели Remnawave (новее и разобранного, и всех панелей групп) — разбор на русском администраторам:
+        что поменялось, не сломает ли бота, обновлять ли ноды. Без ключа Gemini — заметки релиза и проверка на «breaking»."""
+        from . import panelwatch as pw
+        from . import scripts as sc
+        try:
+            rels = await asyncio.to_thread(pw.releases)
+        except Exception as e:  # noqa: BLE001 — GitHub недоступен: проверим в следующий раз
+            log.info('panel releases: %s', e)
+            return None
+        versions = []
+        for prof in self.profiles():
+            try:
+                v = await asyncio.to_thread(up.panel_version, self.panel(prof))
+            except Exception:  # noqa: BLE001
+                v = ''
+            if v and v not in versions:
+                versions.append(v)
+        st = self.get(pw.KEY)
+        rel = pw.newer(rels, st.get('tag', ''), versions)
+        if rel:  # изменения всех релизов после вашей панели (или прошлого разбора) — из заметок backend
+            floor = max([v for v in versions + [st.get('tag', '')] if pw.semver(v)], key=pw.semver, default='')
+            rel = await asyncio.to_thread(pw.gather, rels, floor)
+        if not rel:
+            if not st.get('tag') and rels:  # первый запуск — запомнить, о прошлых релизах не сообщать
+                self.put(pw.KEY, {'tag': rels[0]['tag'], 'at': int(time.time())})
+            return None
+        ex = None
+        if self.store.get('gemini_key'):
+            try:
+                g = sc.Gemini(self.store.get('gemini_key'), self.store.get('gemini_model'), self.store.get('gemini_proxy'),
+                              base=self.store.get('gemini_base') or None)
+                ex = pw.clean(await g.ask(pw.SYSTEM, [{'role': 'user', 'text': pw.ai_input(rel, versions)}]))
+            except sc.ScriptError as e:
+                log.info('panel release ai: %s', e)
+        ex = ex or pw.plain(rel)
+        self.put(pw.KEY, {'tag': rel['tag'], 'at': int(time.time()), 'report': ex, 'versions': versions, 'url': rel['url']})
+        await self.notify.emit('panel.release', pw.text(rel, ex, versions))
+        return ex
+
     async def check_new_version(self) -> None:
         """Вышла версия, прошедшая тесты, — один раз сказать администраторам с кнопками «сейчас» и «ночью»."""
         if not self.data_dir:
