@@ -65,7 +65,8 @@ def auto_cfg(prof: dict) -> dict:
             'bal_days': int(a.get('bal_days', 7)),
             # автомасштабирование: off | ask | auto, сколько нод бот может держать докупленными сам,
             # и сколько рублей должно остаться на балансе после покупки
-            'scale': a.get('scale') if a.get('scale') in ('off', 'ask', 'auto') else 'off',
+            # «докупить сам» больше не покупает без подтверждения — это то же, что «спросить»
+            'scale': 'ask' if a.get('scale') == 'auto' else a.get('scale') if a.get('scale') in ('off', 'ask') else 'off',
             'scale_max': int(a.get('scale_max', 2)), 'scale_floor': int(a.get('scale_floor', 500)),
             # заполнение по онлайну: сколько пользователей одновременно нода тянет (0 — не следить)
             'online_max': int(a.get('online_max', 0))}
@@ -101,8 +102,8 @@ def clean_auto(raw: dict, cur: dict) -> dict:
             a[k] = v
     if 'scale' in raw:
         if raw['scale'] not in ('off', 'ask', 'auto'):
-            raise ValueError('Автомасштабирование: выкл., спросить или сам')
-        a['scale'] = raw['scale']
+            raise ValueError('Автомасштабирование: выкл. или предлагать докупить')
+        a['scale'] = 'ask' if raw['scale'] == 'auto' else raw['scale']
     return a
 
 
@@ -513,17 +514,20 @@ class Autopilot:
         return {'cat': cat, 'loc': loc, 'L': L, 'idx': idx, 'custom': custom, 'price': price,
                 'label': f'{L["flag"]} {L["name"]}, {svc.spec_text(q["offer"])}'}
 
-    async def do_scale(self, prof: dict, n: dict, bd: dict, plan: dict, by: int = 0, who: str = '') -> str:
-        """Купить и поставить ноду по плану: как перегруженная — те же сквады, хосты и дополнения."""
-        doms = await svc.auto_domains(self.store, prof, plan['loc'], 1)
+    async def do_scale(self, prof: dict, n: dict, bd: dict, plan: dict, by: int = 0, who: str = '',
+                       zone: str = '', squads: list[str] | None = None) -> str:
+        """Купить и поставить ноду по согласованному плану: домен и сквады выбрал администратор, хосты и дополнения — как у перегруженной."""
+        if not squads:
+            raise ValueError('не выбраны сквады новой ноды')
+        doms = await svc.auto_domains(self.store, prof, plan['loc'], 1, base=zone or None)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
         rc = self.notify.recipients(prof, 'money.scale')
         ids = await svc.create_jobs(self.store, self.runner, rc[0] if rc else 0, prof['id'], plan['cat'], plan['loc'],
-                                    plan['idx'], '1m', doms, squads=bd.get('squads'), host=bd.get('host'), extras=extras,
+                                    plan['idx'], '1m', doms, squads=squads, host=bd.get('host'), extras=extras,
                                     custom=plan['custom'], note={'autoscale': True, 'scale_for': n['uuid']})
         self.store.set(f'ap:scaled:{prof["id"]}:{n["uuid"]}', str(time.time()))
         from . import audit
-        audit.log(self.store, by, 'scale', 'Докупил ноду (кнопка в сообщении о нагрузке)' if by else 'Автомасштабирование: докупил ноду',
+        audit.log(self.store, by, 'scale', 'Докупил ноду (подтвердил в панели)',
                   prof['id'], f'{doms[0]} — {plan["label"]}, {plan["price"] // 100} ₽/мес, рядом с {n["name"]}', who=who)
         text = (f'➕ <b>Докупаю ноду</b> · {html.escape(prof["name"])}\n<code>{html.escape(doms[0])}</code> — '
                 f'{html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес, рядом с перегруженной '
@@ -542,23 +546,60 @@ class Autopilot:
             plan = f'не получилось посчитать покупку: {e}'
         if isinstance(plan, str):
             return f'\n\n⚖️ Автомасштабирование: не докупаю — {html.escape(plan)}.', None
-        if mode == 'auto':
-            try:
-                dom = await self.do_scale(prof, n, bd, plan)
-            except (BcloudError, ValueError) as e:
-                return f'\n\n⚖️ Автомасштабирование: покупка не удалась — {html.escape(str(e))}.', None
-            return f'\n\n⚖️ Докупаю ещё одну ноду: {html.escape(dom)}.', None
+        # покупка — только после подтверждения администратора: домен, тариф и сквады выбирают в панели
         tok = secrets.token_hex(4)
-        self.put(f'ap:scaleask:{tok}', {'pid': prof['id'], 'uuid': n['uuid'], 'addr': n['address'], 'at': time.time()})
-        rows = [[InlineKeyboardButton(text=f'➕ Докупить ноду · {plan["price"] // 100} ₽/мес', callback_data=f'ap:s:{tok}')]]
-        b = self.button()
-        if b:
-            rows += b.inline_keyboard
-        return (f'\n\n⚖️ Могу докупить ещё одну: {html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес.',
-                InlineKeyboardMarkup(inline_keyboard=rows))
+        self.put(f'ap:scaleask:{tok}', {'pid': prof['id'], 'uuid': n['uuid'], 'addr': n['address'], 'at': time.time(),
+                                        'name': n.get('name') or n['address'], 'label': plan['label'], 'price': plan['price']})
+        toks = [t for t in json.loads(self.store.get('ap:scaleasks') or '[]') if self.get(f'ap:scaleask:{t}').get('at', 0) > time.time() - 86400]
+        self.store.set('ap:scaleasks', json.dumps((toks + [tok])[-50:]))
+        b = self.public_url.startswith('https://') and InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text=f'➕ Докупить ноду · {plan["price"] // 100} ₽/мес — выбрать', web_app=WebAppInfo(url=self.public_url.rstrip('/') + '/admin'))]])
+        return (f'\n\n⚖️ Могу докупить ещё одну: {html.escape(plan["label"])}, {plan["price"] // 100} ₽/мес. '
+                'Домен, тариф и сквады — выберите в панели, без подтверждения бот ничего не покупает.', b or None)
 
-    async def scale_confirm(self, tok: str, by: int = 0, who: str = '') -> str:
-        """Кнопка «Докупить ноду»: проверить всё заново (баланс, лимит могли измениться) и купить."""
+    def scale_pending(self) -> list[dict]:
+        """Предложения докупить ноду, которые ждут решения администратора (не старше суток)."""
+        out = []
+        for t in json.loads(self.store.get('ap:scaleasks') or '[]'):
+            a = self.get(f'ap:scaleask:{t}')
+            if a.get('pid') and time.time() - a.get('at', 0) <= 86400:
+                out.append({'tok': t, **a})
+        return out
+
+    async def scale_plan_view(self, tok: str) -> dict:
+        """Окно подтверждения: локация и тарифы, домены, сквады, цена — как у перегруженной ноды по умолчанию."""
+        ask = self.get(f'ap:scaleask:{tok}')
+        if not ask or time.time() - ask.get('at', 0) > 86400:
+            raise ValueError('Предложение устарело — дождитесь нового сообщения о нагрузке')
+        prof = self.store.profile(int(ask['pid']))
+        if not prof:
+            raise ValueError('Группы больше нет')
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(ask['addr']) or {}
+        cat = await svc.load_catalog(self.store, prof)
+        L = next((x for x in cat['locations'] if x['code'] == bd.get('location')), None)
+        try:
+            zones = await asyncio.to_thread(lambda: svc.cf_for(self.store, prof).zone_names())
+        except engine.StepError:
+            zones = []
+        base = prof.get('base_domain') or ''
+        if base and base not in zones:
+            zones = [base, *zones]
+        try:
+            raw = await asyncio.to_thread(lambda: self.panel(prof).call('GET', '/api/internal-squads'))
+            squads = [{'uuid': x['uuid'], 'name': x['name']} for x in raw.get('internalSquads', [])]
+        except engine.StepError:
+            squads = []
+        mine = bd.get('squads') if bd.get('squads') is not None else [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x]
+        offers = sorted(({'idx': o['idx'], 'label': svc.spec_text(o), 'price_kop': o['price_kop']} for o in (L['offers'] if L else [])), key=lambda o: o['price_kop'])
+        return {'pid': prof['id'], 'name': ask.get('name') or ask['addr'], 'loc': bd.get('location') or '', 'loc_name': L['name'] if L else '', 'flag': L['flag'] if L else '',
+                'available': bool(L), 'zones': zones, 'zone': base or (zones[0] if zones else ''), 'offers': offers,
+                'same': bd.get('idx') if any(o['idx'] == bd.get('idx') for o in offers) else None,
+                'squads': squads, 'squads_default': [x for x in mine if any(s['uuid'] == x for s in squads)]}
+
+    async def scale_confirm(self, tok: str, by: int = 0, who: str = '', choice: dict | None = None) -> str:
+        """Подтверждение из панели: проверить всё заново (баланс, лимит могли измениться) и купить выбранное."""
+        from .monitor import clean_choice
+        choice = clean_choice(choice)  # ValueError — без домена и сквадов не покупаем
         ask = self.get(f'ap:scaleask:{tok}')
         if not ask or time.time() - ask.get('at', 0) > 24 * 3600:
             return 'Предложение устарело — дождитесь нового сообщения о нагрузке'
@@ -572,7 +613,14 @@ class Autopilot:
             plan = await self.plan_scale(prof, n, bd)
             if isinstance(plan, str):
                 return 'Не докупаю: ' + plan
-            return f'Покупаю {await self.do_scale(prof, n, bd, plan, by, who)} — прогресс в «Задачах»'
+            if choice['idx'] is not None and choice['idx'] != plan['idx']:  # администратор выбрал другой тариф
+                o = next((x for x in plan['L']['offers'] if x['idx'] == choice['idx']), None)
+                if not o:
+                    self.put(f'ap:scaleask:{tok}', ask)  # ничего не купили — предложение остаётся, можно выбрать снова
+                    return 'Выбранного тарифа больше нет в этой локации — откройте выбор заново'
+                plan = {**plan, 'idx': o['idx'], 'custom': None, 'price': int(svc.quote(plan['cat'], plan['loc'], o['idx'], '1m', 1)['one_kop']),
+                        'label': f'{plan["L"]["flag"]} {plan["L"]["name"]}, {svc.spec_text(o)}'}
+            return f'Покупаю {await self.do_scale(prof, n, bd, plan, by, who, choice["zone"], choice["squads"])} — прогресс в «Задачах»'
         except (BcloudError, ValueError, engine.StepError) as e:
             return f'Не получилось: {e}'
 

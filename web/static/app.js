@@ -2,7 +2,7 @@
 /* Новый интерфейс Bobr Nodes — экраны. Данные — те же запросы, что у классического интерфейса.
    Классический интерфейс остаётся рядом: в него можно вернуться в «Интерфейс и тема». */
 
-const D = { st: null, err: null, loading: true, nodes: {}, nerr: {}, mon: null, jobs: [], rent: {}, wallet: null, detail: {}, job: {} };
+const D = { st: null, err: null, loading: true, nodes: {}, nerr: {}, mon: null, jobs: [], rent: {}, wallet: null, detail: {}, job: {}, diag: {}, hist: {} };
 const UI = { base: null, lastKey: '', ovKey: '', tabs: {}, nf: { status: 'all', group: 'all', q: '', sort: 'attn', cc: null }, sel: new Set(), selMode: false };
 const isAdmin = () => D.st && D.st.role === 'admin';
 const groups = () => (D.st ? D.st.profiles : []);
@@ -10,23 +10,34 @@ const G = pid => groups().find(p => p.id === pid) || { name: '—' };
 
 /* ── загрузка ── */
 let pollTimer = 0;
-async function loadAll() {
+/* как часто что обновлять: статусы и задачи меняются часто, ноды — из кэша панели на сервере,
+   баланс и аренда — внешний Bobr Cloud и меняются редко. Свёрнутое окно не опрашивает ничего. */
+const EVERY = { nodes: 60e3, monitor: 60e3, scale: 120e3, wallet: 300e3, rent: 600e3 };
+const AT = {};
+const due = (k, force) => force || !AT[k] || Date.now() - AT[k] >= EVERY[k];
+async function loadAll(force) {
   clearTimeout(pollTimer);
+  if (document.hidden && !force) return;  // вернётся к окну — обновим сразу (visibilitychange)
   try { D.st = await api('state'); D.err = null; }
   catch (e) { D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return; }
   if (D.st.role === 'paused') { D.loading = false; render(true); return; }  // подписка на паузе — только экран оплаты
+  try { localStorage.setItem('bn:ui', D.st.theme && D.st.theme.ui === 'classic' ? 'classic' : 'new'); } catch (e) {}  // /admin откроет сразу нужный
   if (D.st.theme && D.st.theme.ui === 'classic') { location.replace('/admin?classic=1'); return; }  // классический выбрали на другом устройстве
+  const first = D.loading, mark = k => { AT[k] = Date.now(); };
   await Promise.all([
-    ...groups().map(p => loadNodes(p.id)),
-    api('monitor').then(r => { D.mon = r; }).catch(() => { D.mon = null; }),
     api('jobs').then(r => { D.jobs = r.jobs || []; }).catch(() => {}),
-    api('wallet').then(r => { D.wallet = r; }).catch(() => { D.wallet = null; }),
+    ...(due('nodes', force || first) ? (mark('nodes'), groups().map(p => loadNodes(p.id))) : []),
+    due('monitor', force || first) ? (mark('monitor'), api('monitor').then(r => { D.mon = r; }).catch(() => { D.mon = null; })) : null,
+    due('wallet', force || first) ? (mark('wallet'), api('wallet').then(r => { D.wallet = r; }).catch(() => { D.wallet = null; })) : null,
+    due('scale', force || first) ? (mark('scale'), api('scale/pending').then(r => { D.scale = r.pending || []; }).catch(() => { D.scale = []; })) : null,
   ]);
   D.loading = false; render(true);
-  // аренда — из Bobr Cloud, это дольше: подгружаем после первой отрисовки
-  Promise.all(groups().map(p => api(`profiles/${p.id}/rent`).then(r => { D.rent[p.id] = r.servers || []; }).catch(() => {}))).then(() => render(true));
+  // аренда — из Bobr Cloud (по 2 запроса на группу): после первой отрисовки, раз в 10 минут или если её сбросили (продление)
+  const rentFor = groups().filter(p => due('rent', first) || D.rent[p.id] == null);
+  if (rentFor.length) { if (due('rent', first)) mark('rent'); Promise.all(rentFor.map(p => api(`profiles/${p.id}/rent`).then(r => { D.rent[p.id] = r.servers || []; }).catch(() => {}))).then(() => render(true)); }
   pollTimer = setTimeout(loadAll, activeJobs().length ? 6000 : 30000);
 }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && D.st) loadAll(); });
 async function loadNodes(pid, fresh) {
   try {
     const r = await api(`profiles/${pid}/nodes` + (fresh ? '?fresh=1' : ''));
@@ -34,7 +45,7 @@ async function loadNodes(pid, fresh) {
     if (r.stale && !fresh) loadNodes(pid, true).then(() => render(true));  // устаревший кэш показали сразу, свежий — следом
   } catch (e) { D.nerr[pid] = e.message; }
 }
-async function refreshSoon() { await new Promise(r => setTimeout(r, 1200)); loadAll(); }
+async function refreshSoon() { await new Promise(r => setTimeout(r, 1200)); loadAll(true); }  // после действия — всё сразу
 const activeJobs = () => D.jobs.filter(j => !['done', 'failed'].includes(j.status));
 
 /* ── ноды всех групп одной таблицей ── */
@@ -56,7 +67,8 @@ function allNodes() {
   return (memo = out);
 }
 const N = id => allNodes().find(n => n.id === id);
-const ruState = n => { const s = n.mon && n.mon.status; return !s || !n.mon.total ? 'none' : s === 'ok' ? 'ok' : ['down', 'gave_up'].includes(s) ? 'bad' : ['repairing', 'replaced'].includes(s) ? 'run' : 'ign'; };
+const ruState = n => { const s = n.mon && n.mon.status; return !s || !n.mon.total ? 'none' : s === 'ok' ? 'ok' : ['down', 'gave_up', 'confirm'].includes(s) ? 'bad' : ['repairing', 'replaced'].includes(s) ? 'run' : 'ign'; };
+const waitsMe = n => !!(n.mon && n.mon.status === 'confirm' && n.mon.tok);  // починка остановилась перед платным шагом
 const outdated = n => !!(n.version && n.target && n.version !== n.target && !n.disabled && !n.busy);
 const rentSoon = n => !!(n.rent && (n.rent.risk || (n.rent.days_left <= 3 && !n.rent.auto_renew)));
 const offline = n => !n.connected && !n.disabled;
@@ -65,6 +77,7 @@ function conn(n) {
   if (n.disabled) return { cls: 'off', word: 'Выключена', short: 'ВЫКЛ' };
   if (n.busy) return { cls: 'run', word: 'Идёт задача', short: 'В РАБОТЕ' };
   if (!n.connected) return { cls: 'bad', word: 'Нет связи', short: 'НЕТ СВЯЗИ' };
+  if (waitsMe(n)) return { cls: 'warn', word: 'Ждёт решения', short: 'РЕШЕНИЕ' };
   if (ruState(n) === 'bad') return { cls: 'warn', word: 'Не из России', short: 'БЛОК РФ' };
   if (ruState(n) === 'run') return { cls: 'run', word: 'Чинится', short: 'ЧИНИТСЯ' };
   return { cls: 'ok', word: 'На связи', short: 'НА СВЯЗИ' };
@@ -157,7 +170,7 @@ function shell(base, changed) {
       NAV.map(navBtn),
       h('div', { class: 'spacer' }),
       h('button', { type: 'button', class: 'me nav-a', style: 'height:auto', onclick: () => go('settings/look'), title: 'Интерфейс и тема' },
-        h('span', { class: 'avatar' }, name[0]),
+        avatar({ tg_id: D.st && D.st.me_id, first_name: name }, 32),
         h('span', { class: 'who' }, h('b', null, name), h('span', null, 'интерфейс и тема')))),
     h('main', { class: 'main' },
       h('header', { class: 'topbar' + (window.scrollY > 4 ? ' scrolled' : '') },
@@ -257,10 +270,18 @@ function attention() {
   for (const n of ns.filter(offline))
     out.push({ sev: 'bad', icon: 'unplug', title: `${n.name} не на связи`, text: `${n.group} · панель не видит ноду`,
       acts: [{ l: 'Открыть', p: 1, fn: () => go('node/' + n.id) }] });
-  for (const n of ns.filter(n => ruState(n) === 'bad'))
+  for (const n of ns.filter(waitsMe))
+    out.push({ sev: 'bad', icon: 'wallet', title: `${n.name}: нужно ваше решение`,
+      text: n.mon.step === 'replace' ? 'Бесплатные шаги починки не помогли. Купить новую ноду в той же локации? Домен, тариф и сквады — на ваш выбор.'
+        : 'Бесплатные шаги починки не помогли. Сменить IP в Bobr Cloud? Это платно.',
+      acts: [{ l: n.mon.step === 'replace' ? 'Выбрать и купить' : 'Сменить IP', p: 1, fn: () => n.mon.step === 'replace' ? replaceNode(n, true) : confirmReip(n) }, { l: 'Не трогать', fn: () => ignoreNode(n) }] });
+  for (const n of ns.filter(n => ruState(n) === 'bad' && !waitsMe(n)))
     out.push({ sev: 'warn', icon: 'shieldX', title: `${n.name} не проходит из России`,
-      text: `${n.mon.since ? since(n.mon.since * 1000) + ' · ' : ''}${n.mon.status === 'gave_up' ? 'автопочинка не помогла · ' : ''}${n.online != null ? `у ${n.online} пользователей может не быть связи` : n.group}`,
-      acts: [{ l: 'Починить', p: 1, fn: () => fixNode(n) }, { l: 'Не чинить', fn: () => ignoreNode(n) }] });
+      text: `${n.mon.since ? since(n.mon.since * 1000) + ' · ' : ''}${n.mon.status === 'gave_up' ? 'автопочинка не помогла · ' : ''}${n.online != null ? `у ${n.online} пользователей может не быть связи` : n.group}. Платное — только после вашего подтверждения`,
+      acts: [{ l: 'Починить', p: 1, fn: () => fixNode(n) }, { l: 'Новая нода', fn: () => replaceNode(n, false) }, { l: 'Не чинить', fn: () => ignoreNode(n) }] });
+  for (const a of (D.scale || []))
+    out.push({ sev: 'run', icon: 'plus', title: `${a.name} перегружена — докупить ноду рядом?`, text: `${a.group} · ${a.label}${a.price_kop ? ', ' + rubK(a.price_kop) + '/мес' : ''}. Без вашего подтверждения бот ничего не покупает`,
+      acts: [{ l: 'Выбрать и докупить', p: 1, fn: () => scaleNode(a) }] });
   const failed = D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400);
   if (failed.length > 3) out.push({ sev: 'bad', icon: 'alert', title: `${pl(failed.length, 'задача', 'задачи', 'задач')} с ошибкой за 3 дня`, text: failed.slice(0, 3).map(j => j.domain).join(', ') + '…',
     acts: [{ l: 'Показать', p: 1, fn: () => { UI.af = 'failed'; go('activity'); } }] });
@@ -320,6 +341,7 @@ function vOverview() {
       h('section', { class: 'section' },
         h('div', { class: 'section-h' }, h('h2', null, 'Недавно'), btn('Все задачи', () => go('activity'), 'ghost s more')),
         D.jobs.length ? h('div', { class: 'list' }, D.jobs.slice(0, 7).map(taskRow)) : empty('activity', 'Пока тихо', 'Здесь появятся установки, обновления и починки.'))),
+    statsSection(),
   ];
 }
 function groupRow(p) {
@@ -468,11 +490,9 @@ function nodeOverview(n, det) {
   const d = det.d, c = conn(n), running = activeJobs().find(j => j.profile_id === n.pid && (j.domain === n.domain || j.domain === n.address));
   const r = n.rent;
   return [
-    offline(n) ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('unplug')), h('div', { class: 'grow' }, h('b', null, 'Панель не видит ноду'),
-      'Сервер выключен, перезагружается или потерял сеть. Если не вернётся сам, проверьте сервер у хостера или смените IP ниже.')) : null,
-    ruState(n) === 'bad' ? h('div', { class: 'notice', style: 'background:var(--warn-soft)' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('shieldX')),
-      h('div', { class: 'grow' }, h('b', null, 'Не проходит из России'), `Не открывается у ${n.mon.total - n.mon.up} из ${n.mon.total} чекеров. Бот пройдёт шаги починки из настроек мониторинга группы.`),
-      btn('Починить', () => fixNode(n), 's primary')) : null,
+    waitsMe(n) ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('wallet')), h('div', { class: 'grow' }, h('b', null, 'Нужно ваше решение'),
+        n.mon.step === 'replace' ? 'Бесплатные шаги не помогли. Бот готов купить новую ноду — выберите домен, тариф и сквады.' : 'Бесплатные шаги не помогли. Следующий шаг — платная смена IP.'),
+      btn(n.mon.step === 'replace' ? 'Выбрать и купить' : 'Сменить IP', () => n.mon.step === 'replace' ? replaceNode(n, true) : confirmReip(n), 's primary')) : null,
     running ? h('div', { class: 'notice info' }, h('span', { class: 'i' }, ic('refresh')), h('div', { class: 'grow' }, h('b', null, jobTitle(running)), 'Идёт сейчас'), btn('Подробнее', () => go('task/' + running.id), 's')) : null,
     h('div', { class: 'chips', style: 'margin-bottom:16px' },
       outdated(n) ? btn(`Обновить до ${n.target}`, () => updateNodes([n]), 's primary', 'up') : null,
@@ -480,6 +500,7 @@ function nodeOverview(n, det) {
         try { await api('monitor/check', 'POST'); toast('Проверка из России запущена', 'Результат появится через 1–2 минуты'); } catch (x) { toast('Не получилось', x.message, 'bad'); }
         b.classList.remove('busy'); }, 's', 'shield'),
       btn('Скопировать адрес', () => copy(n.domain || n.address, 'Адрес'), 's', 'copy')),
+    nodeDiag(n, det),
     h('div', { class: 'kv', style: 'margin-bottom:16px' },
       kv('Состояние', h('span', { class: 'st ' + c.cls }, c.word)),
       kv('Адрес', h('span', { class: 'mono' }, n.address), copyBtn(n.address, 'Адрес')),
@@ -497,6 +518,7 @@ function nodeOverview(n, det) {
     det.err ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, 'Подробности не загрузились'), det.err),
       btn('Повторить', () => { D.detail[n.id] = null; render(); }, 's')) : null,
     d ? loadChart(d.load) : null,
+    nodeChecks(n),
     h('div', { class: 'section-h' }, h('h2', null, 'Опасные действия')),
     h('div', { class: 'list' },
       d && d.bcloud && d.bcloud.server_id ? dangerRow('globe', 'Сменить IP', d.bcloud.price_kop != null ? `Новый адрес от Bobr Cloud за ${rubK(d.bcloud.price_kop)}, DNS и панель бот обновит сам` : 'Новый адрес от Bobr Cloud, DNS и панель бот обновит сам',
@@ -532,9 +554,33 @@ function removeNode(n) {
     text: 'Бот удалит ноду из панели вместе с её хостами и DNS-записью. Клиенты потеряют эту ноду. Сервер в Bobr Cloud останется — удалить его можно в Bobr Cloud.',
     fn: async () => { const r = await api(`profiles/${n.pid}/nodes/${n.uuid}`, 'DELETE'); toast(r.message || `${n.name} убрана`); closeOverlay(); refreshSoon(); } });
 }
-function nodeHistory(n) {
+function nodeHistory(n) {  // события мониторинга, задачи и действия людей по этой ноде — одной лентой, по дням
+  const key = n.id, H = D.hist[key];
+  if (!H || (!H.loading && Date.now() - H.at > 60000)) {
+    D.hist[key] = { ...(H || {}), loading: true, at: Date.now() };
+    const q = encodeURIComponent(n.name);
+    Promise.all([api('notify/feed?q=' + q).then(r => r.items || []).catch(() => []), isAdmin() ? api('audit?q=' + q).then(r => r.items || []).catch(() => []) : Promise.resolve([])])
+      .then(([feed, aud]) => { D.hist[key] = { feed, aud, at: Date.now() }; render(true); });
+  }
   const js = D.jobs.filter(j => j.profile_id === n.pid && (j.domain === n.domain || j.domain === n.address || j.loc_name === n.name));
-  return js.length ? h('div', { class: 'list' }, js.map(taskRow)) : empty('clock', 'Пока тихо', `По ${n.name} задач не было — или они старше последних 60.`);
+  const own = t => new RegExp('(^|[^\\w.-])' + n.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '([^\\w-]|$)').test(t || '');  // de5, но не de55
+  const H2 = D.hist[key] || {};
+  const seenEv = {}, ev = (H2.feed || []).filter(e => { if (!own(e.text)) return false; const k = e.type + '|' + e.text, prev = seenEv[k]; seenEv[k] = e.ts; return !(prev && Math.abs(prev - e.ts) < 300); }),  // одно событие дважды подряд (повтор опроса) — одной строкой
+    au = (H2.aud || []).filter(a => own(a.label + ' ' + (a.detail || '')));
+  const rows = [
+    ...js.map(j => ({ ts: (j.status === 'done' || j.status === 'failed' ? j.updated_at : j.created_at), el: taskRow(j) })),
+    ...ev.map(e => { const lines = String(e.text || '').split('\n'); const bad = /node\.(ru_down|down|offline)/.test(e.type) || e.crit, good = /ru_up|online|recover/.test(e.type);
+      return { ts: e.ts, el: h('div', { class: 'li' }, h('span', { class: 'rm-dot ' + (bad ? 'bad' : good ? 'ok' : /degraded/.test(e.type) ? 'warn' : '') }),
+        h('div', { class: 'grow' }, h('div', { class: 't', style: 'white-space:normal;font-weight:500' }, lines.slice(1).join(' ') || lines[0]), h('div', { class: 's' }, (e.title || '') + ' · ' + clock(e.ts * 1000)))) }; }),
+    ...au.map(a => ({ ts: a.ts, el: h('div', { class: 'li' }, a.uid ? avatar({ uid: a.uid, who: a.who }, 28) : h('div', { class: 'ic-tile', style: 'width:28px;height:28px' }, ic('server')),
+      h('div', { class: 'grow' }, h('div', { class: 't', style: 'white-space:normal;font-weight:500' }, a.label), h('div', { class: 's', style: 'white-space:normal' }, [a.who, a.detail, clock(a.ts * 1000)].filter(Boolean).join(' · ')))) })),
+  ].sort((a, b) => b.ts - a.ts);
+  if (!rows.length) return H2.loading ? sk(200) : empty('clock', 'Пока тихо', `По ${n.name} не было ни задач, ни событий мониторинга, ни изменений.`);
+  const byDay = new Map();
+  rows.forEach(r => { const d = new Date(r.ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }); if (!byDay.has(d)) byDay.set(d, []); byDay.get(d).push(r.el); });
+  const downs = ev.filter(e => /ru_down/.test(e.type)).length;
+  return [downs ? h('p', { class: 'muted', style: 'margin:0 0 12px' }, `Блокировок из России в истории: ${downs}.` + (downs >= 3 ? ' Нода блокируется регулярно — возможно, стоит сменить локацию или конфигурацию.' : '')) : null,
+    ...[...byDay].map(([d, els]) => [h('div', { class: 'section-h' }, h('h2', null, d)), h('div', { class: 'list', style: 'margin-bottom:16px' }, els)])];
 }
 
 /* ── Задача ── */
@@ -580,7 +626,7 @@ function vLook() {
     h('div', { class: 'list', style: 'max-width:640px' },
       dangerRow('contrast', 'Классический интерфейс', 'Вернуться к прежнему виду. Переключиться обратно можно в его «Оформлении».',
         btn('Вернуть классический', async e => { const b = e.currentTarget; b.classList.add('busy');
-          try { await api('theme', 'POST', { ui: 'classic' }); location.replace('/admin?classic=1'); } catch (x) { b.classList.remove('busy'); toast('Не получилось', x.message, 'bad'); } }, 's')))];
+          try { await api('theme', 'POST', { ui: 'classic' }); try { localStorage.setItem('bn:ui', 'classic'); } catch (e) {} location.replace('/admin?classic=1'); } catch (x) { b.classList.remove('busy'); toast('Не получилось', x.message, 'bad'); } }, 's')))];
 }
 function vMore() {
   const row = (i, t, s, fn) => h('button', { type: 'button', class: 'li', onclick: fn }, h('div', { class: 'ic-tile' }, ic(i)),

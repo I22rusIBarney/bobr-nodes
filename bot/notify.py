@@ -28,6 +28,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'node.up':          ('nodes', 'Нода снова на связи с панелью', TG, False, False),
     'node.ru_down':     ('nodes', 'Нода недоступна из России', TG, True, False),
     'node.ru_up':       ('nodes', 'Нода снова доступна из России', TG, False, False),
+    'node.degraded':   ('nodes', 'Связь с нодой из России ухудшается', TG, False, False),
     'node.repair':      ('nodes', 'Починка: шаги и итог', TG, False, False),
     'node.load':        ('nodes', 'Нагрузка на ноде', TG, False, False),
     'node.version':     ('nodes', 'Новая версия ноды или Xray', BELL, False, False),
@@ -166,9 +167,9 @@ class Notifier:
         return FSInputFile(str(path))
 
     # ───────── лента ─────────
-    def feed(self, uid: int, cat: str = '', before: int | None = None, limit: int = 50) -> dict:
+    def feed(self, uid: int, cat: str = '', before: int | None = None, limit: int = 50, q: str = '') -> dict:
         types = [t for t, d in TYPES.items() if d[0] == cat] if cat in CATEGORIES else None
-        rows = self.store.events_for(uid, types, before, limit)
+        rows = self.store.events_for(uid, types, before, limit, q)
         read = int(self.store.get(f'notif_read:{uid}') or 0)
         return {'items': [{**r, 'cat': TYPES.get(r['type'], ('system',))[0], 'title': TYPES.get(r['type'], ('', ''))[1],
                            'crit': TYPES.get(r['type'], ('', '', '', False))[3], 'unread': r['id'] > read} for r in rows],

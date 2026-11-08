@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REA
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, uid INTEGER NOT NULL,
     action TEXT NOT NULL, label TEXT NOT NULL, pid INTEGER, detail TEXT NOT NULL DEFAULT '', who TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS audit_uid ON audit(uid, id);
+-- блокировки и падения нод: когда началось и кончилось, где стояла нода (location), как поставлена (config),
+-- когда установлена (born), что это было (cause: ru_block, ru_partial, down…) и что помогло (fix) — для статистики по локациям
+CREATE TABLE IF NOT EXISTS blocks (id INTEGER PRIMARY KEY AUTOINCREMENT, pid INTEGER NOT NULL, addr TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '', location TEXT NOT NULL DEFAULT '', loc_name TEXT NOT NULL DEFAULT '', flag TEXT NOT NULL DEFAULT '',
+    config TEXT NOT NULL DEFAULT '', born REAL, start REAL NOT NULL, end REAL, cause TEXT NOT NULL DEFAULT '', fix TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS blocks_open ON blocks(pid, addr, end);
+CREATE INDEX IF NOT EXISTS blocks_start ON blocks(start);
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch TEXT NOT NULL,
@@ -41,6 +48,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- выборки «задачи группы с таким статусом» и «задачи в работе» — без просмотра всей истории
+CREATE INDEX IF NOT EXISTS jobs_pid_status ON jobs(profile_id, status);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
 """
 
 ACTIVE = ('queued', 'buying', 'provisioning', 'deploying')
@@ -52,6 +62,9 @@ class Store:
         self.db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.lock = threading.Lock()
+        # версия таблицы задач: растёт при каждой записи — по ней сбрасываются кеши, собранные из задач
+        self.jobs_ver = 0
+        self._cache: dict = {}
         with self.lock:
             self.db.executescript(SCHEMA)
             self.db.execute('PRAGMA journal_mode=WAL')
@@ -210,6 +223,7 @@ class Store:
     def add_job(self, batch: str, profile_id: int, chat_id: int, data: dict) -> int:
         now = time.time()
         with self.lock:
+            self.jobs_ver += 1
             return self.db.execute(
                 'INSERT INTO jobs(batch, profile_id, chat_id, status, data, created_at, updated_at) VALUES(?,?,?,?,?,?,?)',
                 (batch, profile_id, chat_id, 'queued', json.dumps(data, ensure_ascii=False), now, now)).lastrowid
@@ -229,10 +243,12 @@ class Store:
             fields['data'] = json.dumps(fields['data'], ensure_ascii=False)
         fields['updated_at'] = time.time()
         cols = ', '.join(f'{k}=?' for k in fields)
+        self.jobs_ver += 1
         self._q(f'UPDATE jobs SET {cols} WHERE id=?', (*fields.values(), jid))
 
     def patch_job_data(self, jid: int, **values) -> dict:
         with self.lock:
+            self.jobs_ver += 1
             row = self.db.execute('SELECT data FROM jobs WHERE id=?', (jid,)).fetchone()
             data = {**json.loads(row['data']), **values}
             self.db.execute('UPDATE jobs SET data=?, updated_at=? WHERE id=?',
@@ -243,11 +259,33 @@ class Store:
         where = '' if include_hidden else 'WHERE hidden=0'
         return [self._job(r) for r in self._q(f'SELECT * FROM jobs {where} ORDER BY id DESC LIMIT ?', (limit,))]
 
+    def jobs_since(self, pids: list[int], since: float) -> list[dict]:
+        if not pids:
+            return []
+        return [self._job(r) for r in self._q(f'SELECT * FROM jobs WHERE created_at >= ? AND profile_id IN ({",".join("?" * len(pids))}) ORDER BY id',
+                                              (since, *pids))]
+
     def active_jobs(self) -> list[dict]:
         marks = ','.join('?' * len(ACTIVE))
         return [self._job(r) for r in self._q(f'SELECT * FROM jobs WHERE status IN ({marks}) ORDER BY id', ACTIVE)]
 
+    def cached(self, key, build):
+        """Значение, собранное из задач, — пересобирается только после изменения задач (jobs_ver)."""
+        hit = self._cache.get(key)
+        if hit and hit[0] == self.jobs_ver:
+            return hit[1]
+        ver = self.jobs_ver
+        val = build()
+        self._cache[key] = (ver, val)
+        return val
+
+    def done_jobs(self, pid: int) -> list[dict]:
+        return [self._job(r) for r in self._q("SELECT * FROM jobs WHERE profile_id=? AND status='done' ORDER BY id", (pid,))]
+
     def used_domains(self) -> set[str]:
+        return set(self.cached('used_domains', self._used_domains))  # копия: вызывающие дополняют множество
+
+    def _used_domains(self) -> set[str]:
         out = set()
         for r in self._q("SELECT data FROM jobs WHERE status != 'failed' OR json_extract(data, '$.server_id') IS NOT NULL"):
             data = json.loads(r['data'])
@@ -261,6 +299,36 @@ class Store:
         return out
 
     # ── лента уведомлений ──
+    # ── история блокировок ──
+    BLOCK_COLS = ('name', 'location', 'loc_name', 'flag', 'config', 'born', 'cause')
+
+    def block_open(self, pid: int, addr: str, start: float | None = None, **kw) -> None:
+        """Начало блокировки; уже открытую не дублируем — только уточняем причину."""
+        kw = {k: v for k, v in kw.items() if k in self.BLOCK_COLS and v is not None}
+        with self.lock:
+            row = self.db.execute('SELECT id FROM blocks WHERE pid=? AND addr=? AND end IS NULL', (pid, addr)).fetchone()
+            if row:
+                if kw.get('cause'):
+                    self.db.execute('UPDATE blocks SET cause=? WHERE id=?', (kw['cause'], row[0]))
+                return
+            cols = ['pid', 'addr', 'start', *kw]
+            self.db.execute(f'INSERT INTO blocks({",".join(cols)}) VALUES({",".join("?" * len(cols))})',
+                            (pid, addr, start or time.time(), *kw.values()))
+
+    def block_close(self, pid: int, addr: str, fix: str = '', end: float | None = None) -> None:
+        with self.lock:
+            self.db.execute('UPDATE blocks SET end=?, fix=? WHERE pid=? AND addr=? AND end IS NULL', (end or time.time(), fix, pid, addr))
+
+    def blocks(self, since: float, pids: list[int] | None = None) -> list[dict]:
+        sql, args = 'SELECT * FROM blocks WHERE (start >= ? OR end IS NULL OR end >= ?)', [since, since]
+        if pids is not None:
+            sql += f' AND pid IN ({",".join("?" * len(pids)) or "NULL"})'
+            args += pids
+        with self.lock:
+            cur = self.db.execute(sql + ' ORDER BY start', args)
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, r)) for r in cur.fetchall()]
+
     def add_event(self, type_: str, pid: int | None, text: str, rcpt: list[int], ts: float | None = None) -> int:
         to = ',' + ','.join(str(int(x)) for x in rcpt) + ','
         with self.lock:
@@ -270,8 +338,12 @@ class Store:
                 self.db.execute('DELETE FROM events WHERE ts < ? OR id <= ?', (time.time() - 30 * 86400, eid - 5000))
             return eid
 
-    def events_for(self, uid: int, types: list[str] | None = None, before: int | None = None, limit: int = 50) -> list[dict]:
+    def events_for(self, uid: int, types: list[str] | None = None, before: int | None = None, limit: int = 50,
+                   q: str = '') -> list[dict]:
         sql, args = 'SELECT id, ts, type, pid, text FROM events WHERE rcpt LIKE ?', [f'%,{int(uid)},%']
+        if q:  # события одной ноды: её имя или домен в тексте
+            sql += " AND text LIKE ? ESCAPE '\\'"
+            args.append('%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
         if types:
             sql += f' AND type IN ({",".join("?" * len(types))})'
             args += types

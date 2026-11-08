@@ -523,3 +523,21 @@ html.tg-native .drawer-h .x, html.tg-native .x-close, html.tg-native .back { dis
 /* поле в фокусе не прячется под клавиатурой и шапкой */
 input, textarea, select { scroll-margin: calc(var(--sa-top) + 80px) 0 120px; }
 .set-g { font-size: 12.5px; font-weight: 600; color: var(--ink-3); margin: 2px 4px 8px; }
+
+/* карта проверок из России: округа, точки чекеров */
+.ru-map svg { display: block; width: 100%; height: auto; overflow: visible; cursor: pointer; }
+.rm-d { fill: color-mix(in srgb, var(--ink-3) 14%, transparent); stroke: none; transition: fill var(--t); }
+.rm-d:hover { fill: color-mix(in srgb, var(--ink-3) 24%, transparent); }
+.rm-d.ok { fill: color-mix(in srgb, var(--ok) 30%, transparent); } .rm-d.warn { fill: color-mix(in srgb, var(--warn) 32%, transparent); } .rm-d.bad { fill: color-mix(in srgb, var(--air-red) 32%, transparent); }
+.rm-d.sel { stroke: var(--air-blue); stroke-width: 5; }
+.rm-b { fill: none; stroke: var(--sheet); stroke-width: 3.5; stroke-linejoin: round; stroke-linecap: round; }
+.rm-l { fill: var(--ink-3); font: 600 28px var(--font); pointer-events: none; } .rm-l.on { fill: var(--ink); }
+.rm-p circle { fill: var(--ink-3); stroke: var(--sheet); stroke-width: 4; } .rm-p .halo { stroke: none; opacity: .22; }
+.rm-p.ok circle { fill: var(--ok); } .rm-p.warn circle { fill: var(--warn); } .rm-p.bad circle { fill: var(--air-red); }
+.rm-n { fill: var(--ink); font: 700 26px var(--mono); paint-order: stroke; stroke: var(--sheet); stroke-width: 7px; pointer-events: none; }
+.rm-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; padding-top: 8px; font-size: 12.5px; color: var(--ink-2); }
+.rm-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.rm-legend i, .rm-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-3); flex: none; display: inline-block; }
+.rm-legend i.ok, .rm-dot.ok { background: var(--ok); } .rm-legend i.warn, .rm-dot.warn { background: var(--warn); } .rm-legend i.bad, .rm-dot.bad { background: var(--air-red); }
+.avatar { overflow: hidden; }
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; border-radius: inherit; }

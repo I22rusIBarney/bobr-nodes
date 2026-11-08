@@ -44,6 +44,11 @@ class PanelCache:
         hit = self._data.get(self._key(prof, what))
         return None if hit is None else time.time() - hit[0]
 
+    def peek(self, prof: dict, what: str):
+        """Что уже есть в кэше (любой свежести), без похода в панель; None — ничего нет."""
+        hit = self._data.get(self._key(prof, what))
+        return hit[1] if hit else None
+
     def drop(self, pid: int) -> None:
         """Сбросить кэш группы: что-то в панели поменялось."""
         pid = int(pid)

@@ -92,29 +92,32 @@ def test_plan_same_offer_and_reasons(env):
     assert 'порога' in asyncio.run(pilot.plan_scale(prof, NODE, BD))
 
 
-def test_ask_then_confirm_buys_once_and_respects_limit(env):
+def test_offer_waits_for_admin_choice_then_buys_once(env):
     store, prof, pilot, bot, BC, created = env
     extra, markup = asyncio.run(pilot.scale_offer(prof, NODE, BD))
-    assert 'Могу докупить' in extra and markup.inline_keyboard[0][0].callback_data.startswith('ap:s:')
-    tok = markup.inline_keyboard[0][0].callback_data[5:]
-    assert pilot.scale_owner(tok) == prof['id']
+    assert 'Могу докупить' in extra and 'без подтверждения' in extra and not created   # само ничего не покупает
+    [ask] = pilot.scale_pending()
+    tok = ask['tok']
+    assert pilot.scale_owner(tok) == prof['id'] and ask['price'] == 40000
     j0 = store.add_job('b0', prof['id'], 1, {'domain': 'hot.ex.com', 'ip': '1.2.3.4', **BD})   # перегруженная нода — от бота
     store.update_job(j0, status='done')
-    msg = asyncio.run(pilot.scale_confirm(tok))
-    assert msg.startswith('Покупаю') and created[0][:2] == ('de', 1)
-    assert created[0][3]['squads'] == ['sq'] and created[0][3]['extras'] == {'warp': {'domains': ['x']}}
+    with pytest.raises(ValueError, match='сквад'):                 # без сквадов покупки нет
+        asyncio.run(pilot.scale_confirm(tok, choice={'zone': 'ex.com', 'idx': None, 'squads': []}))
+    msg = asyncio.run(pilot.scale_confirm(tok, choice={'zone': 'ex.com', 'idx': 0, 'squads': ['sq2']}))
+    assert msg.startswith('Покупаю') and created[0][:2] == ('de', 0)   # тариф, который выбрал администратор
+    assert created[0][3]['squads'] == ['sq2'] and created[0][3]['extras'] == {'warp': {'domains': ['x']}}
     assert any('Докупаю ноду' in t for _, t, _ in bot.sent)
-    assert 'устарело' in asyncio.run(pilot.scale_confirm(tok))   # кнопка одноразовая
+    assert 'устарело' in asyncio.run(pilot.scale_confirm(tok, choice={'zone': 'ex.com', 'idx': None, 'squads': ['sq']}))   # одноразово
     other = {**NODE, 'uuid': 'u2'}
     assert 'лимит' in asyncio.run(pilot.plan_scale(prof, other, BD))   # scale_max = 1
     assert 'уже докупал' in asyncio.run(pilot.plan_scale(prof, NODE, BD))
 
 
-def test_auto_mode_buys_and_off_mode_silent(env):
+def test_auto_mode_never_buys_by_itself_and_off_mode_silent(env):
     store, prof, pilot, bot, BC, created = env
-    store.save_profile({**prof, 'auto': {**prof['auto'], 'scale': 'auto'}})
+    store.save_profile({**prof, 'auto': {**prof['auto'], 'scale': 'auto'}})   # старое «докупить сам»
     extra, markup = asyncio.run(pilot.scale_offer(store.profile(prof['id']), NODE, BD))
-    assert 'Докупаю ещё одну' in extra and markup is None and len(created) == 1
+    assert 'Могу докупить' in extra and not created and ap.auto_cfg(store.profile(prof['id']))['scale'] == 'ask'
     store.save_profile({**prof, 'auto': {**prof['auto'], 'scale': 'off'}})
     assert asyncio.run(pilot.scale_offer(store.profile(prof['id']), NODE, BD)) == ('', None)
 

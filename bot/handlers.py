@@ -589,7 +589,7 @@ async def own_create(c: CallbackQuery, store: Store, runner: Runner, w: dict) ->
 
 # ───────────────────────── мониторинг ─────────────────────────
 
-@router.callback_query(F.data.regexp(r'^mon:[fri]:[0-9a-f]{8}$'))
+@router.callback_query(F.data.regexp(r'^mon:[fric]:[0-9a-f]{8}$'))
 async def monitor_button(c: CallbackQuery, store: Store, monitor=None, access: Access | None = None,
                          role: str = 'admin', uid: int = 0, username: str = ''):
     if monitor is None:
@@ -597,8 +597,13 @@ async def monitor_button(c: CallbackQuery, store: Store, monitor=None, access: A
     found = monitor.find(c.data[6:])
     if found and not my_profile(store, access, role, uid, username, found[0]['id']):
         return await c.answer('Нет доступа', show_alert=True)
-    what = {'f': 'fix', 'r': 'replace', 'i': 'ignore'}[c.data[4]]
-    msg = await monitor.action(c.data[6:], what)
+    what = {'f': 'fix', 'r': 'replace', 'i': 'ignore', 'c': 'confirm'}[c.data[4]]
+    if what == 'replace':  # новую ноду покупаем только после выбора домена, тарифа и сквадов в панели
+        return await c.answer('Откройте панель: в карточке ноды выберите домен, тариф и сквады новой ноды и подтвердите покупку.', show_alert=True)
+    try:
+        msg = await monitor.action(c.data[6:], what)
+    except ValueError as e:
+        msg = str(e)
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001
@@ -815,8 +820,8 @@ async def scale_button(c: CallbackQuery, store: Store, autopilot=None, access: A
     pid = autopilot.scale_owner(c.data[5:])
     if pid and not my_profile(store, access, role, uid, username, pid):
         return await c.answer('Нет доступа', show_alert=True)
-    from . import audit
-    msg = await autopilot.scale_confirm(c.data[5:], uid, audit.who_of(c.from_user))
+    # старые сообщения с кнопкой «Докупить»: теперь покупка — только через окно подтверждения в панели
+    msg = 'Откройте панель: на главной выберите домен, тариф и сквады новой ноды и подтвердите покупку.'
     try:
         await c.message.edit_reply_markup(reply_markup=None)
     except Exception:  # noqa: BLE001

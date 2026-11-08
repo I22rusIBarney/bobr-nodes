@@ -103,7 +103,7 @@ function setReports() {
       k.failed && k.failed / (k.done + k.failed) > 0.2 ? h('span', { class: 'st bad' }, 'часто падает') : null))) : null,
     h('div', { class: 'toolbar' }, seg([{ v: 'open', l: 'Открытые', n: S.open }, { v: '', l: 'Все' }], f, v => { UI.repF = v; D['rep' + v] = null; render(); }, 'Фильтр')),
     R.reports.length ? h('div', { class: 'list' }, R.reports.map(x => h('button', { type: 'button', class: 'li', onclick: () => go('report/' + x.id) },
-      h('span', { class: 'avatar' }, (x.who || '?')[0]),
+      avatar({ uid: x.uid, who: x.who }, 34),
       h('div', { class: 'grow' }, h('div', { class: 't', style: 'white-space:normal' }, repHead(x)), h('div', { class: 's' }, [x.who, x.group, dt(x.ts, true), x.count > 1 ? `повторялось ${x.count} раз` : ''].filter(Boolean).join(' · '))),
       h('span', { class: 'st ' + (x.status === 'done' ? 'ok' : REP_KIND[x.kind][0]) }, x.status === 'done' ? 'решено' : REP_KIND[x.kind][1]), h('span', { class: 'chev' }, ic('chevR')))))
       : empty('check', f === 'open' ? 'Открытых отчётов нет' : 'Отчётов пока нет', 'Ошибки задач и ответы «есть проблема» появятся здесь сами.'));
@@ -158,7 +158,7 @@ function setAudit() {
   const byDay = new Map();
   A.items.forEach(x => { const d = new Date(x.ts * 1000).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }); if (!byDay.has(d)) byDay.set(d, []); byDay.get(d).push(x); });
   return [head, ...[...byDay].map(([d, items]) => [h('div', { class: 'section-h' }, h('h2', null, d)), h('div', { class: 'list', style: 'margin-bottom:18px' }, items.map(x => h('div', { class: 'li' },
-    x.uid ? h('span', { class: 'avatar' }, (x.who || '?')[0]) : h('div', { class: 'ic-tile' }, ic('server')),
+    x.uid ? avatar({ uid: x.uid, who: x.who }, 34) : h('div', { class: 'ic-tile' }, ic('server')),
     h('div', { class: 'grow' }, h('div', { class: 't', style: 'white-space:normal;font-weight:500' }, x.label),
       h('div', { class: 's', style: 'white-space:normal' }, [new Date(x.ts * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }), x.who, x.group, x.detail].filter(Boolean).join(' · '))))))]),
     A.more ? btn('Показать раньше', e => busyBtn(e, async () => { try { const r = await api(qs(A.items[A.items.length - 1].id)); A.items = A.items.concat(r.items); A.more = r.more; render(); } catch (x) { toast('Не получилось', x.message, 'bad'); } })) : null];
@@ -215,7 +215,7 @@ function setTariff() {
       h('div', { class: 'stat' }, h('span', { class: 'k warn' }, S.paused), h('span', { class: 'l' }, 'на паузе')), h('div', { class: 'stat' }, h('span', { class: 'k' }, rubsK(S.month_kop)), h('span', { class: 'l' }, 'за 30 дней')))) : null);
 }
 async function billPay() {
-  try { const r = await api('billing/pay', 'POST', {}); toast('Продлено', r.message); D.sub = null; await loadAll(); } catch (x) { toast('Не получилось', x.message, 'bad'); }
+  try { const r = await api('billing/pay', 'POST', {}); toast('Продлено', r.message); D.sub = null; await loadAll(true); } catch (x) { toast('Не получилось', x.message, 'bad'); }
 }
 function setSubscription() {
   const B = loader('sub', 'billing');

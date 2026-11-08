@@ -81,6 +81,8 @@ async def main():
     monitor = Monitor(store, runner, bot, admins, access=access)
     runner.after_deploy = monitor.expect  # новая нода — сразу проверка из России
     dp['store'], dp['runner'], dp['public_url'], dp['monitor'] = store, runner, public_url, monitor
+    if monitor is not None:
+        monitor.public_url = public_url
     dp['access'] = access
     autopilot = Autopilot(store, runner, bot, access, public_url)
     hostload = HostLoad(data_dir, store)  # нагрузка сервера бота — для админки и сводки

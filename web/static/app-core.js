@@ -131,6 +131,34 @@ const haptic = k => { try { tg && tg.HapticFeedback && (k === 'ok' ? tg.HapticFe
 /* классический интерфейс: разделы, которые ещё не перенесены, открываются там */
 function classic(open) { location.href = '/admin?classic=1' + (open ? '&open=' + encodeURIComponent(open) : ''); }
 
+/* ── аватарки: фото из Telegram (через бота) или инициалы; каждое фото грузим один раз за сессию ── */
+const AVA = new Map();           // tg_id → objectURL | null (фото нет)
+const avaQueue = [], AVA_PAR = 4; // не больше 4 загрузок одновременно — список не ждёт картинок
+let avaBusy = 0, avaRedraw = 0;
+function avaPump() {
+  while (avaBusy < AVA_PAR && avaQueue.length) {
+    const id = avaQueue.shift();
+    avaBusy++;
+    fetch('/api/avatar/' + id, { headers: { 'X-Init-Data': tg ? tg.initData : '' } })
+      .then(r => (r.ok ? r.blob() : null)).then(b => { AVA.set(id, b && b.size ? URL.createObjectURL(b) : null); })
+      .catch(() => { AVA.set(id, null); })
+      .then(() => { avaBusy--; avaPump(); clearTimeout(avaRedraw); avaRedraw = setTimeout(() => window.render && render(true), 120); });  // одна перерисовка на пачку
+  }
+}
+const AVA_BG = ['#3B5BDB', '#0C8599', '#2B8A3E', '#E67700', '#C2255C', '#7048E8', '#1971C2', '#5C940D'];
+function avatar(user, size = 32) {
+  const id = Number(user && (user.tg_id || user.id || user.uid)) || 0;
+  const name = String((user && (user.first_name || user.who || user.label || user.username || user.name)) || '?').replace(/^@/, '');
+  const letters = name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0].toUpperCase()).join('') || '?';
+  const el = h('span', { class: 'avatar', 'aria-hidden': 'true', style: `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.38)}px;background:${AVA_BG[id % AVA_BG.length]};color:#fff` }, letters);
+  if (id > 0) {
+    const url = AVA.get(id);
+    if (url) el.replaceChildren(h('img', { src: url, alt: '', width: size, height: size, decoding: 'async' }));
+    else if (!AVA.has(id)) { AVA.set(id, undefined); avaQueue.push(id); avaPump(); }  // undefined — уже в очереди
+  }
+  return el;
+}
+
 /* ── мелкие компоненты ── */
 const btn = (label, onclick, cls = '', icon, extra = {}) => h('button', { type: 'button', class: 'btn ' + cls, onclick, ...extra }, icon ? ic(icon) : null, label);
 function toggle(checked, onchange, label) {

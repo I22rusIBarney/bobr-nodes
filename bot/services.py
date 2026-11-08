@@ -38,11 +38,14 @@ def gen_password() -> str:
 def bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
     """IP и домен → данные последней удачной задачи покупки (домен, IP, пароль root, сервер Bobr Cloud) этой группы.
     Ноды регистрируются по домену, старые — по IP, поэтому ключи — оба."""
+    return store.cached(('bot_jobs', pid), lambda: _bot_jobs_by_ip(store, pid))  # пересобирается при изменении задач
+
+
+def _bot_jobs_by_ip(store: Store, pid: int) -> dict[str, dict]:
     out = {}
-    for j in sorted(store.jobs(5000, include_hidden=True), key=lambda x: x['id']):
+    for j in store.done_jobs(pid):
         d = j['data']
-        if (j['profile_id'] == pid and d.get('ip') and d.get('kind') not in SERVICE_KINDS and j['status'] == 'done'
-                and not d.get('removed')):
+        if d.get('ip') and d.get('kind') not in SERVICE_KINDS and not d.get('removed'):
             d = {**d, '_job': j['id']}
             out[d['ip']] = d
             if d.get('domain'):
@@ -253,8 +256,9 @@ async def auto_domains(store: Store, prof: dict, location: str, count: int, base
         raise ValueError(str(e)) from None
 
 
-async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: int) -> list[str]:
-    """Ручные домены: формат, количество, повторы, занятость и что зона есть в Cloudflare."""
+async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: int, warnings: list | None = None) -> list[str]:
+    """Ручные домены: формат, количество, повторы, занятость, зона в Cloudflare и то, что сломает установку уже после
+    оплаты: CNAME на имени, CAA без Let's Encrypt. warnings — сюда то, что не мешает, но стоит знать (имя уже ведёт на сервер)."""
     items = raw if isinstance(raw, list) else re.split(r'[\s,]+', raw or '')
     doms = [naming.norm_domain(x) for x in items if x and x.strip()]
     errs = []
@@ -273,21 +277,65 @@ async def check_domains(store: Store, prof: dict, raw: list[str] | str, count: i
 
         def zones():
             cf = cf_for(store, prof)
+            foreign, problems, caa = [], [], {}
             for d in doms:
-                cf.zone_for(d)
-            if tenant:  # бот перезаписывает A-запись — в группе пользователя только свои или новые имена
-                return [d for d in doms if any(r.get('comment') != 'nv-deploy' for r in cf.records(d))]
-            return []
+                zid = cf.zone_for(d)
+                recs = cf.records(d)
+                if tenant:  # бот перезаписывает A-запись — в группе пользователя только свои или новые имена
+                    if any(r.get('comment') != 'nv-deploy' for r in recs):
+                        foreign.append(d)
+                    continue
+                if any(r['type'] == 'CNAME' for r in recs):
+                    problems.append(f'у {d} есть CNAME — установка на нём упадёт, удалите его в Cloudflare или выберите другое имя')
+                for r in recs:
+                    if r['type'] == 'A' and r.get('comment') != 'nv-deploy' and warnings is not None:
+                        warnings.append(f'{d} сейчас ведёт на {r["content"]} — бот перенаправит его на новый сервер')
+                if zid not in caa:
+                    caa[zid] = [r for r in cf.call('GET', f'/zones/{zid}/dns_records?type=CAA&per_page=100') if r.get('type') == 'CAA']
+                if not caa_allows_le(d, caa[zid]):
+                    problems.append(f'CAA-записи домена {d} не разрешают Let\'s Encrypt — сертификат не выпустится; '
+                                    'добавьте CAA «0 issue letsencrypt.org» в Cloudflare')
+            return foreign, problems
         try:
-            foreign = await asyncio.to_thread(zones)
+            foreign, problems = await asyncio.to_thread(zones)
             if foreign:
                 errs.append('у этих имён уже есть DNS-записи, созданные не ботом (или ботом старой версии — тогда удалите '
                             'запись в Cloudflare) — выберите другие: ' + ', '.join(foreign))
+            errs += problems
         except engine.StepError as e:
             errs.append(str(e))
     if errs:
         raise ValueError('; '.join(errs))
     return doms
+
+
+def config_label(store: Store, bd: dict) -> str:
+    """Как поставлена нода — для статистики блокировок: установщик и дополнения."""
+    sid = bd.get('script_id')
+    name = ((store.script(int(sid)) or {}).get('recipe') or {}).get('title') if sid else ''
+    parts = [name or 'встроенный установщик']
+    if (bd.get('host') or {}).get('mode') == 'balancer':
+        parts.append('балансировщик')
+    parts += [label for k, label in (('xhttp', 'XHTTP'), ('warp', 'WARP'), ('psiphon', 'Psiphon')) if bd.get(k)]
+    return ' + '.join(parts)
+
+
+def caa_allows_le(domain: str, caa: list[dict]) -> bool:
+    """Разрешает ли CAA выпуск сертификата Let's Encrypt для domain: действует ближайший уровень имени, где CAA есть;
+    нет CAA — можно всем. Запись Cloudflare: content вида «0 issue "letsencrypt.org"» или data {tag, value}."""
+    labels = domain.split('.')
+    for i in range(len(labels) - 1):
+        name = '.'.join(labels[i:])
+        here = [r for r in caa if r.get('name') == name]
+        issue = []
+        for r in here:
+            d = r.get('data') or {}
+            tag, val = (d.get('tag'), str(d.get('value') or '')) if d else ((r.get('content') or '').split(' ', 2)[1:] + ['', ''])[:2]
+            if tag == 'issue':
+                issue.append(val.strip('"').split(';')[0].strip())
+        if issue:
+            return 'letsencrypt.org' in issue
+    return True
 
 
 DEFAULT_REMARK = '{flag} {country} {n}'

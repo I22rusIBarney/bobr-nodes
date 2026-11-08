@@ -21,6 +21,9 @@ function wizLoad() {
   Object.assign(w, { cat: null, catErr: '', zones: null, zone: '', own: null, ownErr: '', locs: [], offer: {}, count: {}, sel: new Set(), domains: {} });
   api('catalog?pid=' + pid).then(r => { if (w.pid === pid) { w.cat = r; w.period = (r.periods[0] || {}).code || '1m'; } }).catch(e => { w.catErr = e.message; }).then(() => render(true));
   api(`profiles/${pid}/zones`).then(r => { if (w.pid === pid) { w.zones = r; w.zone = r.default || ''; } }).catch(e => { w.zones = { zones: [], error: e.message }; }).then(() => render(true));
+  // сквады панели: обязательны — без них пользователи не увидят новые ноды; по умолчанию — сквады группы
+  w.meta = null; w.squads = new Set();
+  api(`profiles/${pid}/panel`).then(r => { if (w.pid === pid) { w.meta = r; w.squads = new Set(r.default_squads || []); } }).catch(e => { if (w.pid === pid) w.meta = { error: e.message, squads: [] }; }).then(() => render(true));
 }
 function wizLoadOwn() {
   const w = UI.wiz;
@@ -66,10 +69,10 @@ function wizard() {
   const ok = {
     where: own ? w.sel.size > 0 : w.locs.length > 0,
     tariff: w.locs.every(l => w.offer[l] != null),
-    names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy,
+    names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy && w.squads && w.squads.size > 0,
     review: own || bal == null || bal >= cost,
   }[kind];
-  const why = { where: own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: 'Нужно имя для каждой ноды', review: 'Не хватает денег на балансе' }[kind];
+  const why = { where: own ? 'Выберите серверы' : 'Выберите хотя бы одну страну', tariff: 'Выберите тариф для каждой страны', names: w.squads && w.squads.size ? 'Нужно имя для каждой ноды' : 'Выберите хотя бы один сквад', review: 'Не хватает денег на балансе' }[kind];
   const next = async e => {
     w.err = '';
     if (kind === 'tariff' || (kind === 'where' && own)) {  // дальше — имена: подбираем автоматически
@@ -80,6 +83,7 @@ function wizard() {
           const all = items.flatMap(({ loc }) => w.domains[loc]);
           const r = await api('domains/check', 'POST', { pid: w.pid, domains: all, count: all.length });
           let k = 0; items.forEach(({ loc, n }) => { w.domains[loc] = r.domains.slice(k, k + n); k += n; });
+          w.dnsWarn = r.warnings || [];
           w.step++;
         } catch (x) { w.err = x.message; }
       });
@@ -141,7 +145,8 @@ function wizTariff(w) {
               h('span', { class: 'num', 'aria-live': 'polite' }, w.count[code] || 1),
               h('button', { type: 'button', 'aria-label': 'Больше', onclick: () => { w.count[code] = Math.min(20, (w.count[code] || 1) + 1); w.domains = {}; render(); } }, '+')))),
         h('div', { class: 'choice' }, l.offers.map(o => opt(w.offer[code] === o.idx, `${o.cpu} vCPU · ${o.ram} ГБ`, `диск ${o.disk} ГБ` + (o.speed ? ` · ${o.speed}` : ''),
-          () => { w.offer[code] = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес'))))));
+          () => { w.offer[code] = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес'))))),
+        locAdvice(code) ? h('div', { style: 'margin-top:12px' }, adviceNote(locAdvice(code))) : null);
     }),
     per.length > 1 ? h('div', { class: 'block', style: 'margin-top:20px' }, h('h4', null, 'Срок аренды'),
       seg(per.map(p => ({ v: p.code, l: `${p.months} мес${p.pct ? ' · −' + p.pct + '%' : ''}` })), w.period, v => { w.period = v; render(); }, 'Срок')) : null];
@@ -157,6 +162,10 @@ function wizNamesStep(w, items) {
         h('input', { class: 'name-in', style: 'flex:1;min-width:0;max-width:340px', 'data-k': `dn-${loc}-${i}`, spellcheck: 'false', 'aria-label': `Адрес ноды ${i + 1}, ${L(loc).name}`,
           value: (w.domains[loc] || [])[i] || '', oninput: e => { (w.domains[loc] = w.domains[loc] || [])[i] = e.target.value.trim().toLowerCase(); } }))))),
     h('div', { class: 'chips', style: 'margin-bottom:22px' }, btn('Подобрать заново', regen, 's', 'refresh')),
+    h('div', { class: 'block' }, h('h4', null, 'Сквады'), !w.meta ? sk(60) : w.meta.error ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, 'Панель не ответила'), w.meta.error), btn('Повторить', () => { wizLoad(); render(); }, 's'))
+      : !w.meta.squads.length ? h('div', { class: 'err' }, 'В панели нет сквадов — создайте сквад в Remnawave, иначе пользователи не увидят новые ноды.')
+      : [h('div', { class: 'chips' }, w.meta.squads.map(s => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(w.squads.has(s.uuid)), onclick: () => { w.squads.has(s.uuid) ? w.squads.delete(s.uuid) : w.squads.add(s.uuid); render(); } }, s.name))),
+        h('div', { class: 'hint', style: 'margin-top:8px' }, w.squads.size ? 'Пользователи этих сквадов увидят новые ноды.' : 'Выберите хотя бы один сквад — без него ноды не будут готовы.')]),
     h('details', { class: 'more-opts', open: UI.advOpen || null, ontoggle: e => { UI.advOpen = e.target.open; } },
       h('summary', null, 'Дополнительно', h('span', { class: 'faint', style: 'font-weight:400' }, ' — дополнения и порт, у большинства не меняются')),
       h('div', { class: 'list', style: 'margin:12px 0' },
@@ -182,14 +191,17 @@ function wizReview(w, items, cost) {
       own ? null : row(h('b', null, 'Итого'), h('b', null, rubK(cost)))),
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row('Адреса', items.flatMap(({ loc }) => w.domains[loc]).join(', '), 'mono'),
+      row('Сквады', (w.meta && w.meta.squads || []).filter(s => w.squads.has(s.uuid)).map(s => s.name).join(', ') || '—'),
       row('Дополнения', ex.join(', ') || 'нет'), row('Порт', w.port || '443')),
+    (w.dnsWarn || []).length ? h('div', { class: 'notice', style: 'background:var(--warn-soft);margin-bottom:16px' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
+      h('div', { class: 'grow' }, h('b', null, 'Проверьте имена'), w.dnsWarn.map(x => h('div', null, x)))) : null,
     !own && bal != null ? (bal < cost ? h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('wallet')), h('div', { class: 'grow' }, h('b', null, `Не хватает ${rubK(cost - bal)}`),
       `На балансе ${rubK(bal)}.`), btn('Пополнить', topUp, 's primary', 'wallet'))
       : h('div', { class: 'muted' }, `На балансе ${rubK(bal)}, после покупки останется ${rubK(bal - cost)}.`)) : null];
 }
 async function wizSubmit(w, items) {
   const own = w.src === 'own';
-  const payload = { pid: w.pid, period: w.period, port: w.port || null,
+  const payload = { pid: w.pid, period: w.period, port: w.port || null, squads: [...w.squads],
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
       ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : { idx: w.offer[loc] }) })),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
@@ -297,7 +309,7 @@ function newGroup() {
     try {
       const r = await api('profiles', 'POST', val); c();
       toast(r.check.ok ? 'Группа создана, панель отвечает' : 'Группа создана, но панель не ответила', r.check.message, r.check.ok ? 'ok' : 'bad', { l: 'Добавить ноды', fn: () => openDeploy(r.id) });
-      await loadAll(); go('group/' + r.id);
+      await loadAll(true); go('group/' + r.id);
     } catch (x) { err.textContent = x.message; b.classList.remove('busy'); b.disabled = false; }
   } }] });
 }
@@ -413,7 +425,7 @@ function setUsers() {
       btn('Отозвать', () => confirmAct({ title: 'Отозвать приглашение?', text: 'Ссылка перестанет работать. Кто уже вошёл по ней — останется.', ok: 'Отозвать', cls: 'danger solid', icon: ['users', 'warn'],
         fn: async () => { await api('invites/' + i.id, 'DELETE'); toast('Приглашение отозвано'); reload(); } }), 's ghost'))))] : null,
     h('div', { class: 'section-h' }, h('h2', null, 'Пользователи')),
-    U.users.length ? h('div', { class: 'list' }, U.users.map(u => h('div', { class: 'li', style: 'flex-wrap:wrap' }, h('span', { class: 'avatar' }, (u.first_name || u.label || '?')[0]),
+    U.users.length ? h('div', { class: 'list' }, U.users.map(u => h('div', { class: 'li', style: 'flex-wrap:wrap' }, avatar(u, 40),
       h('div', { class: 'grow', style: 'flex:1 1 200px;min-width:0' }, h('div', { class: 't' }, u.label + (u.first_name && !u.label.includes(u.first_name) ? ` · ${u.first_name}` : '')),
         h('div', { class: 's' }, (u.groups.length ? u.groups.map(g => g.name).join(', ') : 'групп нет') + (u.blocked ? ' · заблокирован' : ''))),
       btn('Доступ', () => userAccess(u), 's ghost'),

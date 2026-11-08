@@ -10,9 +10,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import html
 import logging
 import secrets
+import statistics
 import time
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -22,6 +24,7 @@ from . import engine
 from . import services as svc
 from . import sshaccess
 from .bcloud import BcloudError
+from .diagnose import REGION_NAMES
 from .notify import Notifier
 from .pcache import CACHE
 from .runner import cf_token_of
@@ -32,7 +35,8 @@ log = logging.getLogger(__name__)
 STEPS = ['mask', 'script', 'xhttp', 'reip', 'replace']  # порядок по умолчанию: платная смена IP — перед покупкой
 STEP_LABEL = {'mask': 'Final Mask и свой порт', 'script': 'переустановка другим скриптом',
               'xhttp': 'запасной XHTTP через CDN', 'reip': 'смена IP в Bobr Cloud', 'replace': 'новая нода в той же локации'}
-MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам'}
+MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам, платное — после подтверждения'}
+PAID = ('reip', 'replace')  # платные шаги: бот готовит их, но выполняет только после подтверждения администратора
 OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в Bobr Cloud', 'keep': 'ничего не трогать'}
 BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации', 'none': 'не покупать — сообщить'}
 SKIP_DEFAULT = 'АВТО-ВЫБОР, АВТОВЫБОР, AUTO-SELECT, NORMAL'  # общий балансировщик: его ноды проверяются и так
@@ -40,6 +44,7 @@ DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest', 'mon_skip
             'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
             'mon_old': 'panel', 'mon_max_buys': 2, 'mon_quiet': False, 'mon_mute': []}
 FAILS_TO_ALERT = 3
+DEGRADE_HIST = 288  # задержек на ноду для «обычной» (сутки при опросе раз в 5 минут)
 RECOVER_CYCLES = 2
 
 
@@ -144,6 +149,7 @@ def kb(*rows) -> InlineKeyboardMarkup:
 class Monitor:
     def __init__(self, store: Store, runner, bot, admins: set[int], every: float = ck.INTERVAL, access=None):
         self.store, self.runner, self.bot, self.admins = store, runner, bot, admins
+        self.public_url = ''  # для кнопки «Выбрать и подтвердить» (ставит main.py)
         self.access = access  # кому писать о группе: её пользователю и/или администраторам
         self.notify = Notifier(store, bot, access, admins)
         self.every = every
@@ -485,9 +491,11 @@ class Monitor:
                 self.store.set_mon(key, st)
                 continue
             if not down:
-                if st.get('status') in ('down', 'repairing', 'gave_up', 'ignored'):
+                if st.get('status') in ('down', 'repairing', 'gave_up', 'ignored', 'confirm'):
                     await self.recovered(prof, st)
                 st.update(status='ok', fails=0, step=None, job=None, job_done=False, steps_done=[])
+                if st.get('kind', 'node') == 'node':
+                    await self.degradation(prof, st, cfg, now)
                 self.store.set_mon(key, st)
                 continue
             st['fails'] = int(st.get('fails') or 0) + 1
@@ -495,6 +503,8 @@ class Monitor:
                 st.update(status='down', since=int(now), tok=secrets.token_hex(4), steps_done=[])
                 self.store.set_mon(key, st)
                 await self.alert(prof, st, cfg)
+                if st.get('kind', 'node') == 'node':
+                    self.track_block(prof, self.store.mon(key) or st)
                 if cfg['mon_mode'] == 'auto' and st.get('kind', 'node') == 'node':
                     st = self.store.mon(key)
                     await self.start_repair(prof, st)
@@ -512,6 +522,7 @@ class Monitor:
             if key not in seen and not (st.get('status') == 'repairing' or
                                         st.get('status') == 'replaced' and now - (st.get('checked_at') or 0) < 86400):
                 self.store.set_mon(key, None)
+                self.store.block_close(prof['id'], st.get('addr') or key.split(':', 1)[1], 'removed')
 
     # ───────── сообщения ─────────
     def recipients(self, prof: dict) -> list[int]:
@@ -536,8 +547,10 @@ class Monitor:
         if cfg['mon_mode'] == 'watch':
             return
         why = f'не проходит проверку у {st["fail"]} из {st["data"]} чекеров в России уже {st["fails"] * self.every // 60} мин'
-        why += '' if st.get('connected') else '; с панелью тоже нет связи — похоже, сервер лежит'
+        why += '' if st.get('connected') else '; с панелью тоже нет связи'
         text = f'🔴 {self.head(prof, st)}\n{why}.'
+        if st.get('kind', 'node') == 'node':  # что случилось — полный диагноз, как на странице ноды
+            text += await self.diagnose_into(prof, st)
         if st.get('kind') == 'host':  # свой сервер с xray.json: починить его бот не может — только сообщает
             if st.get('total'):
                 text += f'\nИз {st["total"]} выходов хоста не прошёл ни один.'
@@ -546,20 +559,134 @@ class Monitor:
         steps = [STEP_LABEL[s] for s in cfg['mon_steps']]
         if cfg['mon_mode'] == 'auto':
             text += '\n\nЧиню по шагам: ' + (', '.join(steps) if steps else 'шагов не выбрано') + '.'
+            if any(s in PAID for s in cfg['mon_steps']):
+                text += ' Перед платными шагами спрошу вас.'
             return await self.say(prof, text, st=st, type_='node.ru_down')
         if cfg['mon_mode'] == 'ask':
             text += '\n\nШаги починки: ' + (', '.join(steps) if steps else 'не выбраны') + '.'
-            rows = [[('🛠 Починить', f'mon:f:{st["tok"]}')]] if steps else []
-            if 'replace' in cfg['mon_steps']:
-                rows.append([('🆕 Сразу новая нода', f'mon:r:{st["tok"]}')])
-            rows.append([('🙈 Не трогать', f'mon:i:{st["tok"]}')])
-            return await self.say(prof, text, kb(*rows), st=st, type_='node.ru_down')
+            if any(s in PAID for s in cfg['mon_steps']):
+                text += '\nПлатные шаги (смена IP, новая нода) — только после вашего подтверждения.'
+            rows = [[InlineKeyboardButton(text='🛠 Починить', callback_data=f'mon:f:{st["tok"]}')]] if steps else []
+            if 'replace' in cfg['mon_steps'] and self.public_url.startswith('https://'):
+                from aiogram.types import WebAppInfo  # домен, тариф и сквады новой ноды выбирают в панели
+                rows.append([InlineKeyboardButton(text='🆕 Сразу новая нода — выбрать', web_app=WebAppInfo(url=self.public_url.rstrip('/') + '/admin'))])
+            rows.append([InlineKeyboardButton(text='🙈 Не трогать', callback_data=f'mon:i:{st["tok"]}')])
+            return await self.say(prof, text, InlineKeyboardMarkup(inline_keyboard=rows), st=st, type_='node.ru_down')
         await self.say(prof, text, st=st, type_='node.ru_down')
 
+    async def facts(self, prof: dict, st: dict) -> dict:
+        """Факты для диагноза — те же, что на странице ноды: панель, DNS, порт, TLS и SSH с сервера бота (из-за рубежа),
+        сервер в Bobr Cloud, итоги чекеров в России."""
+        from . import diagnose as dg
+        from .runner import bcloud_from, buyer_of
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(st['addr']) or {}
+        names = {st['addr'], bd.get('domain'), bd.get('ip')} - {None, ''}
+        hosts = CACHE.peek(prof, 'hosts')
+        port = next((h.get('port') for h in hosts or [] if h.get('address') in names and h.get('port') and not h.get('isHidden')), 443)
+        ssh = (self.runner.ssh_of(prof['id'], st['uuid']) or {}) if self.runner else {}
+        cks = [{'id': c['id'], 'region': c.get('region') or guess_region(c.get('name', ''))} for c in self.store.checkers()]
+
+        async def bc_status():
+            try:
+                b = bcloud_from(self.store, bd.get('buyer') or buyer_of(self.store, prof))
+                b.RETRY_FOR = 8  # недоступный Bobr Cloud не задерживает тревогу
+                return (await b.server(int(bd['server_id']))).get('status')
+            except (BcloudError, ValueError, KeyError, OSError):
+                return None
+        return await dg.collect({'address': st['addr'], 'connected': st.get('connected')}, bd, st, cks, port,
+                                int(ssh.get('port') or 22), bc_status() if bd.get('server_id') else None,
+                                public_only=svc.tenant_group(self.store, prof, self.admins))
+
+    @staticmethod
+    def cause_of(f: dict, connected) -> str:
+        """down — сервер не отвечает нигде (панель не видит, порт и SSH закрыты и с сервера бота); block — из-за рубежа
+        нода открывается и панель её видит, значит, режут только из России; '' — однозначно сказать нельзя."""
+        if f.get('tcp') and connected:
+            return 'block'
+        if f.get('tcp') is False and f.get('ssh') is False and not connected:  # три признака сразу — иначе не решаем за администратора
+            return 'down'
+        return ''
+
+    def track_block(self, prof: dict, st: dict) -> None:
+        """Запись в историю блокировок: где стоит нода, как поставлена, когда установлена — для статистики по локациям."""
+        bd = svc.bot_jobs_by_ip(self.store, prof['id']).get(st['addr']) or {}
+        job = self.store.job(int(bd['_job'])) if bd.get('_job') else None
+        self.store.block_open(prof['id'], st['addr'], start=st.get('since'), name=st.get('name') or '',
+                              location=bd.get('location') or (st.get('country') or '').lower(), loc_name=bd.get('loc_name') or '',
+                              flag=bd.get('flag') or '', config=svc.config_label(self.store, bd) if bd else '',
+                              born=job['updated_at'] if job else None, cause=st.get('diag') or st.get('cause') or '')
+
+    async def degradation(self, prof: dict, st: dict, cfg: dict, now: float) -> None:
+        """Нода ещё проходит, но хуже обычного: задержка из России выросла вдвое (и хотя бы на 150 мс) против её же
+        обычной за сутки, или часть чекеров не проходит три проверки подряд. Сообщаем раз в 12 часов — до полной блокировки."""
+        ms = sorted(r[2] for r in (st.get('by') or {}).values() if r and r[2])
+        hist = (st.get('lat') or [])[-(DEGRADE_HIST - 1):] + ([ms[len(ms) // 2]] if ms else [])
+        st['lat'] = hist
+        st['part'] = int(st.get('part') or 0) + 1 if st.get('fail') else 0
+        why = ''
+        if len(hist) >= 15:
+            base, cur = statistics.median(hist[:-3]), statistics.median(hist[-3:])
+            if cur > max(base * 2, base + 150):
+                why = f'задержка из России {int(cur)} мс вместо обычных {int(base)} мс'
+        if st['part'] >= 3:
+            bad = [REGION_NAMES.get(r, r) for r in self.bad_regions(st)]
+            why = (why + '; ' if why else '') + f'не проходит у {st["fail"]} из {st["data"]} чекеров' + (f' ({", ".join(bad)})' if bad else '')
+        if not why or st.get('degr_at') and now - float(st['degr_at']) < 12 * 3600 or cfg['mon_mode'] == 'watch':
+            return
+        st['degr_at'] = int(now)
+        await self.say(prof, f'🟡 {self.head(prof, st)}\nсвязь ухудшается: {html.escape(why)}. Полной блокировки пока нет — '
+                             'если станет хуже, бот сообщит и предложит починку. Подробности — «Диагностика» на странице ноды.',
+                       st=st, type_='node.degraded')
+
+    def bad_regions(self, st: dict) -> list[str]:
+        regs = {str(c['id']): c.get('region') or guess_region(c.get('name', '')) for c in self.store.checkers()}
+        per: dict[str, list[bool]] = {}
+        for cid, r in (st.get('by') or {}).items():
+            if regs.get(cid):
+                per.setdefault(regs[cid], []).append(bool(r and r[0]))
+        return sorted(k for k, v in per.items() if not any(v))
+
+    async def cause(self, prof: dict, st: dict) -> str:
+        return self.cause_of(await self.facts(prof, st), st.get('connected'))
+
+    async def diagnose_into(self, prof: dict, st: dict) -> str:
+        """Диагноз для тревоги: сохраняет причину (cause) в состоянии ноды и возвращает строки для сообщения."""
+        from . import diagnose as dg
+        try:
+            f = await self.facts(prof, st)
+        except Exception as e:  # noqa: BLE001 — диагноз не должен мешать самой тревоге
+            log.warning('диагноз %s: %s', st['addr'], e)
+            return ''
+        cause, v = self.cause_of(f, st.get('connected')), dg.verdict(f, every=int(self.every))
+        st.update(cause=cause, diag=v['code'])
+        self.store.set_mon(f'{prof["id"]}:{st["addr"]}', st)
+        out = f'\n\n🩺 <b>{html.escape(v["title"])}</b>\n{html.escape(v["text"])}'
+        if cause == 'down':
+            out += '\nШаги с маскировкой пропускаю — проверьте сервер у хостера.'
+        if v['code'] not in ('ru_block', 'ru_partial', 'ok', 'no_ru') and v['fixes']:  # для блокировки план — шаги починки ниже
+            out += '\nЧто сделать: ' + '; '.join(x['label'] + (' (платно)' if x['paid'] else '') for x in v['fixes']) + ' — на странице ноды в панели.'
+        return out
+
+    async def ask_confirm(self, prof: dict, st: dict, step: str) -> None:
+        """Платный шаг готов, но без администратора бот его не делает: сообщение с кнопками."""
+        from aiogram.types import WebAppInfo
+        rows = []
+        if step == 'reip':
+            rows.append([InlineKeyboardButton(text='🔁 Сменить IP (платно)', callback_data=f'mon:c:{st["tok"]}')])
+        if self.public_url.startswith('https://'):
+            rows.append([InlineKeyboardButton(text='🧾 Выбрать и подтвердить' if step == 'replace' else '⚙️ Открыть панель',
+                                              web_app=WebAppInfo(url=self.public_url.rstrip('/') + '/admin'))])
+        rows.append([InlineKeyboardButton(text='🙈 Не трогать', callback_data=f'mon:i:{st["tok"]}')])
+        what = ('купить новую ноду в той же локации. Выберите в панели домен, тариф и сквады — покупка только после вашего подтверждения'
+                if step == 'replace' else 'сменить IP в Bobr Cloud (платно). Подтвердите — и бот сменит адрес, DNS и панель сам')
+        await self.say(prof, f'🟠 {self.head(prof, st)}\nбесплатные шаги не помогли. Дальше — {what}.',
+                       InlineKeyboardMarkup(inline_keyboard=rows), st=st)
+
     async def recovered(self, prof: dict, st: dict) -> None:
+        done = st.get('steps_done') or []
+        self.store.block_close(prof['id'], st['addr'], done[-1] if done and st.get('status') == 'repairing' else '')
         if settings_of(prof)['mon_mode'] == 'watch':
             return
-        done = st.get('steps_done') or []
         how = f' после шага «{STEP_LABEL[done[-1]]}»' if done and st.get('status') == 'repairing' else ''
         await self.say(prof, f'🟢 {self.head(prof, st)}\nснова доступна из России{how}.', st=st, type_='node.ru_up')
 
@@ -579,7 +706,7 @@ class Monitor:
         if not found:
             return 'Нода уже в порядке или удалена'
         prof, key, st = found
-        if st.get('status') not in ('down', 'gave_up', 'ignored', 'repairing'):
+        if st.get('status') not in ('down', 'gave_up', 'ignored', 'repairing', 'confirm'):
             return 'Нода уже в порядке'
         if what == 'ignore':
             st['status'] = 'ignored'
@@ -589,11 +716,23 @@ class Monitor:
             return 'Хост без ноды бот не чинит — только сообщает'
         if st.get('status') == 'repairing':
             return 'Починка уже идёт'
-        st['steps_done'] = [x for x in STEPS if x != 'replace'] if what == 'replace' else []
-        if what == 'replace' and choice:
-            st['choice'] = {k: v for k, v in choice.items() if k in ('zone', 'idx') and v not in (None, '')}
+        if what in ('replace', 'confirm'):
+            step = 'replace' if what == 'replace' else st.get('step')
+            if what == 'confirm' and (st.get('status') != 'confirm' or step not in PAID):
+                return 'Подтверждать нечего — бот не ждёт решения по этой ноде'
+            if step == 'replace':
+                choice = clean_choice(choice)  # ValueError — не выбран домен или сквад
+                st['choice'] = choice
+            st['ok_step'] = step  # согласовано администратором — следующий запуск шага его выполнит
+            if what == 'replace':
+                st['steps_done'] = [x for x in STEPS if x != 'replace']
+            self.store.set_mon(key, st)
+            return await self.start_repair(prof, st, only_replace=what == 'replace')
+        if st.get('status') == 'confirm':
+            return f'Бот ждёт вашего решения: «{STEP_LABEL[st["step"]]}» — подтвердите его или выберите «Не трогать»'
+        st['steps_done'] = []
         self.store.set_mon(key, st)
-        return await self.start_repair(prof, st, only_replace=what == 'replace')
+        return await self.start_repair(prof, st)
 
     async def start_repair(self, prof: dict, st: dict, only_replace: bool = False) -> str:
         st.update(status='repairing', step=None, job=None, job_done=False)
@@ -605,7 +744,16 @@ class Monitor:
         key = f'{prof["id"]}:{st["addr"]}'
         done = st.get('steps_done') or []
         plan = ['replace'] if only_replace else [x for x in cfg['mon_steps'] if x not in done]
+        if st.get('cause') == 'down':  # сервер не отвечает нигде: маскировка, XHTTP, переустановка и смена IP не помогут
+            plan = [x for x in plan if x == 'replace']
         for step in plan:
+            if step in PAID and st.get('ok_step') != step:
+                st.update(status='confirm', step=step, job=None, job_done=False, steps_done=done)
+                st.pop('choice', None)
+                self.store.set_mon(key, st)
+                await self.ask_confirm(prof, st, step)
+                return f'Нужно ваше решение: {STEP_LABEL[step]}'
+            st.pop('ok_step', None)
             done.append(step)
             st['steps_done'] = done
             try:
@@ -764,14 +912,14 @@ class Monitor:
             idx, custom, why = o['idx'], None, svc.spec_text(o)
         else:
             idx, custom, why = await self.pick_offer(prof, cat, L, bd, cfg)
-        zone = choice.get('zone') or await self.default_zone(prof, st, bd)
-        if not zone:
-            raise ValueError('не знаю, на каком домене назвать новую ноду: задайте «домен для имён нод» в настройках группы '
-                             'или нажмите «Сразу новая нода» в панели и выберите домен')
+        zone = choice.get('zone')
+        squads = choice.get('squads')
+        if not zone or not squads:  # домен и сквады выбирает администратор в окне подтверждения
+            raise ValueError('покупка не подтверждена: не выбраны домен и сквады новой ноды')
         doms = await svc.auto_domains(self.store, prof, loc, 1, base=zone)
         extras = {k: bd.get(k) for k in ('psiphon', 'warp', 'xhttp') if bd.get(k)}
         ids = await svc.create_jobs(self.store, self.runner, self.chat(prof), prof['id'], cat, loc, idx, '1m', doms,
-                                    squads=bd.get('squads'), host=bd.get('host'), extras=extras, custom=custom,
+                                    squads=squads, host=bd.get('host'), extras=extras, custom=custom,
                                     note={'monitor': True, 'replaces': st['addr']})
         self.store.set(f'mon_buys:{prof["id"]}', json.dumps(buys + [time.time()]))
         return ids[0], f'покупаю новую ноду {doms[0]} в {L["flag"]} {L["name"]}, {why}'
@@ -805,12 +953,22 @@ class Monitor:
         if zone and zone not in zones:
             zones = [zone, *zones]
         offers = [{'idx': o['idx'], 'label': svc.spec_text(o), 'price_kop': o['price_kop']} for o in (L['offers'] if L else [])]
+        # сквады панели: по умолчанию — как у старой ноды (если её ставил бот), иначе — сквады группы
+        try:
+            raw = await asyncio.to_thread(lambda: engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''))
+                                          .call('GET', '/api/internal-squads'))
+            squads = [{'uuid': x['uuid'], 'name': x['name']} for x in raw.get('internalSquads', [])]
+        except engine.StepError:
+            squads = []
+        mine = bd.get('squads') if bd.get('squads') is not None else [x for x in re.split(r'[\s,]+', prof.get('squads') or '') if x]
         same = None
         if bd.get('idx') is not None and any(o['idx'] == bd['idx'] for o in offers):
             same = bd['idx']
         return {'name': st.get('name') or st['addr'], 'loc': loc, 'loc_name': L['name'] if L else '', 'flag': L['flag'] if L else '',
                 'available': bool(L), 'zones': zones, 'zone': zone, 'offers': sorted(offers, key=lambda o: o['price_kop']),
                 'same': same, 'custom': bool(bd.get('custom')),
+                'squads': squads, 'squads_default': [x for x in mine if any(s['uuid'] == x for s in squads)],
+                'step': st.get('step') if st.get('status') == 'confirm' else 'replace',
                 'buys_left': max(0, cfg['mon_max_buys'] - len(self.buys_today(prof['id']))), 'old': cfg['mon_old']}
 
     async def pick_offer(self, prof: dict, cat: dict, L: dict, bd: dict, cfg: dict) -> tuple[int | None, dict | None, str]:
@@ -878,6 +1036,7 @@ class Monitor:
             else:
                 what += ', сервера в Bobr Cloud не нашёл'
         st.update(status='replaced', step=None, job=None, replaced_by=job['data'].get('domain'))
+        self.store.block_close(prof['id'], st['addr'], 'replace')
         self.store.set_mon(key, st)
         await self.say(prof, f'✅ {self.head(prof, st)}\nзаменена новой нодой <code>{html.escape(job["data"].get("domain", ""))}</code>; '
                        f'{html.escape(what)}.', st=st)
@@ -953,3 +1112,18 @@ class _Sink:
     def flush(self):
         pass
 
+
+
+def clean_choice(choice: dict | None) -> dict:
+    """Решение администратора о новой ноде: домен, тариф (idx или None — как у старой) и хотя бы один сквад."""
+    c = choice or {}
+    zone = str(c.get('zone') or '').strip().lower()
+    if not zone:
+        raise ValueError('Выберите домен для имени новой ноды')
+    squads = c.get('squads')
+    if not isinstance(squads, list) or not squads or not all(isinstance(x, str) and x for x in squads):
+        raise ValueError('Выберите хотя бы один сквад — без него пользователи не увидят новую ноду')
+    idx = c.get('idx')
+    if idx is not None and (not isinstance(idx, int) or isinstance(idx, bool)):
+        raise ValueError('Неверный тариф')
+    return {'zone': zone, 'idx': idx, 'squads': squads[:20]}

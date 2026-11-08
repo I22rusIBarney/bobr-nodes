@@ -140,6 +140,9 @@ def test_member_group_cannot_take_foreign_dns_names(tmp_path, monkeypatch):
         def records(self, d):
             return {'www.example.com': [{'type': 'A', 'content': '198.51.100.1', 'comment': ''}],
                     'nl1.example.com': [{'type': 'A', 'content': '10.0.0.5', 'comment': 'nv-deploy'}]}.get(d, [])
+
+        def call(self, method, path):  # CAA зоны — записей нет
+            return []
     monkeypatch.setattr(svc, 'cf_for', lambda store, prof: CF())
     monkeypatch.setenv('ADMIN_IDS', str(ADMIN))
     try:
