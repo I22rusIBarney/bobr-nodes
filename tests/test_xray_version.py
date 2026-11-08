@@ -93,3 +93,9 @@ def test_xray_job_uses_xray_path(tmp_path, monkeypatch):
     job = asyncio.run(go())
     assert job['status'] == 'done', job['error']
     assert got == ['v26.10.31'] and job['data']['spec'] == 'Xray v26.10.31' and job['data']['result'].startswith('Xray')
+
+
+def test_xray_in_dockerfile():
+    assert up.xray_in('FROM alpine\nARG XRAY_CORE_VERSION=v26.10.31\nARG X=1') == 'v26.10.31'
+    assert up.xray_in('RUN curl -L https://raw.githubusercontent.com/remnawave/scripts/main/scripts/install-latest-xray.sh | bash -s -- v25.6.8 \\') == 'v25.6.8'
+    assert up.xray_in('FROM node') == ''
