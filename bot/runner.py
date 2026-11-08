@@ -333,6 +333,10 @@ class Runner:
         if not d.get('new_ip'):
             bc = self.bcloud_factory(self.store, d.get('buyer') or buyer_of(self.store, prof))
             if d['mode'] == 'bcloud' and not d.get('change_sent'):
+                try:  # цена смены — для «Расходов»; не узнали — смена всё равно идёт
+                    price = (await bc.server(d['server_id'])).get('change_ip_price_kop')
+                except BcloudError:
+                    price = None
                 # отмечаем до запроса: повтор задачи не должен списать деньги второй раз
                 d = self.store.patch_job_data(jid, change_sent=True)
                 try:
@@ -340,6 +344,8 @@ class Runner:
                 except BcloudError:
                     self.store.patch_job_data(jid, change_sent=False)
                     raise
+                if price is not None:
+                    d = self.store.patch_job_data(jid, charged_kop=int(price))
                 self.last[jid] = r.get('message') or 'Bobr Cloud меняет IP'
             end = time.monotonic() + self.reip_timeout
             while True:

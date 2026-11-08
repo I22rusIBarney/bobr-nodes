@@ -52,6 +52,8 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('POST', r'/api/profiles/(?P<pid>\d+)/monitor', 'monitor', 'Изменил мониторинг'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/monitor/notify', 'monitor', 'Изменил уведомления мониторинга'),
     ('POST', r'/api/monitor/action', 'monitor.action', 'Действие с нодой из мониторинга'),
+    ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/fix-dns', 'node.dns', 'Поправил DNS ноды'),
+    ('POST', r'/api/scale/confirm', 'scale.confirm', 'Подтвердил докупку ноды при нагрузке'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/auto', 'auto', 'Изменил автоматизацию'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/plugins', 'plugins', 'Изменил плагин нод'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/plugins/preset', 'plugins', 'Применил пресет плагина'),

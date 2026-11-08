@@ -2,6 +2,22 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
+<script>/* выбран новый интерфейс — сразу туда, не рисуя классический; выбор ещё неизвестен — не показываем ничего до ответа бота */
+(function () {
+  var classic = /[?&]classic=/.test(location.search), ui = '';
+  try { ui = localStorage.getItem('bn:ui') || ''; } catch (e) {}
+  if (ui === 'new' && !classic) { location.replace('/app' + location.hash); return; }
+  if (!ui && !classic) {
+    document.documentElement.classList.add('ui-pending');
+    setTimeout(function () { document.documentElement.classList.remove('ui-pending'); }, 6000);  // бот молчит — покажем что есть
+  }
+})();</script>
+<style>
+  .ui-pending body { visibility: hidden; }
+  .ui-pending::after { content: ""; position: fixed; left: 50%; top: 50%; width: 26px; height: 26px; margin: -13px; border-radius: 50%;
+    border: 3px solid rgba(128,128,128,.25); border-top-color: rgba(128,128,128,.8); animation: ui-pending .8s linear infinite; }
+  @keyframes ui-pending { to { transform: rotate(1turn); } }
+</style>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>BobrNet</title>
 <link rel="icon" href="/static/logo.png">
@@ -85,7 +101,14 @@ function showStatus(el, r) { el.className = 'status-line ' + (r.ok ? 'ok' : 'bad
 const isAdmin = () => !!ST && ST.role === 'admin';
 // новый интерфейс (/app): если выбран — открываем его; ?classic=1 — пришли из нового в раздел, которого там ещё нет
 const QS = new URLSearchParams(location.search);
-const toNewUi = t => { if (t && t.ui === 'new' && !QS.has('classic')) { location.replace('/app'); return true; } return false; };
+// выбор интерфейса помним на устройстве: в следующий раз страница сразу откроет нужный, без мелькания классического
+const rememberUi = t => { try { if (t) localStorage.setItem('bn:ui', t.ui === 'new' ? 'new' : 'classic'); } catch (e) {} };
+const toNewUi = t => {
+  if (t && !QS.has('classic')) rememberUi(t);
+  if (t && t.ui === 'new' && !QS.has('classic')) { location.replace('/app' + location.hash); return true; }
+  document.documentElement.classList.remove('ui-pending');
+  return false;
+};
 function openDeep() {  // ?open=… — раздел, который новый интерфейс открывает здесь
   const [k, a, b] = (QS.get('open') || '').split(':');
   const go = { node: () => UI.nav.push(() => nodeView(+a, b)), job: () => UI.nav.push(() => jobView(+a)),
@@ -108,6 +131,7 @@ async function load() {
   }
   if (ST.theme) applyTheme(ST.theme);
   if (ST.role !== 'paused' && toNewUi(ST.theme)) return;
+  document.documentElement.classList.remove('ui-pending');
   UI.nav.refresh();
   if (ST && !ST.error && !ST._stale && ST.tour_done === false && !TOUR.on && !TOUR.offered && !QS.has('classic')) { TOUR.offered = true; setTimeout(tourStart, 700); }
 }
@@ -1022,6 +1046,7 @@ function themeView() {
     const r = await UI.run(() => api('theme', 'POST', { ui: k }));
     if (!r) return;
     ST.theme = r;
+    rememberUi(r);
     if (k === 'new') location.replace('/app'); else UI.nav.refresh();
   };
   v.append(group('Интерфейс', [
@@ -1261,7 +1286,7 @@ let MON = null, monTimer = 0;
 const MONF = {};  // несохранённые настройки мониторинга групп
 const CKF = {};  // несохранённый доступ по SSH на странице чекера
 const MST = { ok: ['', 'ok', 'доступна из России'], down: ['не проходит из России', 'bad'], repairing: ['чиню', 'run'], gave_up: ['не починилась', 'bad'],
-  ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''] };
+  ignored: ['не трогаю', 'warn'], replaced: ['заменена', ''], confirm: ['ждёт вашего решения', 'bad'] };
 const CST = { new: ['…', ''], installing: ['ставлю', 'run'], running: ['', 'ok', 'работает'], idle: ['нет подписок', 'warn'], failed: ['ошибка', 'bad'] };
 const cst = c => c.status === 'idle' && MON.groups.some(g => g.enabled) ? ['подписки — при опросе', 'warn'] : (CST[c.status] || [c.status, '']);
 async function loadMon() { try { MON = await api('monitor'); } catch (e) { MON = { error: e.message }; } }
@@ -1390,12 +1415,12 @@ function nodeMap(n) {
   return ruMap(cells, pts, 'Где нода проходит проверку');
 }
 // «Сразу новая нода»: домен для имени и тариф — перед покупкой, по умолчанию как у старой ноды
-function replaceSheet(n) {
+function replaceSheet(n, confirm) {
   UI.sheet('Новая нода вместо ' + (n.name || n.addr), close => {
     const box = h('div', { style: 'padding:0 0 var(--s5)' }, h('div', { class: 'group' }, UI.stack([h('div', { class: 'skeleton' }), h('div', { class: 'skeleton' })])));
     api('monitor/replace-plan?tok=' + encodeURIComponent(n.tok)).then(P => {
       if (!P.available) { box.replaceChildren(h('div', { class: 'notice bad' }, `Локации «${P.loc || '?'}» сейчас нет в Bobr Cloud — купить ноду там же нельзя.`)); return; }
-      const sel = { zone: P.zone || P.zones[0] || '', idx: P.same ?? (P.offers[0] || {}).idx };
+      const sel = { zone: P.zone || P.zones[0] || '', idx: P.same ?? (P.offers[0] || {}).idx, squads: new Set(P.squads_default || []) };
       const draw = () => {
         const o = P.offers.find(x => x.idx === sel.idx);
         const parts = [group(null, [row({ title: 'Где', detail: `${P.flag} ${P.loc_name}`, chevron: false }),
@@ -1406,9 +1431,14 @@ function replaceSheet(n) {
         parts.push(group('Конфигурация', P.offers.map(x => row({ title: x.label, sub: x.idx === P.same ? 'как у старой ноды' : null, detail: rubK(x.price_kop) + '/мес', chevron: false,
           icon: x.idx === sel.idx ? 'checkCircle' : 'disc', color: x.idx === sel.idx ? 'blue' : 'gray', onClick: () => { sel.idx = x.idx; draw(); } })),
           P.same == null ? (P.custom ? 'Старая нода — на своей конфигурации; выберите ближайший тариф.' : 'Старая нода куплена не через бота — выберите тариф.') : null));
-        const go = h('button', { class: 'btn', type: 'button', disabled: !sel.zone || !o || !P.buys_left }, o ? `Купить за ${rubK(o.price_kop)}/мес` : 'Выберите тариф');
+        // сквады обязательны: без них пользователи не увидят новую ноду
+        parts.push((P.squads || []).length ? group('Сквады', P.squads.map(s => row({ title: s.name, chevron: false,
+          right: UI.toggle(sel.squads.has(s.uuid), on => { on ? sel.squads.add(s.uuid) : sel.squads.delete(s.uuid); draw(); }, s.name) })),
+          sel.squads.size ? 'Пользователи этих сквадов увидят новую ноду.' : 'Выберите хотя бы один сквад.')
+          : h('div', { class: 'notice bad' }, 'В панели нет сквадов — создайте сквад в Remnawave.'));
+        const go = h('button', { class: 'btn', type: 'button', disabled: !sel.zone || !o || !P.buys_left || !sel.squads.size }, o ? `Купить за ${rubK(o.price_kop)}/мес` : 'Выберите тариф');
         go.onclick = UI.busy(go, async () => {
-          const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: 'replace', zone: sel.zone, idx: sel.idx }));
+          const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: confirm ? 'confirm' : 'replace', zone: sel.zone, idx: sel.idx, squads: [...sel.squads] }));
           if (res) { close(); UI.toast(res.message); await loadMon(); UI.nav.refresh(); }
         });
         parts.push(h('div', { class: 'cta' }, go), h('div', { class: 'group-f', style: 'margin:0 var(--gutter)' },
@@ -1445,10 +1475,13 @@ function monNodeView(pid, key) {
     return row({ icon: 'pin', color: vd.tone === 'ok' ? 'green' : vd.tone === 'bad' ? 'pink' : vd.tone === 'warn' ? 'amber' : 'gray', title: c.name, cls: 'wrap', chevron: false,
       sub: regionName(c.region) + ' · ' + vd.text, status: vd.tone ? ['', vd.tone, vd.text] : null });
   })));
-  const down = ['down', 'gave_up', 'ignored'].includes(n.status) && n.tok;
+  const down = ['down', 'gave_up', 'ignored', 'confirm'].includes(n.status) && n.tok;
   const act2 = a => async () => { const res = await UI.run(() => api('monitor/action', 'POST', { tok: n.tok, action: a })); if (res) { UI.toast(res.message); await loadMon(); UI.nav.refresh(); } };
   const items = [];
-  if (down && !isHost && g.mon_steps.length) items.push(row({ icon: 'tools', color: 'blue', title: 'Чинить по шагам', onClick: act2('fix') }));
+  if (n.status === 'confirm') items.push(n.step === 'replace'
+    ? row({ icon: 'plusCircle', color: 'green', title: 'Подтвердить новую ноду', sub: 'бесплатные шаги не помогли — выберите домен, тариф и сквады', cls: 'wrap', onClick: () => replaceSheet(n, true) })
+    : row({ icon: 'renew', color: 'amber', title: 'Подтвердить смену IP', sub: 'платно, в Bobr Cloud', onClick: act2('confirm') }));
+  else if (down && !isHost && g.mon_steps.length) items.push(row({ icon: 'tools', color: 'blue', title: 'Чинить по шагам', sub: 'платные шаги — после вашего подтверждения', cls: 'wrap', onClick: act2('fix') }));
   if (down && !isHost) items.push(row({ icon: 'plusCircle', color: 'green', title: 'Сразу новая нода', sub: 'выбрать домен и конфигурацию', onClick: () => replaceSheet(n) }));
   if (down && n.status !== 'ignored') items.push(row({ icon: 'eyeOff', color: 'gray', title: isHost ? 'Не напоминать' : 'Не трогать', onClick: act2('ignore') }));
   items.push(nodeMuted(g, n)
@@ -2439,12 +2472,12 @@ function autoView(pid) {
     'Бот считает продления всех серверов этого аккаунта Bobr Cloud по датам и пишет раз в день, пока не пополните.'));
   // автомасштабирование
   const sc = [h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Когда нода перегружена'),
-    UI.segmented([{ value: 'off', label: 'Только сообщить' }, { value: 'ask', label: 'Спросить' }, { value: 'auto', label: 'Докупить сам' }], A.scale, x => save({ scale: x }), 'fill'))];
+    UI.segmented([{ value: 'off', label: 'Только сообщить' }, { value: 'ask', label: 'Предлагать докупить' }], A.scale, x => save({ scale: x }), 'fill'))];
   if (A.scale !== 'off') sc.push(
     row({ title: 'Лимит докупленных нод', sub: 'сколько нод бот держит купленными сам', chevron: false, cls: 'wrap', right: numStep(A.scale_max, 1, 20, 1, x => save({ scale_max: x })) }),
     row({ title: 'Не тратить ниже', sub: 'останется на балансе после покупки', chevron: false, cls: 'wrap', right: numStep(A.scale_floor, 0, 100000, 100, x => save({ scale_floor: x }), x => x + ' ₽') }));
   v.append(group('Автомасштабирование', sc, A.scale === 'off' ? 'Перегруженной ноде бот может докупить соседа в той же локации и с тем же тарифом — нагрузка разделится.'
-    : 'Докупает только для нод, купленных ботом, не чаще раза в сутки на ноду: когда упирается процессор или память («Следить за нагрузкой») или нода заполняется по онлайну. ' + (A.scale === 'ask' ? 'В сообщении о перегрузе будет кнопка «Докупить ноду».' : 'О каждой покупке бот напишет.')));
+    : 'Только для нод, купленных ботом, не чаще раза в сутки на ноду. Покупка — только после вашего подтверждения: домен, тариф и сквады выбираете в новом интерфейсе на главной.'));
   v.append(group('Дополнительно', [
     row({ icon: 'calendar', color: 'green', title: 'Аренда серверов', sub: 'сроки и ручное продление', onClick: () => { delete RENT[pid]; UI.nav.push(() => rentView(pid)); } }),
     row({ icon: 'layers', color: 'violet', title: 'Обновление нод вручную', sub: 'выбранные или все, другая версия', onClick: () => { delete NODES[pid]; UI.nav.push(() => nodesView(pid)); } }),

@@ -323,7 +323,7 @@ async def main():
        and (await wapi('theme', 'POST', {'ui': 'classic'}))[1]['ui'] == 'classic', 'интерфейс: классический или новый, по выбору пользователя')
     app = await web.get('/app')
     ok(app.status == 200 and 'app-core.js' in await app.text(), 'страница нового интерфейса отдаётся')
-    ok(all([(await web.get(f'/static/{f}')).status == 200 for f in ('app.css', 'app-core.js', 'app-more.js', 'app-extra.js', 'app-group.js', 'app-admin.js', 'app-relay.js', 'app-tools.js', 'app.js')]), 'файлы нового интерфейса отдаются')
+    ok(all([(await web.get(f'/static/{f}')).status == 200 for f in ('app.css', 'app-core.js', 'app-more.js', 'app-extra.js', 'app-group.js', 'app-admin.js', 'app-relay.js', 'app-tools.js', 'app-buy.js', 'app-map.js', 'app-diag.js', 'app-stats.js', 'app.js')]), 'файлы нового интерфейса отдаются')
     ok((await wapi('theme', 'POST', {'hero': 'x'}))[0] == 400 and (await wapi('theme', 'POST', {'hero': 'winter-night'}))[1]['hero'] == 'winter-night'
        and (await wapi('theme', 'POST', {'hero': 'auto'}))[1]['hero'] == 'auto', 'картинка на главной: своя из восьми или по сезону')
     rh = await web.get('/static/hero-summer-day.webp')
@@ -758,6 +758,11 @@ async def main():
        f'страница ноды открывается (activeInbounds в панели — объекты): {st} {str(nd)[:200]}')
     ok([x['address'] for x in nd['hosts']] == [mj[0]['data']['domain']] and nd['ssh']['source'] == 'bot',
        f'хосты ноды найдены по домену из задачи, доступ — пароль из покупки: {nd["hosts"]}, {nd["ssh"]}')
+    st, dgn = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/diagnose')
+    ok(st == 200 and dgn['verdict']['code'] and dgn['facts']['domain'] == mj[0]['data']['domain'] and 'tcp' in dgn['facts'] and dgn['bot_bought'],
+       f'диагностика ноды: факты и диагноз: {str(dgn)[:300]}')
+    st, fx = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/fix-dns', 'POST', {})
+    ok(st == 200 and fx['ok'] and mj[0]['data']['domain'] in fx['message'], f'«Поправить DNS»: A-запись снова на сервер ноды: {fx}')
     others = [n['uuid'] for n in world.nodes if n['configProfile']['activeConfigProfileUuid'] == next(x['uuid'] for x in world.profiles if x['name'] == 'NV Vision') and n['uuid'] != plain['uuid']]
     w0, p0, hp0 = len(fakes_remote.warp_calls), len(fakes_remote.ports), len(world.host_patches)
     st, js = await wapi(f'profiles/{pid}/nodes/{plain["uuid"]}/apply', 'POST',
@@ -1388,15 +1393,26 @@ async def main():
     await monitor.tick()
     ok(store.mon(vkey)['status'] == 'repairing' and store.mon(vkey)['step'] == 'mask', 'после шага ждём две проверки')
     made0 = set(astra.made)
-    await monitor.tick()  # не помогло — следующий шаг: новая нода
+    n_ask = len(sess.sent)
+    await monitor.tick()  # не помогло — следующий шаг: новая нода, но покупка — только после подтверждения
     stv = store.mon(vkey)
-    ok(stv['step'] == 'replace', f'не помогло — новая нода: {stv}')
+    ok(stv['status'] == 'confirm' and stv['step'] == 'replace' and not stv.get('job') and set(astra.made) == made0
+       and any('🟠' in m.text for name, m in sess.sent[n_ask:] if name == 'SendMessage'),
+       f'режим «чинить сам»: перед покупкой новой ноды бот остановился и спросил: {stv}')
+    st, plan = await wapi('monitor/replace-plan?tok=' + stv['tok'])
+    ok(st == 200 and plan['step'] == 'replace' and plan['squads'] and plan['zones'], f'окно подтверждения: домены, тарифы и сквады панели: {plan}')
+    st, js = await wapi('monitor/action', 'POST', {'tok': stv['tok'], 'action': 'confirm', 'zone': plan['zones'][0], 'idx': 1, 'squads': []})
+    ok(st == 400 and 'сквад' in js['detail'] and set(astra.made) == made0, 'без сквада покупка не подтверждается')
+    chosen = [plan['squads'][0]['uuid']]
+    st, js = await wapi('monitor/action', 'POST', {'tok': stv['tok'], 'action': 'confirm', 'zone': plan['zones'][0], 'idx': 1, 'squads': chosen})
+    stv = store.mon(vkey)
+    ok(st == 200 and stv['step'] == 'replace' and stv['status'] == 'repairing', f'подтверждено — покупаю: {js}')
     await runner.wait_all()
     nj = store.job(stv['job'])
     ok(nj['status'] == 'done' and nj['data']['location'] == vd['location'] and nj['data']['replaces'] == victim['address']
-       and len(set(astra.made) - made0) == 1 and astra.made[max(astra.made)]['idx'] == 1,
-       f'куплена и поставлена новая нода в той же локации, тарифом из второго варианта: {nj["error"]}')
-    ok(any('вариант 2' in m.text for name, m in sess.sent[n0:] if name == 'SendMessage'), 'в сообщении — какой вариант конфигурации взят')
+       and len(set(astra.made) - made0) == 1 and astra.made[max(astra.made)]['idx'] == 1 and nj['data']['squads'] == chosen
+       and nj['data']['domain'].endswith('.' + plan['zones'][0]),
+       f'куплена и поставлена новая нода в той же локации — выбранными тарифом, доменом и сквадом: {nj["error"]}')
     n1 = len(sess.sent)
     await monitor.tick()
     msgs = [m.text for name, m in sess.sent[n1:] if name == 'SendMessage']
@@ -1418,6 +1434,10 @@ async def main():
     ok(alert and 'mon:f:' in str(alert[0].reply_markup) and store.mon(okey)['status'] == 'down', 'режим «предлагать»: сообщение с кнопками')
     tok = store.mon(okey)['tok']
     st, js = await wapi('monitor/action', 'POST', {'tok': tok, 'action': 'replace'})
+    ok(st == 400 and 'домен' in js['detail'], '«Сразу новая нода» без выбора домена и сквадов — не покупает')
+    await tap(f'mon:r:{tok}')
+    ok(store.mon(okey)['status'] == 'down', 'старая кнопка «Сразу новая нода» в чате ничего не покупает')
+    st, js = await wapi('monitor/action', 'POST', {'tok': tok, 'action': 'replace', 'zone': plan['zones'][0], 'squads': chosen})
     msgs = [m.text for name, m in sess.sent[n2:] if name == 'SendMessage']
     ok(any('лимит покупок' in m for m in msgs) and store.mon(okey)['status'] == 'gave_up',
        f'лимит покупок за сутки соблюдается: {js}')

@@ -28,7 +28,7 @@ from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
-          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app-group.js': 'application/javascript', 'app-admin.js': 'application/javascript', 'app-relay.js': 'application/javascript', 'app-tools.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
+          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app-group.js': 'application/javascript', 'app-admin.js': 'application/javascript', 'app-relay.js': 'application/javascript', 'app-tools.js': 'application/javascript', 'app-buy.js': 'application/javascript', 'app-map.js': 'application/javascript', 'app-diag.js': 'application/javascript', 'app-stats.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
           'logo.png': 'image/png',
@@ -152,6 +152,11 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             resp.headers.setdefault(k, v)
         if isinstance(resp, web.HTTPException) and resp.status >= 300:
             raise resp
+        # ответы API сжимаем: Caddy перед ботом этого не делает, а JSON списков — десятки килобайт
+        if (type(resp) is web.Response and resp.status == 200 and resp.body is not None and len(resp.body) > 1024
+                and 'gzip' in request.headers.get('Accept-Encoding', '') and 'Content-Encoding' not in resp.headers
+                and (resp.content_type or '').startswith(('application/json', 'text/'))):
+            resp.enable_compression(web.ContentCoding.gzip)
         return resp
 
     @web.middleware
@@ -244,9 +249,23 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def admin_page(_):
         return web.FileResponse(HERE / 'admin.html', headers={'Cache-Control': 'no-cache'})
 
+    # файлы нового интерфейса: в app.html — с версией (по содержимому), такие кешируются навсегда и отдаются сжатыми;
+    # после обновления бота версия другая — телефон заберёт новые файлы, а не покажет старые
+    gz_cache: dict[str, tuple[float, bytes]] = {}
+
+    def app_version() -> str:
+        import hashlib
+        h = hashlib.sha256()
+        for f in sorted((HERE / 'static').glob('app*')):
+            h.update(f.read_bytes())
+        return h.hexdigest()[:12]
+
     @r.get('/app')
     async def app_page(_):
-        return web.FileResponse(HERE / 'app.html', headers={'Cache-Control': 'no-cache'})
+        ver = app_version()
+        html_ = (HERE / 'app.html').read_text(encoding='utf-8')
+        html_ = re.sub(r'(/static/app[\w.-]*\.(?:js|css))"', lambda m: f'{m.group(1)}?v={ver}"', html_)
+        return web.Response(text=html_, content_type='text/html', headers={'Cache-Control': 'no-cache'})
 
     @r.get('/static/{name}')
     async def static(request):
@@ -255,7 +274,18 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise web.HTTPNotFound()
         cache = ('public, max-age=31536000, immutable' if name.endswith(('.woff2', '.woff'))  # шрифты не меняются
                  else 'public, max-age=604800' if name.endswith(('.webp', '.png')) else 'no-cache')
-        return web.FileResponse(HERE / 'static' / name, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
+        path = HERE / 'static' / name
+        if request.query.get('v') and name.startswith('app') and STATIC[name].startswith(('text/', 'application/javascript')):
+            import gzip
+            mt = path.stat().st_mtime
+            hit = gz_cache.get(name)
+            if not hit or hit[0] != mt:
+                hit = gz_cache[name] = (mt, gzip.compress(path.read_bytes(), 9))
+            hdr = {'Content-Type': STATIC[name], 'Cache-Control': 'public, max-age=31536000, immutable', 'Vary': 'Accept-Encoding'}
+            if 'gzip' in request.headers.get('Accept-Encoding', ''):
+                return web.Response(body=hit[1], headers={**hdr, 'Content-Encoding': 'gzip'})
+            return web.Response(body=path.read_bytes(), headers=hdr)
+        return web.FileResponse(path, headers={'Content-Type': STATIC[name], 'Cache-Control': cache})
 
     @r.get('/health')
     async def health(_):
@@ -808,6 +838,84 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),
                   'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']),
                   'stale': stale})
+
+    @r.get('/api/profiles/{pid}/nodes/{uuid}/diagnose')
+    async def panel_node_diagnose(request):
+        """Почему нода недоступна: панель, Bobr Cloud, DNS, порт и TLS с сервера бота, SSH, чекеры в России → диагноз и что делать."""
+        from . import diagnose as dg
+        p = profile_or_404(request.match_info['pid'], request)
+        uuid = request.match_info['uuid']
+        (nodes, hosts), _ = await cached(p, 'nodes', 'hosts', stale_ok=False)
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        names = {n['address'], bd.get('domain'), bd.get('ip')} - {None, ''}
+        port = next((h.get('port') for h in hosts if h.get('address') in names and not h.get('isHidden') and h.get('port')), None)
+        mon_st = next((st for st in store.mon_all(f'{p["id"]}:').values() if st.get('uuid') == uuid and st.get('kind', 'node') == 'node'), None)
+        ssh = runner.ssh_of(p['id'], uuid) or {}
+        cks = [{'id': c['id'], 'region': c.get('region') or ''} for c in store.checkers()]
+        if monitor is not None:
+            from .monitor import guess_region
+            cks = [{'id': c['id'], 'region': c.get('region') or guess_region(c.get('name', ''))} for c in store.checkers()]
+
+        async def bc_status():
+            try:
+                return (await bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']))).get('status')
+            except (BcloudError, ValueError, KeyError):
+                return None
+        facts = await dg.collect(n, bd, mon_st, cks, port, int(ssh.get('port') or 22), bc_status() if bd.get('server_id') else None,
+                                public_only=svc.tenant_group(store, p, admins))  # адреса нод в группе пользователя задаёт он — во внутреннюю сеть не стучимся
+        every = int(monitor.every) if monitor is not None else 300
+        return J({'facts': facts, 'verdict': dg.verdict(facts, every=every), 'at': int(time.time()), 'bot_bought': bool(bd.get('server_id'))})
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/fix-dns')
+    async def panel_node_fix_dns(request):
+        """Домен ноды указывает не на её сервер: вернуть A-запись на IP сервера (бесплатно). Если IP сервера уже сменили
+        в Bobr Cloud — задача «новый IP из Bobr Cloud» (DNS, SSH, панель), чтобы не направить домен на старый адрес."""
+        p = profile_or_404(request.match_info['pid'], request)
+        uuid = request.match_info['uuid']
+        (nodes,), _ = await cached(p, 'nodes', stale_ok=False)
+        n = next((x for x in nodes if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        if any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']):
+            raise ApiError('По ноде идёт задача — дождитесь её окончания')
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        dom, ip = bd.get('domain'), bd.get('ip')
+        if not dom or not ip:
+            raise ApiError('Домен и сервер ноды боту неизвестны — нода куплена не через бота. Поправьте A-запись в Cloudflare сами.')
+        if bd.get('server_id'):
+            try:
+                cur = (await bc_ui(store, bd.get('buyer') or buyer_of(store, p)).server(int(bd['server_id']), sync=True)).get('ip')
+            except BcloudError as e:
+                raise ApiError(f'Bobr Cloud: {e}') from None
+            if cur and cur != ip:  # IP сменили в Bobr Cloud мимо бота — обновим всё задачей смены IP
+                ssh = node_ssh(p['id'], uuid, n['address'])
+                if not ssh:
+                    raise ApiError('IP сервера сменился в Bobr Cloud, а доступа по SSH нет — укажите его на странице ноды')
+                data = {'kind': 'reip', 'mode': 'sync', 'node_uuid': uuid, 'name': n['name'], 'ip': ip, 'old_ip': ip, 'new_ip': '',
+                        'domain': dom, 'domains': [dom], 'flag': '🔁', 'loc_name': n['name'], 'spec': 'смена IP', 'ssh': ssh,
+                        'server_id': bd['server_id'], 'buyer': bd.get('buyer'), 'deploy_job': bd.get('_job')}
+                jid = store.add_job('reip-' + uuid[:8], p['id'], uid_of(request), data)
+                await runner.render(jid, force=True)
+                runner.start(jid)
+                return J({'ok': True, 'id': jid, 'message': f'IP сервера сменился в Bobr Cloud на {cur} — обновляю DNS и панель задачей'})
+        tenant = svc.tenant_group(store, p, admins)
+
+        def run():
+            cf = svc.cf_for(store, p)
+            if tenant and any(r.get('comment') != 'nv-deploy' for r in cf.records(dom)):
+                raise ApiError(f'У {dom} есть записи, созданные не ботом, — их бот в группе пользователя не меняет')
+            lines: list[str] = []
+            cf.upsert_a(dom, ip, lines.append)
+            return lines
+        try:
+            lines = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            raise ApiError(f'Cloudflare: {e}') from None
+        PC.drop(p['id'])
+        return J({'ok': True, 'message': f'{dom} снова указывает на {ip}. DNS обновится за минуту-две.', 'log': lines})
 
     def load_watched(p: dict) -> bool:
         from . import autopilot as ap
@@ -2102,7 +2210,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def domains_check(request):
         b = await body(request)
         p = profile_or_404(b.get('pid', 0), request)
-        return J({'domains': await svc.check_domains(store, p, b.get('domains') or '', int(b.get('count') or 0))})
+        warns: list[str] = []
+        return J({'domains': await svc.check_domains(store, p, b.get('domains') or '', int(b.get('count') or 0), warns), 'warnings': warns})
 
     @r.post('/api/deploy')
     async def deploy(request):
@@ -2175,6 +2284,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         squads = b.get('squads')
         if squads is not None and (not isinstance(squads, list) or not all(isinstance(x, str) for x in squads)):
             raise ApiError('сквады: список UUID')
+        if squads is not None and not squads:  # выбрали «ни одного» — нода не попадёт к пользователям
+            raise ApiError('Выберите хотя бы один сквад — без него пользователи не увидят новые ноды')
         mode = b.get('host_mode') or 'simple'
         multi = len(plan) > 1
         hosts = [svc.host_options(loc, mode, b.get('tags'),
@@ -2613,16 +2724,17 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def monitor_action(request):
         b = await body(request)
         what = b.get('action')
-        if what not in ('fix', 'replace', 'ignore'):
+        if what not in ('fix', 'replace', 'ignore', 'confirm'):
             raise ApiError('Неизвестное действие')
         found = mon().find(str(b.get('tok') or ''))
         if found and not can(request, found[0]):
             raise ApiError('Нода не найдена', 404)
-        choice = None
-        if what == 'replace' and (b.get('zone') or b.get('idx') is not None):
-            choice = {'zone': str(b.get('zone') or '').strip().lower()[:100] or None,
-                      'idx': b['idx'] if isinstance(b.get('idx'), int) and not isinstance(b.get('idx'), bool) else None}
-        return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what, choice)})
+        # новая нода: домен, тариф и сквады выбирает администратор — без них покупки нет
+        choice = {'zone': str(b.get('zone') or '')[:100], 'idx': b.get('idx'), 'squads': b.get('squads')} if what in ('replace', 'confirm') else None
+        try:
+            return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what, choice)})
+        except ValueError as e:
+            raise ApiError(str(e)) from None
 
     @r.get('/api/monitor/replace-plan')
     async def monitor_replace_plan(request):
@@ -2884,7 +2996,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def notify_feed(request):
         q = request.query
         before = int(q['before']) if str(q.get('before', '')).isdigit() else None
-        return J(NT.feed(uid_of(request), q.get('cat', ''), before))
+        return J(NT.feed(uid_of(request), q.get('cat', ''), before, q=str(q.get('q') or '')[:100]))
 
     @r.post('/api/notify/read')
     async def notify_read(request):
@@ -3275,6 +3387,73 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except BcloudError as e:
             raise ApiError(str(e)) from None
         return J({'ok': True, 'auto_renew': v})
+
+    # ── докупка при нагрузке: предложения ждут подтверждения администратора ──
+    @r.get('/api/stats/blocks')
+    async def stats_blocks(request):
+        """Где и как поставленные ноды блокируют реже: по локациям и конфигурациям за days дней, плюс советы для покупки."""
+        from . import blockstats as bs
+        try:
+            days = max(7, min(365, int(request.query.get('days') or 90)))
+        except ValueError:
+            days = 90
+        ps, now = my_profiles(request), time.time()
+        nodes: dict[tuple, dict] = {}
+        for p in ps:
+            for j in store.done_jobs(p['id']):
+                d = j['data']
+                if d.get('ip') and d.get('kind') not in SERVICE_KINDS and not d.get('removed'):
+                    nodes[(p['id'], d['ip'])] = {'location': d.get('location') or '', 'loc_name': d.get('loc_name') or '',
+                                                 'flag': d.get('flag') or '', 'config': svc.config_label(store, d), 'born': j['updated_at']}
+        res = bs.summarize(store.blocks(now - days * 86400, [p['id'] for p in ps]), list(nodes.values()), now, days)
+        res['advice'] = {r['key']: a for r in res['locations'] if (a := bs.advice(res, r['key']))}
+        return J(res)
+
+    @r.get('/api/stats/costs')
+    async def stats_costs(request):
+        """Разовые траты бота за days дней (покупки, замены, докупка, смены IP); аренду интерфейс считает по «Аренде»."""
+        from . import blockstats as bs
+        try:
+            days = max(1, min(365, int(request.query.get('days') or 30)))
+        except ValueError:
+            days = 30
+        return J({'days': days, **bs.costs(store.jobs_since([p['id'] for p in my_profiles(request)], time.time() - days * 86400))})
+
+    @r.get('/api/scale/pending')
+    async def scale_pending(request):
+        out = []
+        for a in pilot().scale_pending():
+            p = store.profile(int(a['pid']))
+            if p and can(request, p):
+                out.append({'tok': a['tok'], 'pid': p['id'], 'group': p['name'], 'name': a.get('name') or a['addr'], 'addr': a['addr'],
+                            'label': a.get('label', ''), 'price_kop': a.get('price'), 'at': int(a.get('at') or 0)})
+        return J({'pending': out})
+
+    def scale_ask_or_404(request, tok: str) -> None:
+        pid = pilot().scale_owner(tok)
+        if not pid or not can(request, store.profile(pid)):
+            raise ApiError('Предложение устарело или недоступно', 404)
+
+    @r.get('/api/scale/plan')
+    async def scale_plan(request):
+        tok = str(request.query.get('tok') or '')
+        scale_ask_or_404(request, tok)
+        try:
+            return J(await pilot().scale_plan_view(tok))
+        except (ValueError, BcloudError) as e:
+            raise ApiError(str(e)) from None
+
+    @r.post('/api/scale/confirm')
+    async def scale_confirm(request):
+        b = await body(request)
+        tok = str(b.get('tok') or '')
+        scale_ask_or_404(request, tok)
+        try:
+            msg = await pilot().scale_confirm(tok, uid_of(request), audit.who_of(request['user']),
+                                              {'zone': b.get('zone'), 'idx': b.get('idx'), 'squads': b.get('squads')})
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        return J({'ok': not msg.startswith(('Не ', 'Предложение', 'Выбранного', 'Группы')), 'message': msg})
 
     @r.get('/api/summary')
     async def summary_get(request):
