@@ -165,7 +165,7 @@ function setBot() {
   const upNow = () => confirmAct({ title: testing ? 'Обновить, когда пройдут тесты?' : 'Обновить бота сейчас?', icon: ['up', 'run'], ok: 'Обновить',
     text: (testing ? 'Новая версия ещё проходит тесты на GitHub. Сервер дождётся их (обычно 2–3 минуты) и обновит бота; если тесты не пройдут, обновление отменится. ' : '')
       + 'Бот перезапустится примерно на 10 секунд, начатые задачи доделает до обновления. Если новая версия не запустится, бот сам вернёт прежнюю.',
-    fn: async () => { const r = await api('selfupdate/now', 'POST'); toast('Обновление запланировано', r.message); } });
+    fn: async () => { const r = await api('selfupdate/now', 'POST'); UI.updating = true; toast('Обновление запланировано', r.message + '. Страница обновится сама, когда бот перезапустится'); pollFast(); } });
   const fresh = (rem && rem.version && rem.version !== c.version.number) ? rem.version : '';
   const saveUpd = async p => { try { Object.assign(c, await api('selfupdate', 'POST', p)); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); };
   const next = (c.changelog || [])[0];

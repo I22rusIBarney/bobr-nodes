@@ -59,3 +59,27 @@ def test_hosts_watch_many(tmp_path):
             await client.close()
     assert asyncio.run(go()) == (200, 200, 400)
     assert store.profile(pid)['mon_hosts'] == {a: False, b: True}
+
+
+def test_page_and_state_share_build(tmp_path):
+    """Страница помнит свою сборку (meta app-ver), /api/state отдаёт текущую — по несовпадению страница перезагрузится."""
+    import re
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from bot.web import build_web
+    store = Store(tmp_path / 'bot.db')
+    runner = Runner(store, None, tmp_path / 'logs')
+
+    async def go():
+        client = TestClient(TestServer(build_web(store, runner, '42:TEST', {ADMIN}, access=Access(store, {ADMIN}), data_dir=tmp_path)))
+        await client.start_server()
+        try:
+            page = await (await client.get('/app')).text()
+            st = await (await client.get('/api/state', headers={'X-Init-Data': init_data(ADMIN)})).json()
+            return page, st
+        finally:
+            await client.close()
+    page, st = asyncio.run(go())
+    m = re.search(r'<meta name="app-ver" content="([0-9a-f]{12})">', page)
+    assert m and st['app_ver'] == m.group(1) and f'app.js?v={m.group(1)}' in page

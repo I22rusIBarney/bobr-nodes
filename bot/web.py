@@ -267,18 +267,24 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     # после обновления бота версия другая — телефон заберёт новые файлы, а не покажет старые
     gz_cache: dict[str, tuple[float, bytes]] = {}
 
+    _ver: list = []
+
     def app_version() -> str:
-        import hashlib
-        h = hashlib.sha256()
-        for f in sorted((HERE / 'static').glob('app*')):
-            h.update(f.read_bytes())
-        return h.hexdigest()[:12]
+        """Сборка веб-приложения: файлы app* и история версий бота. Меняется только с обновлением — считаем один раз."""
+        if not _ver:
+            import hashlib
+            h = hashlib.sha256()
+            for f in sorted((HERE / 'static').glob('app*')) + [Path(__file__).parent / 'changelog.json']:
+                h.update(f.read_bytes())
+            _ver.append(h.hexdigest()[:12])
+        return _ver[0]
 
     @r.get('/app')
     async def app_page(_):
         ver = app_version()
         html_ = (HERE / 'app.html').read_text(encoding='utf-8')
         html_ = re.sub(r'(/static/app[\w.-]*\.(?:js|css))"', lambda m: f'{m.group(1)}?v={ver}"', html_)
+        html_ = html_.replace('</head>', f'<meta name="app-ver" content="{ver}">\n</head>', 1)  # сверка с /api/state: бот обновился — перезагрузить
         return web.Response(text=html_, content_type='text/html', headers={'Cache-Control': 'no-cache'})
 
     @r.get('/static/{name}')
@@ -524,7 +530,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'billing': billing_state(request),
                   'reports_open': len(store.reports(status='open', limit=1000)) if admin else None,
                   'backup': backup_state() if admin else None,
-                  'me': request['user'].get('first_name', ''), 'me_id': uid_of(request)})
+                  'me': request['user'].get('first_name', ''), 'me_id': uid_of(request), 'app_ver': app_version()})
 
     @r.post('/api/settings')
     async def save_settings(request):
