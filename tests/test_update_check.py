@@ -90,3 +90,25 @@ def test_now_and_night(tmp_path, monkeypatch):
     assert su.due(c, False, at4)[0] is True                        # «ночью» сработает, хоть автообновление выключено
     store.set(su.KEY, json.dumps({**c, 'last': ''}))
     assert su.main(['x', 'check']) in (0, 1)
+
+
+def test_api_down_falls_back_to_repo_changelog(tmp_path, monkeypatch):
+    """API GitHub лёг или упёрся в лимит — версия из changelog в репозитории (как git pull), обновиться можно."""
+    import httpx
+    monkeypatch.setattr(su, 'current', lambda: '5.2')
+
+    class Down:
+        def __init__(self, raw_ok=True):
+            self.raw_ok = raw_ok
+
+        async def get(self, url, params=None):
+            if 'api.github.com' in url:
+                req = httpx.Request('GET', url)
+                raise httpx.HTTPStatusError('x', request=req, response=httpx.Response(403, text='API rate limit exceeded', request=req))
+            if self.raw_ok and url.endswith('/main/bot/changelog.json'):
+                return Resp([{'version': '5.8', 'items': [{'kind': 'new', 'text': 'Новое'}]}, {'version': '5.2', 'items': []}])
+            raise httpx.ConnectError('down')
+    r = check(tmp_path, Down())
+    assert r['state'] == 'ready' and r['version'] == '5.8' and r['via'] == 'raw' and 'ограничил' in r['note'] and r['changes'][0]['version'] == '5.8'
+    r = check(tmp_path, Down(raw_ok=False))
+    assert r['state'] == 'unknown' and r['error'].startswith('GitHub ограничил запросы')

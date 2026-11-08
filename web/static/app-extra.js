@@ -180,12 +180,14 @@ function setBot() {
       h('div', { class: 'li', style: 'flex-wrap:wrap' }, h('div', { class: 'ic-tile' }, ic('up')),
         h('div', { class: 'grow', style: 'flex:1 1 220px' }, h('div', { class: 't' }, `Bobr Nodes ${c.version.number}`),
           h('div', { class: 's', style: 'white-space:normal' }, S.remLoading ? 'Проверяю GitHub…' : !rem ? 'GitHub не ответил' : latest ? 'Последняя версия' : rem.state === 'ready' ? (fresh ? `Есть ${fresh}` : 'Есть обновление')
-            : testing ? `${fresh ? 'Готовится ' + fresh : 'Новая версия'} — проходит тесты на GitHub, обычно 2–3 минуты` : rem.state === 'failed' ? `${fresh || 'Новая версия'} не прошла тесты — обновление недоступно` : 'Не удалось проверить')),
+            : testing ? `${fresh ? 'Готовится ' + fresh : 'Новая версия'} — проходит тесты на GitHub, обычно 2–3 минуты` : rem.state === 'failed' ? `${fresh || 'Новая версия'} не прошла тесты — обновление недоступно` : rem.error || 'Не удалось проверить')),
         rem && (rem.state === 'ready' || testing) ? btn(testing ? 'Обновить, когда пройдут тесты' : 'Обновить сейчас', upNow, 's primary')
           : btn('Проверить', e => busyBtn(e, async () => {
             try { S.rem = await api('selfupdate/check?force=1');
-              const st = S.rem.state; toast(st === 'latest' ? 'Новых версий нет' : st === 'ready' ? 'Есть обновление' : st === 'testing' ? 'Новая версия проходит тесты' : st === 'failed' ? 'Новая версия не прошла тесты' : 'GitHub не ответил', null, st === 'failed' || st === 'unknown' ? 'bad' : 'ok'); }
+              const st = S.rem.state; toast(st === 'latest' ? 'Новых версий нет' : st === 'ready' ? 'Есть обновление' : st === 'testing' ? 'Новая версия проходит тесты' : st === 'failed' ? 'Новая версия не прошла тесты' : 'Не удалось проверить', st === 'unknown' ? S.rem.error : null, st === 'failed' || st === 'unknown' ? 'bad' : 'ok'); }
             catch (x) { toast('Не получилось', x.message, 'bad'); } render(); }), 's', 'refresh')),
+      rem && rem.via === 'raw' ? h('div', { class: 'li' }, h('div', { class: 's', style: 'white-space:normal' },
+        `${rem.note}. Версию бот узнал прямо из репозитория; тесты сервер проверит сам при обновлении.`)) : null,
       rem && (rem.state === 'ready' || testing) && (rem.changes || []).length ? h('details', { class: 'li', style: 'display:block' }, h('summary', { style: 'cursor:pointer;font-weight:600' }, `Что будет в ${fresh || 'новой версии'}`),
         h('ul', { style: 'margin:8px 0 0;padding-left:20px' }, rem.changes.flatMap(r => (r.items || []).map(i => h('li', { style: 'margin:4px 0' }, i.text))).slice(0, 12))) : null,
       switchRow('Обновляться автоматически', `Ночью в ${c.hour}:00 по вашему времени`, c.on, v => saveUpd({ on: v }))),

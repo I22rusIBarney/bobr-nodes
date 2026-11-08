@@ -976,9 +976,10 @@ class Autopilot:
             return
         from . import selfupdate as su
         rem = await su.check_remote(self.data_dir)
-        if rem['state'] != 'ready' or self.store.get('ap:newver') == rem['sha']:
+        mark = rem['sha'] or rem['version']  # без API GitHub коммита не знаем — помним по версии
+        if rem['state'] != 'ready' or not mark or self.store.get('ap:newver') == mark:
             return
-        self.store.set('ap:newver', rem['sha'])
+        self.store.set('ap:newver', mark)
         c = su.cfg(self.store)
         lines = [f'🆕 <b>Вышла версия {html.escape(rem["version"] or rem["sha"])}</b>' + (f' (у вас {html.escape(rem["current"])})' if rem['current'] else '')]
         for r in rem['changes'][:3]:

@@ -176,6 +176,17 @@ def newer(log: list[dict], than: str) -> list[dict]:
     return [r for r in log if vkey(r['version']) > vkey(than)] if than else log[:1]
 
 
+def api_problem(e: Exception) -> str:
+    """Почему API GitHub не ответил — понятными словами."""
+    import httpx
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        if code in (403, 429) and 'rate limit' in e.response.text.lower():
+            return 'GitHub ограничил запросы с сервера бота (без ключа — 60 в час)'
+        return f'API GitHub временно не работает (ошибка {code})'
+    return 'API GitHub не отвечает с сервера бота'
+
+
 async def check_remote(data_dir: str | Path, force: bool = False, client=None) -> dict:
     """Есть ли новая версия: последний коммит main, прошёл ли он тесты (и собран ли образ), что в нём нового.
     state: latest — новее нет; ready — можно ставить; testing — тесты идут; failed — не прошли; unknown — GitHub не ответил."""
@@ -218,7 +229,14 @@ async def check_remote(data_dir: str | Path, force: bool = False, client=None) -
                 res['state'] = 'testing'
     except Exception as e:  # noqa: BLE001
         logging.getLogger(__name__).info('update check: %s', e)
-        res['error'] = 'GitHub не ответил — попробуйте позже'
+        why = api_problem(e)
+        try:  # API не ответил — история версий прямо из репозитория (как у git pull: без лимитов API)
+            log = (await c.get(f'https://raw.githubusercontent.com/{slug}/main/bot/changelog.json')).json()
+            top = str(log[0]['version'])
+            res.update(version=top, changes=newer(log, current())[:5], via='raw', note=why, sha='',
+                       state='ready' if vkey(top) > vkey(current()) else 'latest')  # тесты дождётся сам сервер при обновлении
+        except Exception:  # noqa: BLE001
+            res['error'] = why + ' — попробуйте позже'
     finally:
         if own:
             await c.aclose()
