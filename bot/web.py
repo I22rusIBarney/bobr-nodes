@@ -552,9 +552,31 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 errors.append(f'{label}: {e}')
         if errors:
             raise ApiError('; '.join(errors))
+        if clean.get('github_token'):  # сразу проверить: неверный токен GitHub отвечает 401 на всё
+            if (await github_limit(clean['github_token']))[0] == 401:
+                raise ApiError('Токен GitHub: GitHub его не принял — проверьте, что скопировали целиком и он не истёк')
         for k, v in clean.items():
             store.set(k, v)
+        if 'github_token' in clean:
+            from . import ghapi
+            ghapi.load(store)
         return J({'ok': True, 'settings': settings_view(), 'issues': issues(request)})
+
+    async def github_limit(token: str | None = None) -> tuple[int, dict]:
+        """(HTTP-код, лимит запросов {limit, remaining}) для токена (None — текущий из настроек)."""
+        import httpx
+
+        from . import ghapi
+        h = ghapi.headers()
+        if token is not None:
+            h['Authorization'] = f'Bearer {token}'
+        try:
+            async with httpx.AsyncClient(timeout=15, headers=h) as c:
+                r = await c.get('https://api.github.com/rate_limit')
+            core = (r.json().get('resources') or {}).get('core') or {} if r.status_code == 200 else {}
+            return r.status_code, core
+        except (httpx.HTTPError, ValueError):
+            return 0, {}
 
     @r.post('/api/check/bcloud')
     async def check_bcloud(_):
@@ -2815,6 +2837,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         for ext in ('sh', 'readme'):
             (sdir / f'{s["id"]}.{ext}').unlink(missing_ok=True)
         return J({'ok': True})
+
+    @r.post('/api/check/github')
+    async def check_github(_):
+        code, core = await github_limit()
+        if code == 200:
+            return J({'ok': True, 'message': f'Лимит {core.get("limit")} запросов в час, осталось {core.get("remaining")}'
+                      + ('' if store.get('github_token') else ' — без токена')})
+        return J({'ok': False, 'message': 'GitHub не принял токен' if code == 401 else f'API GitHub не отвечает (код {code or "нет связи"})'})
 
     @r.post('/api/check/gemini')
     async def check_gemini(_):

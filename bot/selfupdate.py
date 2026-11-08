@@ -197,7 +197,8 @@ async def check_remote(data_dir: str | Path, force: bool = False, client=None) -
         return hit['res']
     res = {'state': 'unknown', 'current': current(), 'current_sha': cur[:7], 'version': '', 'sha': '', 'changes': [], 'checked_at': int(time.time())}
     own = client is None
-    c = client or httpx.AsyncClient(timeout=8, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
+    from . import ghapi
+    c = client or httpx.AsyncClient(timeout=8, headers=ghapi.headers())
     try:
         r = await c.get(f'https://api.github.com/repos/{slug}/commits/main')
         r.raise_for_status()

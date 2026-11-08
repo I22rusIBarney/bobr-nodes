@@ -61,11 +61,12 @@ def parse_github_url(url: str) -> dict:
 
 
 async def _gh(client: httpx.AsyncClient, path: str):
-    r = await client.get(GH_API + path, headers={'Accept': 'application/vnd.github+json'})
+    from . import ghapi
+    r = await client.get(GH_API + path, headers=ghapi.headers())
     if r.status_code == 404:
         raise ScriptError('репозиторий или файл не найден (или он приватный)')
     if r.status_code == 403 and 'rate limit' in r.text.lower():
-        raise ScriptError('GitHub временно ограничил запросы — попробуйте через несколько минут')
+        raise ScriptError('GitHub временно ограничил запросы — попробуйте через несколько минут или добавьте токен GitHub в «Подключениях»')
     if r.status_code >= 300:
         raise ScriptError(f'GitHub ответил {r.status_code}')
     return r.json()

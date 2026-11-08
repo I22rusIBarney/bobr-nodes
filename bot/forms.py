@@ -165,10 +165,22 @@ def v_model(v, _=None):
     return v
 
 
+def v_github(v, _=None):
+    v = v.strip()
+    if v == '-':
+        return ''
+    if not re.fullmatch(r'(github_pat_|ghp_)[A-Za-z0-9_]{20,255}', v):
+        raise ValueError('токен вида github_pat_… или ghp_…')
+    return v
+
+
 SETTINGS.update({
     'gemini_key': ('Ключ Gemini API', 'Google AI Studio → Get API key. Нужен только для «Моих скриптов»', True, v_nonempty),
     'gemini_model': ('Модель Gemini', 'Пусто — самая свежая pro-модель из доступных', False, v_model),
     'gemini_proxy': ('Прокси для Gemini', 'Если Gemini не работает из страны сервера: http://… или socks5://…', True, v_proxy),
+    'github_token': ('Токен GitHub', 'Необязательно. Лимит запросов к GitHub — 5000 в час вместо 60: проверка обновлений бота, версии Xray и '
+                     'панели. GitHub → Settings → Developer settings → Fine-grained tokens: доступ «Public repositories», без прав. «-» — убрать',
+                     True, v_github),
 })
 SECRET_SETTINGS = {k for k, (_, _, secret, _) in SETTINGS.items() if secret}
 

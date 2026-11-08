@@ -29,7 +29,8 @@ def releases(timeout: float = 20) -> list[dict]:
     """Стабильные релизы панели, новые сверху: [{tag, name, body, url, date}]; кэш на час."""
     if _rcache['list'] and time.time() - _rcache['at'] < 3600:
         return _rcache['list']
-    req = urllib.request.Request(RELEASES, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
+    from . import ghapi
+    req = urllib.request.Request(RELEASES, headers=ghapi.headers())
     with urllib.request.urlopen(req, timeout=timeout) as r:
         data = json.loads(r.read().decode())
     out = [{'tag': x['tag_name'], 'name': x.get('name') or x['tag_name'], 'body': (x.get('body') or '')[:20000],
@@ -45,7 +46,8 @@ BACKEND = 'https://api.github.com/repos/remnawave/backend/releases/tags/{tag}'
 
 def backend_notes(tag: str, timeout: float = 20) -> str:
     """Изменения релиза: в remnawave/panel лежит только обёртка со ссылками, сами пункты — в remnawave/backend."""
-    req = urllib.request.Request(BACKEND.format(tag=tag), headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
+    from . import ghapi
+    req = urllib.request.Request(BACKEND.format(tag=tag), headers=ghapi.headers())
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return str(json.loads(r.read().decode()).get('body') or '')
