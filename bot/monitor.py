@@ -531,7 +531,10 @@ class Monitor:
         dns = await asyncio.to_thread(resolve_all, {n['address'] for n in nodes} | {h.get('address') or '' for h in hosts})
         votes = self.votes(prof, results, nodes, hosts, dns, injectors)
         _, loose = self.assign(nodes, hosts, dns, svc.bot_jobs_by_ip(self.store, prof['id']), injectors)
-        CACHE.put(prof, 'host_kinds', host_kinds(hosts, {h['uuid'] for h in loose}, injectors))
+        # в базе, а не в кэше панели: кэш сбрасывается при любой правке в панели, и раздел «Хосты» терял разбор
+        kinds = host_kinds(hosts, {h['uuid'] for h in loose}, injectors)
+        if json.loads(self.store.get(f'host_kinds:{prof["id"]}') or '{}') != kinds:
+            self.store.set(f'host_kinds:{prof["id"]}', json.dumps(kinds))
         cfg = settings_of(prof)
         now = time.time()
         seen = set()
