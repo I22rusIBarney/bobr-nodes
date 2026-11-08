@@ -820,13 +820,36 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                                         asyncio.to_thread(lambda: up.panel_version(panel_of(p))))
         return {'panel': pv, 'latest': tags[0] if tags else '', 'target': up.pick_target(tags, pv)}
 
+    _xmap_task: list = []
+
     @r.get('/api/xray/versions')
-    async def xray_versions(_):
-        """Релизы Xray-core (GitHub XTLS) для выбора своей версии на ноде."""
+    async def xray_versions(request):
+        """Релизы Xray-core (GitHub XTLS) для выбора своей версии на ноде, с версиями ноды, в которые каждый вшит,
+        и рекомендацией: Xray из версии ноды, подходящей к панели группы (pid)."""
+        nmap = up.node_xray_cached()
+        if nmap is None and (not _xmap_task or _xmap_task[0].done()):
+            # первый раз — 40 Dockerfile с GitHub, ~15 с: считаем в фоне (и когда API GitHub лежит), страница спросит ещё раз
+            _xmap_task[:] = [asyncio.get_running_loop().create_task(asyncio.to_thread(up.node_xray_map))]
         try:
-            return J({'releases': await asyncio.to_thread(up.xray_releases)})
+            rel = await asyncio.to_thread(up.xray_releases)
         except (OSError, ValueError) as e:
-            raise ApiError(f'GitHub не ответил: {e}') from None
+            if not nmap:
+                raise ApiError(f'GitHub не ответил: {e}') from None
+            # API GitHub недоступен — хотя бы версии, вшитые в ноды (из их Dockerfile)
+            rel = [{'tag': x, 'pre': False, 'date': ''} for x in sorted(set(nmap.values()), key=lambda v: up.semver(v.lstrip('v')) or (0, 0, 0), reverse=True)]
+        nmap = nmap or {}
+        by_x: dict[str, list[str]] = {}
+        for tag, x in sorted(nmap.items(), key=lambda kv: up.semver(kv[0]) or (0, 0, 0), reverse=True):
+            by_x.setdefault(x, []).append(tag)
+        out = {'releases': [{**x, 'nodes': by_x.get(x['tag'], [])} for x in rel], 'mapping': bool(nmap)}
+        if nmap and str(request.query.get('pid') or '').isdigit():
+            p = profile_or_404(request.query['pid'], request)
+            try:
+                v = await node_versions(p)
+            except engine.StepError:
+                v = {}
+            out.update(panel=v.get('panel', ''), node_target=v.get('target', ''), recommended=nmap.get(v.get('target', ''), ''))
+        return J(out)
 
     @r.post('/api/profiles/{pid}/nodes/{uuid}/xray')
     async def node_xray(request):

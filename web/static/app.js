@@ -120,9 +120,13 @@ document.addEventListener('pointerdown', () => { pressed = true; }, true);
 const release = () => setTimeout(() => { pressed = false; if (deferred) { deferred = false; render(true); } });
 document.addEventListener('pointerup', release, true);
 document.addEventListener('pointercancel', release, true);
+// выбор в системном списке (на iPhone фокус с <select> уходит, пока открыт выбор): фоновая перерисовка его закрыла бы
+let picking = 0;
+document.addEventListener('pointerdown', e => { if (e.target.closest && e.target.closest('select')) picking = Date.now() + 15000; }, true);
+document.addEventListener('change', e => { if (e.target.tagName === 'SELECT') picking = 0; }, true);
 function render(soft) {
   if (soft && pressed) { deferred = true; return; }
-  if (soft && document.activeElement && document.activeElement.tagName === 'SELECT') { clearTimeout(pending); pending = setTimeout(() => render(true), 600); return; }
+  if (soft && ((document.activeElement && document.activeElement.tagName === 'SELECT') || Date.now() < picking)) { clearTimeout(pending); pending = setTimeout(() => render(true), 600); return; }
   memo = null;
   const r = parse();
   if (!(r.name in OVERLAYS) && !VIEWS[r.name]) return go('overview');

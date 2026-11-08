@@ -215,7 +215,7 @@ XRAY_RELEASES = 'https://api.github.com/repos/XTLS/Xray-core/releases?per_page=3
 _xcache: dict = {'at': 0.0, 'list': []}
 
 
-def xray_releases(timeout: float = 10) -> list[dict]:
+def xray_releases(timeout: float = 20) -> list[dict]:
     """Релизы Xray-core: [{tag, pre, date}], новые сверху; кэш на час."""
     if _xcache['list'] and time.time() - _xcache['at'] < 3600:
         return _xcache['list']
@@ -322,3 +322,44 @@ def xray_node(node: dict, prof: dict, logfile, log: Callable[[str], None], stage
     log('с новым Xray нода не вышла на связь — возвращаю прежний')
     _, rb = r.run(xray_rollback_cmd(), 600)
     raise engine.StepError('с новым Xray нода не вышла на связь с панелью — ' + ('вернул прежний' if 'RB_DONE' in rb else 'и вернуть прежний не удалось — посмотрите сервер'))
+
+
+NODE_RAW = 'https://raw.githubusercontent.com/remnawave/node/{tag}/{path}'
+_ncache: dict = {'at': 0.0, 'map': {}}
+_XRAY_PIN = re.compile(r'XRAY_CORE_VERSION=(v\d+\.\d+\.\d+)|install-latest-xray\.sh \| bash -s -- (v\d+\.\d+\.\d+)')
+
+
+def xray_in(dockerfile: str) -> str:
+    """Версия Xray, вшитая в образ ноды, по её Dockerfile ('' — не нашлась)."""
+    m = _XRAY_PIN.search(dockerfile or '')
+    return (m.group(1) or m.group(2)) if m else ''
+
+
+def node_xray_cached() -> dict[str, str] | None:
+    """Сопоставление из кэша (None — ещё не считали или устарело)."""
+    return _ncache['map'] if _ncache['map'] and time.time() - _ncache['at'] < 6 * 3600 else None
+
+
+def node_xray_map(timeout: float = 20) -> dict[str, str]:
+    """Версия ноды remnawave/node → версия Xray в её образе (из Dockerfile репозитория на этом теге); кэш 6 часов."""
+    if _ncache['map'] and time.time() - _ncache['at'] < 6 * 3600:
+        return _ncache['map']
+    from concurrent.futures import ThreadPoolExecutor
+    # теги образа на Docker Hub = теги репозитория; так обходимся без GitHub API (лимиты, 5xx)
+    tags = sorted({t for t in hub_tags() if semver(t)}, key=semver, reverse=True)[:40]
+
+    def one(tag: str) -> tuple[str, str]:
+        for path in ('docker/Dockerfile', 'Dockerfile'):  # раньше Dockerfile лежал в корне
+            try:
+                with urllib.request.urlopen(NODE_RAW.format(tag=tag, path=path), timeout=timeout) as r:
+                    v = xray_in(r.read().decode(errors='replace'))
+                if v:
+                    return tag, v
+            except OSError:
+                continue
+        return tag, ''
+    with ThreadPoolExecutor(8) as ex:
+        out = {t: v for t, v in ex.map(one, tags) if v}
+    if out:
+        _ncache.update(at=time.time(), map=out)
+    return out
