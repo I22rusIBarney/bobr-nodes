@@ -10,6 +10,22 @@ const G = pid => groups().find(p => p.id === pid) || { name: '—' };
 
 /* ── загрузка ── */
 let pollTimer = 0;
+/* кэш на устройстве: при открытии сразу показываем то, что видели в прошлый раз, свежее подставляется по мере ответа.
+   Только то, что и так видно на экранах (без секретов); чужой аккаунт или старше суток — не берём. */
+const CACHE_KEY = 'bn:cache', CACHE_TTL = 86400e3;
+function cacheSave() {
+  if (!D.st || D.st.role === 'paused') return;
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ at: Date.now(), me: D.st.me_id, st: D.st, nodes: D.nodes, mon: D.mon, jobs: D.jobs, wallet: D.wallet, rent: D.rent })); }
+  catch (e) { /* переполнено или недоступно — без кэша */ }
+}
+function cacheLoad() {
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { return; }
+  const me = tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id;
+  if (!c || !c.st || Date.now() - c.at > CACHE_TTL || (me && c.me && me !== c.me)) return;
+  Object.assign(D, { st: c.st, nodes: c.nodes || {}, mon: c.mon, jobs: c.jobs || [], wallet: c.wallet, rent: c.rent || {}, loading: false, cachedAt: c.at });
+}
+cacheLoad();
 /* как часто что обновлять: статусы и задачи меняются часто, ноды — из кэша панели на сервере,
    баланс и аренда — внешний Bobr Cloud и меняются редко. Свёрнутое окно не опрашивает ничего. */
 const EVERY = { nodes: 60e3, monitor: 60e3, scale: 120e3, wallet: 300e3, rent: 600e3 };
@@ -33,9 +49,9 @@ function newBuild() {
 async function loadAll(force) {
   clearTimeout(pollTimer);
   if (document.hidden && !force) return;  // вернётся к окну — обновим сразу (visibilitychange)
-  try { D.st = await api('state'); D.err = null; }
+  try { const st = await api('state'); if (D.st && st.me_id !== D.st.me_id) { D.nodes = {}; D.rent = {}; D.mon = null; D.jobs = []; } D.st = st; D.err = null; }
   catch (e) {
-    if (UI.updating && !D.loading) { pollTimer = setTimeout(loadAll, 5000); return; }  // бот перезапускается после обновления — ждём молча
+    if ((UI.updating || D.cachedAt) && !D.loading && D.st) { pollTimer = setTimeout(loadAll, 5000); return; }  // бот перезапускается или из кэша — ждём молча
     D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return;
   }
   if (newBuild()) return;
@@ -53,10 +69,10 @@ async function loadAll(force) {
     due('wallet', force || first) ? (mark('wallet'), api('wallet').then(r => { D.wallet = r; }).catch(() => { D.wallet = null; })) : null,
     due('scale', force || first) ? (mark('scale'), api('scale/pending').then(r => { D.scale = r.pending || []; }).catch(() => { D.scale = []; })) : null,
   ]);
-  D.loading = false; render(true);
+  D.loading = false; D.cachedAt = 0; render(true); cacheSave();
   // аренда — из Bobr Cloud (по 2 запроса на группу): после первой отрисовки, раз в 10 минут или если её сбросили (продление)
   const rentFor = groups().filter(p => due('rent', first) || D.rent[p.id] == null);
-  if (rentFor.length) { if (due('rent', first)) mark('rent'); Promise.all(rentFor.map(p => api(`profiles/${p.id}/rent`).then(r => { D.rent[p.id] = r.servers || []; }).catch(() => {}))).then(() => render(true)); }
+  if (rentFor.length) { if (due('rent', first)) mark('rent'); Promise.all(rentFor.map(p => api(`profiles/${p.id}/rent`).then(r => { D.rent[p.id] = r.servers || []; }).catch(() => {}))).then(() => { render(true); cacheSave(); }); }
   pollTimer = setTimeout(loadAll, UI.updating ? 5000 : activeJobs().length ? 6000 : 30000);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden && D.st) loadAll(); });
@@ -64,6 +80,7 @@ async function loadNodes(pid, fresh) {
   try {
     const r = await api(`profiles/${pid}/nodes` + (fresh ? '?fresh=1' : ''));
     D.nodes[pid] = r; delete D.nerr[pid];
+    if (D.cachedAt || D.st) render(true);  // группа ответила — показать сразу, не дожидаясь медленных
     if (r.stale && !fresh) loadNodes(pid, true).then(() => render(true));  // устаревший кэш показали сразу, свежий — следом
   } catch (e) { D.nerr[pid] = e.message; }
 }
@@ -343,13 +360,14 @@ function vOverview() {
   const stat = (k, l, p, cls) => h('button', { type: 'button', class: 'stat', onclick: to(p) }, h('span', { class: 'k ' + (cls || '') }, k), h('span', { class: 'l' }, l));
   const loadingNodes = gs.some(p => !D.nodes[p.id] && !D.nerr[p.id]);
   return [
-    pageH('Обзор', `${pl(ns.length, 'нода', 'ноды', 'нод')} в ${pl(gs.length, 'группе', 'группах', 'группах')}` + (D.mon && D.mon.every ? ` · проверка из России раз в ${Math.round(D.mon.every / 60)} мин` : '')),
+    pageH('Обзор', `${pl(ns.length, 'нода', 'ноды', 'нод')} в ${pl(gs.length, 'группе', 'группах', 'группах')}` + (D.cachedAt ? ` · данные на ${clock(D.cachedAt)}, обновляю…`
+      : D.mon && D.mon.every ? ` · проверка из России раз в ${Math.round(D.mon.every / 60)} мин` : '')),
     nodesErrors(),
     h('section', { class: 'section', 'aria-labelledby': 'h-attn' },
       h('div', { class: 'section-h' }, h('h2', { id: 'h-attn' }, 'Требует внимания'), items.length ? h('span', { class: 'tag' }, items.length) : null),
       items.length ? h('div', { class: 'airmail' }, h('div', { class: 'inner' }, items.map(attnRow)))
         : h('div', { class: 'sheet all-clear' }, h('div', { class: 'attn-ic', style: 'background:var(--ok-soft);color:var(--ok)' }, ic('check')),
-          h('div', null, h('b', null, loadingNodes ? 'Проверяю панели…' : 'Всё в порядке'), h('div', { class: 'muted' }, 'Ноды на связи и проходят из России. Если что-то случится, бот напишет в Telegram.')))),
+          h('div', null, h('b', null, loadingNodes ? 'Проверяю панели…' : 'Всё в порядке'), h('div', { class: 'muted' }, loadingNodes ? 'Загружаю свежие данные с панелей групп.' : 'Ноды на связи и проходят из России. Если что-то случится, бот напишет в Telegram.')))),
     h('div', { class: 'grid2' },
       h('div', null,
         h('section', { class: 'section' },
