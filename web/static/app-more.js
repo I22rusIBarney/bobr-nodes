@@ -333,7 +333,8 @@ function vGroup(arg) {
       : D.nodes[pid] ? empty('server', 'В группе нет нод', 'Добавьте первые — выберите страны и тариф.', btn('Добавить ноды', () => openDeploy(pid), 'primary', 'plus')) : skeleton()],
     conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), rent: () => groupRent(g), plugins: () => groupPlugins(g), clean: () => groupCleanup(g) }[tab]();
   return [h('button', { type: 'button', class: 'back', onclick: () => go('groups') }, ic('chevL'), 'Группы'),
-    pageH(g.name, `${(g.panel_url || '').replace(/^https?:\/\//, '')} · ${pl(ns.length, 'нода', 'ноды', 'нод')}` + (g.created_by_label ? ` · ${g.created_by_label}` : ''),
+    pageH(g.name, `${(g.panel_url || '').replace(/^https?:\/\//, '')} · ${pl(ns.length, 'нода', 'ноды', 'нод')}`
+      + (ns.some(n => n.online != null) ? ` · ${ns.reduce((s, n) => s + (n.online || 0), 0)} онлайн` : '') + (g.created_by_label ? ` · ${g.created_by_label}` : ''),
       [btn('Ноды в эту группу', () => openDeploy(pid), '', 'plus')]),
     h('div', { class: 'tabs page-tabs', role: 'tablist' }, TABS.map(([v, l]) => h('button', { type: 'button', role: 'tab', 'aria-selected': String(v === tab), onclick: () => { UI.tabs['g' + pid] = v; render(); } }, l))),
     content];

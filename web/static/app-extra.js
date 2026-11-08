@@ -40,8 +40,26 @@ function nodeSettings(n, det) {
         `Сейчас ${hasFM ? 'включён' : 'выключен'}. Маскирует начало соединения — помогает, когда провайдер режет по шаблону.`)),
     h('div', { class: 'apply-bar', style: 'margin-bottom:24px' }, h('span', { class: 'muted' }, changes ? pl(changes, 'изменение', 'изменения', 'изменений') : 'Изменений нет'),
       h('span', { class: 'sp' }), changes ? btn('Сбросить', () => { UI.ns = null; render(); }, 's') : null, btn('Применить', apply, 's primary', null, { disabled: !changes })),
+    nodeXray(n, d),
     nodeSsh(n, d, st.ssh),
   ];
+}
+/* своя версия Xray: релизы XTLS или как в образе ноды (по версии панели — так рекомендует Remnawave) */
+function nodeXray(n, d) {
+  if (!D.xrv) { D.xrv = { loading: true }; api('xray/versions').then(r => { D.xrv = r; }, e => { D.xrv = { error: e.message }; }).then(() => render(true)); }
+  const X = D.xrv, sel = UI.xsel && UI.xsel.id === n.id ? UI.xsel : (UI.xsel = { id: n.id, v: 'image' });
+  const rel = X.releases || [];
+  const go_ = () => confirmAct({ title: sel.v === 'image' ? 'Вернуть Xray из образа ноды?' : `Поставить Xray ${sel.v} на ${n.name}?`, icon: ['up', 'run'], ok: 'Поставить',
+    text: (sel.v === 'image' ? 'Нода вернётся к версии Xray, которая идёт с её образом.' : `Бот скачает Xray ${sel.v} с GitHub (с проверкой контрольной суммы) и подключит его к ноде, не трогая её docker-compose.`)
+      + ' Нода перезапустится на несколько секунд. Если с новой версией она не выйдет на связь, бот вернёт прежнюю.',
+    fn: async () => { const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/xray`, 'POST', { version: sel.v }); jobToast(`${n.name}: меняю Xray`, r.id); refreshSoon(); } });
+  return [h('div', { class: 'section-h' }, h('h2', null, 'Версия Xray')),
+    h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:20px' },
+      fld('Версия', X.loading ? sk(40) : h('select', { class: 'sel', style: 'width:100%', 'aria-label': 'Версия Xray', onchange: e => { sel.v = e.target.value; render(); } },
+        h('option', { value: 'image', selected: sel.v === 'image' || null }, 'Как в образе ноды (рекомендуется)'),
+        rel.map(x => h('option', { value: x.tag, selected: sel.v === x.tag || null }, `${x.tag}${x.pre ? ' — тестовая' : ''} · ${x.date}`))),
+        X.error ? X.error : `Сейчас ${d.xray ? 'Xray ' + d.xray : 'версия неизвестна'}. Образ ноды подобран под версию панели; свою версию ставьте, если в этой есть нужное исправление.`),
+      h('div', { class: 'chips' }, btn(sel.v === 'image' ? 'Вернуть из образа' : `Поставить ${sel.v}`, go_, 's primary', 'up')))];
 }
 function nodeSsh(n, d, s) {
   const KEYS = [{ v: '', l: 'Без ключа' }, { v: 'own', l: 'Свой ключ' }, ...(isAdmin() || d.ssh.key === 'bot' ? [{ v: 'bot', l: 'Ключ бота' }] : [])];

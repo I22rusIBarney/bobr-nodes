@@ -787,6 +787,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         profiles = {x['uuid']: x for x in profiles['configProfiles']}
         bot = bot_jobs_by_ip(p['id'])
         busy = {j['data'].get('node_uuid') for j in store.active_jobs() if j['profile_id'] == p['id']}
+        # мосты: нода выхода (node_uuid) ↔ нода входа в панели (made.node) — показываем рядом и с общей историей
+        entry_of, entries = {}, {}
+        for x in store.relays():
+            ent = (x.get('made') or {}).get('node') if x['pid'] == p['id'] else None
+            if ent and x.get('node_uuid'):
+                entry_of[ent] = x['node_uuid']
+                entries.setdefault(x['node_uuid'], []).append(ent)
         out = []
         for n in nodes:
             pr = profiles.get((n.get('configProfile') or {}).get('activeConfigProfileUuid')) or {}
@@ -797,7 +804,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                         'disabled': bool(n.get('isDisabled')), 'country': n.get('countryCode') or '',
                         'online': n.get('usersOnline'),
                         'profile': pr.get('name', ''), 'features': sorted(engine.features_of(pr.get('config'))),
-                        'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', '')})
+                        'bot': n['address'] in bot, 'domain': (bot.get(n['address']) or {}).get('domain', ''),
+                        'bridge_exit': entry_of.get(n['uuid']), 'bridge_entries': entries.get(n['uuid'], [])})
         return {'nodes': out, 'bot_key': runner.bot_key()[1], 'versions': versions, 'stale': stale}
 
     async def node_versions(p: dict) -> dict:
@@ -805,6 +813,31 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         tags, pv = await asyncio.gather(asyncio.to_thread(up.hub_tags),
                                         asyncio.to_thread(lambda: up.panel_version(panel_of(p))))
         return {'panel': pv, 'latest': tags[0] if tags else '', 'target': up.pick_target(tags, pv)}
+
+    @r.get('/api/xray/versions')
+    async def xray_versions(_):
+        """Релизы Xray-core (GitHub XTLS) для выбора своей версии на ноде."""
+        try:
+            return J({'releases': await asyncio.to_thread(up.xray_releases)})
+        except (OSError, ValueError) as e:
+            raise ApiError(f'GitHub не ответил: {e}') from None
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/xray')
+    async def node_xray(request):
+        """Своя версия Xray на ноде ({version: v26.10.31 | image}) — задача с проверкой и откатом."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        try:
+            ver = up.check_xray(b.get('version'))
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        n = await asyncio.to_thread(node_of, p, request.match_info['uuid'])
+        if any(j['data'].get('node_uuid') == n['uuid'] for j in store.active_jobs() if j['profile_id'] == p['id']):
+            raise ApiError('По ноде уже идёт задача — дождитесь её')
+        try:
+            return J({'id': await svc.start_upgrade(store, runner, p, n, 'latest', uid_of(request), xray=ver)})
+        except ValueError as e:
+            raise ApiError(str(e)) from None
 
     @r.post('/api/profiles/{pid}/nodes/upgrade')
     async def nodes_upgrade(request):
