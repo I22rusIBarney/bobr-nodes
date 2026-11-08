@@ -3202,12 +3202,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         rem = await su.check_remote(data_dir or 'data', force=True)
         if rem['state'] == 'latest':
             raise ApiError('У вас уже последняя версия')
-        if rem['state'] != 'ready':
-            raise ApiError({'testing': 'Новая версия ещё проходит тесты — подождите пару минут',
-                            'failed': 'Новая версия не прошла тесты — обновление недоступно'}.get(rem['state'], 'GitHub не ответил — попробуйте позже'))
+        # тесты ещё идут — можно и так: обновление на сервере дождётся их (до 10 минут) и отменится, если они упадут
+        if rem['state'] not in ('ready', 'testing'):
+            raise ApiError({'failed': 'Новая версия не прошла тесты — обновление недоступно'}.get(rem['state'], 'GitHub не ответил — попробуйте позже'))
         su.request_now(store, data_dir or 'data', rem['sha'])
         busy = len(store.active_jobs())
-        return J({'ok': True, 'message': 'Обновление начнётся в течение минуты' + (f' — после того как закончатся задачи ({busy})' if busy else '')})
+        msg = ('Как только новая версия пройдёт тесты на GitHub (обычно 2–3 минуты), бот обновится сам' if rem['state'] == 'testing'
+               else 'Обновление начнётся в течение минуты')
+        return J({'ok': True, 'message': msg + (f' — после того как закончатся задачи ({busy})' if busy else '')})
 
     @r.post('/api/selfupdate/night')
     async def selfupdate_night(request):

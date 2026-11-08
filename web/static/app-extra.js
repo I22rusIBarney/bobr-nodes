@@ -137,19 +137,28 @@ function setBot() {
   const S = D.su;
   if (S.loading) return h('div', { class: 'sk', style: 'height:300px' });
   if (S.error) return empty('alert', 'Не загрузилось', S.error, btn('Повторить', () => { D.su = null; render(); }, 'primary'));
-  const { c, rem, bk } = S, latest = rem && rem.state === 'latest';
+  const { c, rem, bk } = S, latest = rem && rem.state === 'latest', testing = rem && rem.state === 'testing';
+  if (testing && !S.poll) S.poll = setTimeout(() => api('selfupdate/check?force=1').then(r => { S.rem = r; }).catch(() => {}).then(() => { S.poll = null; render(true); }), 20000);
+  const upNow = () => confirmAct({ title: testing ? 'Обновить, когда пройдут тесты?' : 'Обновить бота сейчас?', icon: ['up', 'run'], ok: 'Обновить',
+    text: (testing ? 'Новая версия ещё проходит тесты на GitHub. Сервер дождётся их (обычно 2–3 минуты) и обновит бота; если тесты не пройдут, обновление отменится. ' : '')
+      + 'Бот перезапустится примерно на 10 секунд, начатые задачи доделает до обновления. Если новая версия не запустится, бот сам вернёт прежнюю.',
+    fn: async () => { const r = await api('selfupdate/now', 'POST'); toast('Обновление запланировано', r.message); } });
+  const fresh = (rem && rem.version && rem.version !== c.version.number) ? rem.version : '';
   const saveUpd = async p => { try { Object.assign(c, await api('selfupdate', 'POST', p)); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); };
   const next = (c.changelog || [])[0];
   return h('div', { style: 'max-width:720px' },
     h('div', { class: 'list', style: 'margin-bottom:12px' },
       h('div', { class: 'li', style: 'flex-wrap:wrap' }, h('div', { class: 'ic-tile' }, ic('up')),
         h('div', { class: 'grow', style: 'flex:1 1 220px' }, h('div', { class: 't' }, `Bobr Nodes ${c.version.number}`),
-          h('div', { class: 's', style: 'white-space:normal' }, !rem ? 'GitHub не ответил' : latest ? 'Последняя версия' : rem.state === 'ready' ? (rem.version && rem.version !== c.version.number ? `Есть ${rem.version}` : 'Есть обновление')
-            : rem.state === 'testing' ? 'Новая версия проходит тесты' : rem.state === 'failed' ? 'Новая версия не прошла тесты' : 'Не удалось проверить')),
-        rem && rem.state === 'ready' ? btn('Обновить сейчас', () => confirmAct({ title: 'Обновить бота сейчас?', icon: ['up', 'run'], ok: 'Обновить',
-          text: 'Бот перезапустится примерно на 10 секунд, начатые задачи доделает до обновления. Если новая версия не запустится, бот сам вернёт прежнюю.',
-          fn: async () => { const r = await api('selfupdate/now', 'POST'); toast('Обновление запланировано', r.message); } }), 's primary')
-          : btn('Проверить', e => busyBtn(e, async () => { try { S.rem = await api('selfupdate/check?force=1'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); }), 's', 'refresh')),
+          h('div', { class: 's', style: 'white-space:normal' }, !rem ? 'GitHub не ответил' : latest ? 'Последняя версия' : rem.state === 'ready' ? (fresh ? `Есть ${fresh}` : 'Есть обновление')
+            : testing ? `${fresh ? 'Готовится ' + fresh : 'Новая версия'} — проходит тесты на GitHub, обычно 2–3 минуты` : rem.state === 'failed' ? `${fresh || 'Новая версия'} не прошла тесты — обновление недоступно` : 'Не удалось проверить')),
+        rem && (rem.state === 'ready' || testing) ? btn(testing ? 'Обновить, когда пройдут тесты' : 'Обновить сейчас', upNow, 's primary')
+          : btn('Проверить', e => busyBtn(e, async () => {
+            try { S.rem = await api('selfupdate/check?force=1');
+              const st = S.rem.state; toast(st === 'latest' ? 'Новых версий нет' : st === 'ready' ? 'Есть обновление' : st === 'testing' ? 'Новая версия проходит тесты' : st === 'failed' ? 'Новая версия не прошла тесты' : 'GitHub не ответил', null, st === 'failed' || st === 'unknown' ? 'bad' : 'ok'); }
+            catch (x) { toast('Не получилось', x.message, 'bad'); } render(); }), 's', 'refresh')),
+      rem && (rem.state === 'ready' || testing) && (rem.changes || []).length ? h('details', { class: 'li', style: 'display:block' }, h('summary', { style: 'cursor:pointer;font-weight:600' }, `Что будет в ${fresh || 'новой версии'}`),
+        h('ul', { style: 'margin:8px 0 0;padding-left:20px' }, rem.changes.flatMap(r => (r.items || []).map(i => h('li', { style: 'margin:4px 0' }, i.text))).slice(0, 12))) : null,
       switchRow('Обновляться автоматически', `Ночью в ${c.hour}:00 по вашему времени`, c.on, v => saveUpd({ on: v }))),
     next ? h('details', { class: 'more-opts', style: 'margin-bottom:22px' }, h('summary', null, `Что нового в ${next.version}`),
       h('ul', { style: 'margin:8px 0 0;padding-left:18px' }, next.items.map(i => h('li', { style: 'margin-bottom:6px' }, i.text)))) : null,
