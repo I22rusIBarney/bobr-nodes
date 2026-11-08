@@ -2799,7 +2799,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         from .monitor import watched_hosts
         p = profile_or_404(request.match_info['pid'], request)
         (hosts,), _ = await cached(p, 'hosts')
-        kinds = PC.peek(p, 'host_kinds') or {}
+        kinds = json.loads(store.get(f'host_kinds:{p["id"]}') or '{}')
         watch = watched_hosts(p)
         mon_st = store.mon_all(f'{p["id"]}:host:')
         keep = ('status', 'data', 'fail', 'up', 'total', 'by', 'checked_at', 'since')
@@ -2815,14 +2815,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
 
     @r.post('/api/profiles/{pid}/hosts/watch')
     async def hosts_watch_set(request):
-        """Проверять ли хост отдельно: {uuid, on}. Выключенный пропадает из мониторинга при следующем опросе."""
+        """Проверять ли хосты отдельно: {uuid, on} или сразу несколько {uuids: [...], on}.
+        Выключенный пропадает из мониторинга при следующем опросе."""
         p = profile_or_404(request.match_info['pid'], request)
         b = await body(request)
-        uuid = str(b.get('uuid') or '')
-        if not re.fullmatch(r'[0-9a-fA-F-]{8,64}', uuid):
+        uuids = b.get('uuids') if isinstance(b.get('uuids'), list) else [b.get('uuid')]
+        uuids = [str(u or '') for u in uuids][:2000]
+        if not uuids or not all(re.fullmatch(r'[0-9a-fA-F-]{8,64}', u) for u in uuids):
             raise ApiError('Хост не указан')
         p = store.profile(p['id'])
-        p['mon_hosts'] = {**(p.get('mon_hosts') or {}), uuid: bool(b.get('on'))}
+        p['mon_hosts'] = {**(p.get('mon_hosts') or {}), **{u: bool(b.get('on')) for u in uuids}}
         if len(p['mon_hosts']) > 2000:
             raise ApiError('Слишком много хостов')
         store.save_profile(p)
