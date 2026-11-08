@@ -118,6 +118,18 @@ PAUSED_OK = re.compile(r'^(GET /api/state|GET /api/billing|POST /api/billing/(pa
                        r'|GET /api/avatar/\d+|GET /api/theme.*)$')
 
 
+async def read_body(request, limit: int) -> bytes:
+    """Тело запроса целиком, но не больше limit + 1 байт (лишний байт — чтобы заметить превышение).
+    content.read(n) отдаёт только то, что уже пришло по сети, — большой файл так обрезался бы."""
+    buf = bytearray()
+    while len(buf) <= limit:
+        chunk = await request.content.read(limit + 1 - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return bytes(buf)
+
+
 def admin_only(method: str, path: str) -> bool:
     return any(re.fullmatch(m, method) and re.fullmatch(pt, path) for m, pt in ADMIN_ONLY)
 
@@ -416,7 +428,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.put('/api/theme/background')
     async def theme_bg_upload(request):
         uid = uid_of(request)
-        data = await request.content.read(BG_MAX + 1)
+        data = await read_body(request, BG_MAX)
         if not data:
             raise ApiError('Файл пустой.')
         if len(data) > BG_MAX:
@@ -2244,7 +2256,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         """Один файл (JSON или zip с JSON) — сырым телом, имя в X-File-Name. Ответ: что внутри и к какому хосту подходит."""
         from . import hosttpl as ht
         p = profile_or_404(request.query.get('pid', 0), request)
-        data = await request.content.read(ht.MAX_FILE + 1)
+        data = await read_body(request, ht.MAX_FILE)
         name = unquote(request.headers.get('X-File-Name', '') or 'config.json')[:200]
         try:
             files = ht.read_files(name, data)
