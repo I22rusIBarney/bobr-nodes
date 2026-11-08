@@ -381,16 +381,18 @@ function filtered(ns, f) {
       : f.sort === 'online' ? (b.online || 0) - (a.online || 0) : rank(a) - rank(b) || a.name.localeCompare(b.name));
 }
 function vNodes() {
+  if (UI.nodesTab === 'hosts') return vHosts();
   const all = allNodes(), f = UI.nf, gs = groups();
   if (f.group !== 'all' && !gs.some(p => String(p.id) === f.group)) f.group = 'all';
   const add = btn('Добавить ноды', () => openDeploy(), 'primary', 'plus');
   const loadingNodes = gs.some(p => !D.nodes[p.id] && !D.nerr[p.id]);
-  if (!all.length) return [pageH('Ноды'), nodesErrors(), loadingNodes ? skeleton() : empty('server', 'Нод пока нет', gs.length ? 'Выберите страны и тариф — бот купит серверы, поставит ноды и пропишет DNS.' : 'Сначала подключите панель Remnawave.', gs.length ? add : btn('Подключить панель', newGroup, 'primary', 'plus'))];
+  if (!all.length) return [pageH('Ноды'), nodesTabs(), nodesErrors(), loadingNodes ? skeleton() : empty('server', 'Нод пока нет', gs.length ? 'Выберите страны и тариф — бот купит серверы, поставит ноды и пропишет DNS.' : 'Сначала подключите панель Remnawave.', gs.length ? add : btn('Подключить панель', newGroup, 'primary', 'plus'))];
   const scoped = all.filter(n => (f.group === 'all' || String(n.pid) === f.group) && (!f.cc || (n.country || '—') === f.cc));
   const list = filtered(all, f);
   const set = p => { UI.nf = { ...UI.nf, ...p }; render(); };
   return [
     pageH('Ноды', `${pl(all.length, 'нода', 'ноды', 'нод')} во всех группах · строка открывает карточку`),
+    nodesTabs(),
     nodesErrors(),
     h('div', { class: 'toolbar' },
       seg(FILTERS.map(x => ({ v: x.v, l: x.l, n: scoped.filter(x.f).length })).filter(x => x.v === 'all' || x.n || x.v === f.status), f.status, v => set({ status: v }), 'Состояние'),

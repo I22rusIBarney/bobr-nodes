@@ -127,3 +127,66 @@ function nodeNet(n, d) {
       : h('span', { class: 'faint' }, 'не проверялись')), btn('Проверить', probe, 's ghost', 'radar')),
   ];
 }
+
+/* ── раздел «Хосты»: какие хосты панели проверять из России отдельно (по умолчанию — без нод, например обход белых
+   списков) и как они проходят. Хосты нод видны и на карточках нод; их и балансировщики можно включить вручную. ── */
+const nodesTabs = () => h('div', { style: 'margin-bottom:12px' }, seg([{ v: 'nodes', l: 'Ноды' }, { v: 'hosts', l: 'Хосты' }], UI.nodesTab || 'nodes',
+  v => { UI.nodesTab = v; render(); }, 'Раздел'));
+const HKIND = { loose: 'без ноды', node: 'вход ноды', balancer: 'балансировщик', disabled: 'выключен в панели', '': '' };
+function loadHosts(pid, force) {
+  D.hw = D.hw || {};
+  const x = D.hw[pid];
+  if (!force && x && (x.loading || Date.now() - x.at < 60e3)) return;
+  D.hw[pid] = { ...(x || {}), loading: true, at: Date.now() };
+  api(`profiles/${pid}/hosts/watch`).then(r => { D.hw[pid] = { ...r, at: Date.now() }; }, e => { D.hw[pid] = { err: e.message, at: Date.now() }; }).then(() => render(true));
+}
+function hostState(x) {
+  const m = x.mon;
+  if (!m || !m.data) return { cls: '', t: m ? 'чекеры его не видят' : 'ещё не проверялся' };
+  const ms = Object.values(m.by || {}).map(v => v[2]).filter(Boolean);
+  const best = ms.length ? ` · ${Math.min(...ms)} мс` : '';
+  if (m.status === 'down' || m.fail * 2 > m.data) return { cls: 'bad', t: `не проходит у ${m.fail} из ${m.data} чекеров` };
+  if (m.fail) return { cls: 'warn', t: `не проходит у ${m.fail} из ${m.data}${best}` };
+  return { cls: 'ok', t: `проходит у ${m.data} из ${m.data}${best}` };
+}
+function vHosts() {
+  const gs = groups(), q = (UI.hq || '').toLowerCase();
+  gs.forEach(p => loadHosts(p.id));
+  const setWatch = async (p, x, on, el) => {
+    el.disabled = true;
+    try { await api(`profiles/${p.id}/hosts/watch`, 'POST', { uuid: x.uuid, on }); x.watched = on; if (!on) x.mon = null;
+      toast(on ? 'Хост проверяется' : 'Хост больше не проверяется', on ? 'Первые результаты — после следующего опроса чекеров (до 5 минут)' : ''); render(); }
+    catch (e) { toast('Не сохранилось', e.message, 'bad'); }
+    el.disabled = false;
+  };
+  const row = (p, x) => {
+    const s = x.watched ? hostState(x) : null;
+    return h('div', { class: 'li' },
+      h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, x.remark || x.address),
+        h('div', { class: 's', style: 'white-space:normal' }, [x.address + (x.port ? ':' + x.port : ''), HKIND[x.kind], x.hidden ? 'скрытый' : '',
+          s && x.mon && x.mon.checked_at ? 'проверен ' + ago(x.mon.checked_at * 1000) : ''].filter(Boolean).join(' · '))),
+      s ? h('span', { class: 'ru ' + s.cls, style: 'flex:none;max-width:45%;text-align:right;' + (s.cls === 'warn' ? 'color:var(--warn)' : s.cls ? '' : 'color:var(--ink-3)') }, s.t) : null,
+      x.kind === 'disabled' ? null : toggle(x.watched, (on, el) => setWatch(p, x, on, el), 'Проверять ' + (x.remark || x.address)));
+  };
+  return [
+    pageH('Ноды', 'Хосты панели: какие проверять из России отдельно'),
+    nodesTabs(),
+    h('div', { class: 'toolbar' }, h('label', { class: 'field-s' }, ic('search'), h('span', { class: 'sr' }, 'Поиск'),
+      h('input', { 'data-k': 'hq', placeholder: 'Название или адрес хоста', value: UI.hq || '', oninput: e => { UI.hq = e.target.value; render(); } }))),
+    h('div', { class: 'muted', style: 'margin-bottom:16px' }, 'Включённые хосты чекеры проверяют отдельно, и бот сообщит, если хост перестанет проходить. По умолчанию это хосты без нод (например, обход белых списков). Входы нод видны и на карточках нод; балансировщики и их можно включить здесь.'),
+    gs.map(p => {
+      const x = (D.hw || {})[p.id];
+      if (!x || (!x.hosts && !x.err)) return h('section', { class: 'section' }, h('div', { class: 'sk', style: 'height:120px' }));
+      if (x.err) return h('div', { class: 'notice' }, h('span', { class: 'i' }, ic('alert')), h('div', { class: 'grow' }, h('b', null, p.name), x.err), btn('Повторить', () => loadHosts(p.id, true), 's'));
+      const hs = x.hosts.filter(y => !q || (y.remark + ' ' + y.address).toLowerCase().includes(q));
+      const on = hs.filter(y => y.watched), off = hs.filter(y => !y.watched);
+      return h('section', { class: 'section' },
+        h('div', { class: 'section-h' }, h('h2', null, p.name), h('span', { class: 'faint', style: 'font-size:13px' }, `${on.length} из ${x.hosts.length} проверяются`)),
+        !x.enabled ? h('div', { class: 'notice', style: 'margin-bottom:10px' }, h('span', { class: 'i' }, ic('radar')), h('div', { class: 'grow' }, 'У группы не включён мониторинг — без подписки чекеры хосты не проверят.')) : null,
+        x.enabled && !x.known ? h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Бот разберёт, какие хосты без нод, при следующем опросе чекеров — до 5 минут.') : null,
+        on.length ? h('div', { class: 'list', style: 'margin-bottom:10px' }, on.map(y => row(p, y))) : h('div', { class: 'muted', style: 'margin-bottom:10px' }, 'Отдельно не проверяется ни один хост.'),
+        off.length ? h('details', { class: 'more-opts', open: q ? true : null }, h('summary', null, `Не проверяются отдельно — ${off.length}`),
+          h('div', { class: 'list', style: 'margin-top:10px' }, off.map(y => row(p, y)))) : null);
+    }),
+  ];
+}

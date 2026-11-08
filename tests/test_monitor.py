@@ -119,3 +119,27 @@ def test_default_zone_from_old_node(tmp_path, monkeypatch):
     assert z('203.0.113.5') == '' and z('node.other.net') == ''
     store.save_profile({**prof, 'base_domain': 'example.com'})
     assert asyncio.run(mon.default_zone(store.profile(pid), {'addr': 'swe.bobr-cloud.online'}, {})) == 'example.com'
+
+
+def test_host_watch_choice(tmp_path):
+    """Хосты без нод проверяются по умолчанию; хост ноды или балансировщик — если включить; выключенный — нет."""
+    from bot.store import Store
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'g', 'panel_url': 'https://p', 'panel_token': 't'})
+    mon = M.Monitor(store, None, None, {1})
+    sub = ck.sub_name(pid)
+    node = {'uuid': 'n1', 'address': '201.10.91.118', 'name': 'Poland', 'isConnected': True, 'configProfile': {'activeInbounds': ['i1']}}
+    own = {'uuid': 'h1', 'address': '201.10.91.118', 'port': 443, 'remark': 'Poland', 'inbound': {'configProfileInboundUuid': 'i1'}}
+    wl = {'uuid': 'h2', 'address': 'ok.ru', 'port': 443, 'remark': 'Обход белых списков', 'inbound': {'configProfileInboundUuid': 'x'}}
+    bal = {'uuid': 'h3', 'address': 'vk.com', 'port': 8443, 'remark': 'АВТО-ВЫБОР', 'xrayJsonTemplateUuid': 't1'}
+    res = {1: [{'subName': sub, 'groupName': g, 'name': g, 'server': a, 'port': pt, 'online': ok, 'lastCheck': 1}
+               for g, a, pt, ok in [('Poland', '201.10.91.118', 443, True), ('Обход белых списков', 'ok.ru', 443, False),
+                                    ('АВТО-ВЫБОР', 'vk.com', 8443, True)]]}
+    v = mon.votes(store.profile(pid), res, [node], [own, wl, bal], {}, {'t1'})
+    assert set(v) == {'201.10.91.118', 'host:h2'} and v['host:h2']['fail'] == 1
+    store.save_profile({**store.profile(pid), 'mon_hosts': {'h2': False, 'h3': True, 'h1': True}})
+    v = mon.votes(store.profile(pid), res, [node], [own, wl, bal], {}, {'t1'})
+    assert set(v) == {'201.10.91.118', 'host:h1', 'host:h3'}
+    assert v['host:h3']['data'] == 1 and v['host:h3']['fail'] == 0   # АВТО-ВЫБОР в «не проверять», но включён вручную
+    assert M.host_kinds([own, wl, bal, {'uuid': 'h4', 'isDisabled': True}], {'h2'}, {'t1'}) == \
+        {'h1': 'node', 'h2': 'loose', 'h3': 'balancer', 'h4': 'disabled'}
