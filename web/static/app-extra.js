@@ -132,11 +132,15 @@ function topUp() {
 
 /* ═════════ Сервер бота: обновление и резервные копии ═════════ */
 function setBot() {
-  if (!D.su) { D.su = { loading: true }; Promise.all([api('selfupdate'), api('selfupdate/check').catch(() => null), api('backup').catch(e => ({ error: e.message }))])
-    .then(([c, rem, bk]) => { D.su = { c, rem, bk }; }).catch(e => { D.su = { error: e.message }; }).then(() => render(true)); }
+  if (!D.su) {  // настройки — сразу (свои); GitHub и резервные копии — следом, каждый сам дорисует свою часть
+    const S0 = D.su = { loading: true, remLoading: true, bk: null };
+    api('selfupdate').then(c => { S0.c = c; S0.loading = false; }, e => { S0.error = e.message; }).then(() => render(true));
+    api('selfupdate/check').then(r => { S0.rem = r; }, () => { S0.rem = null; }).then(() => { S0.remLoading = false; render(true); });
+    api('backup').then(b => { S0.bk = b; }, e => { S0.bk = { error: e.message }; }).then(() => render(true));
+  }
   const S = D.su;
-  if (S.loading) return h('div', { class: 'sk', style: 'height:300px' });
   if (S.error) return empty('alert', 'Не загрузилось', S.error, btn('Повторить', () => { D.su = null; render(); }, 'primary'));
+  if (S.loading) return h('div', { class: 'sk', style: 'height:300px' });
   const { c, rem, bk } = S, latest = rem && rem.state === 'latest', testing = rem && rem.state === 'testing';
   if (testing && !S.poll) S.poll = setTimeout(() => api('selfupdate/check?force=1').then(r => { S.rem = r; }).catch(() => {}).then(() => { S.poll = null; render(true); }), 20000);
   const upNow = () => confirmAct({ title: testing ? 'Обновить, когда пройдут тесты?' : 'Обновить бота сейчас?', icon: ['up', 'run'], ok: 'Обновить',
@@ -150,7 +154,7 @@ function setBot() {
     h('div', { class: 'list', style: 'margin-bottom:12px' },
       h('div', { class: 'li', style: 'flex-wrap:wrap' }, h('div', { class: 'ic-tile' }, ic('up')),
         h('div', { class: 'grow', style: 'flex:1 1 220px' }, h('div', { class: 't' }, `Bobr Nodes ${c.version.number}`),
-          h('div', { class: 's', style: 'white-space:normal' }, !rem ? 'GitHub не ответил' : latest ? 'Последняя версия' : rem.state === 'ready' ? (fresh ? `Есть ${fresh}` : 'Есть обновление')
+          h('div', { class: 's', style: 'white-space:normal' }, S.remLoading ? 'Проверяю GitHub…' : !rem ? 'GitHub не ответил' : latest ? 'Последняя версия' : rem.state === 'ready' ? (fresh ? `Есть ${fresh}` : 'Есть обновление')
             : testing ? `${fresh ? 'Готовится ' + fresh : 'Новая версия'} — проходит тесты на GitHub, обычно 2–3 минуты` : rem.state === 'failed' ? `${fresh || 'Новая версия'} не прошла тесты — обновление недоступно` : 'Не удалось проверить')),
         rem && (rem.state === 'ready' || testing) ? btn(testing ? 'Обновить, когда пройдут тесты' : 'Обновить сейчас', upNow, 's primary')
           : btn('Проверить', e => busyBtn(e, async () => {
@@ -162,5 +166,5 @@ function setBot() {
       switchRow('Обновляться автоматически', `Ночью в ${c.hour}:00 по вашему времени`, c.on, v => saveUpd({ on: v }))),
     next ? h('details', { class: 'more-opts', style: 'margin-bottom:22px' }, h('summary', null, `Что нового в ${next.version}`),
       h('ul', { style: 'margin:8px 0 0;padding-left:18px' }, next.items.map(i => h('li', { style: 'margin-bottom:6px' }, i.text)))) : null,
-    h('div', { class: 'list' }, dangerRow('box', 'Резервные копии', bk.error ? bk.error : bk.on ? `Каждую ночь в ${bk.hour}:00` + (bk.last_at ? ` · последняя ${ago(bk.last_at * 1000)}` : '') : 'Выключены', btn('Открыть', () => go('settings/backup'), 's'))));
+    h('div', { class: 'list' }, dangerRow('box', 'Резервные копии', !bk ? 'Загружаю…' : bk.error ? bk.error : bk.on ? `Каждую ночь в ${bk.hour}:00` + (bk.last_at ? ` · последняя ${ago(bk.last_at * 1000)}` : '') : 'Выключены', btn('Открыть', () => go('settings/backup'), 's'))));
 }

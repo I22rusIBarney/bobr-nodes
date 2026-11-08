@@ -3631,10 +3631,10 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     _ipinfo_bg: set = set()
     _ipinfo_tasks: set = set()
 
-    def block_stats(ps: list[dict], days: int) -> tuple[dict, list[dict]]:
+    async def block_stats(ps: list[dict], days: int) -> tuple[dict, list[dict]]:
         """Статистика блокировок по группам ps; сеть нод, которой ещё нет в кэше, бот узнаёт в фоне."""
         from . import banlab
-        res, blocks, missing = banlab.collect(store, ps, days)
+        res, blocks, missing = await asyncio.to_thread(banlab.collect, store, ps, days)  # вся история — не в цикле событий
         todo = [ip for ip in dict.fromkeys(missing) if ip not in _ipinfo_bg][:50]
         if todo:
             _ipinfo_bg.update(todo)
@@ -3660,7 +3660,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         """Где и как поставленные ноды блокируют реже: по локациям, конфигурациям, хостерам, сетям и настройкам
         за days дней, пачки блокировок и проверки соседей, плюс советы для покупки."""
         from . import blockstats as bs
-        res, blocks = block_stats(my_profiles(request), stats_days(request))
+        res, blocks = await block_stats(my_profiles(request), stats_days(request))
         keep = ('pid', 'name', 'start', 'end', 'cause', 'fix', 'flag', 'loc_name', 'hoster', 'holder', 'asn', 'net24', 'port',
                 'stealth', 'users', 'neigh')
         res['recent'] = [{k: b.get(k) for k in keep} for b in sorted(blocks, key=lambda b: -b['start'])[:40]]

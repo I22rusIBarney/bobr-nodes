@@ -205,11 +205,11 @@ def collect(store, ps: list[dict], days: int) -> tuple[dict, list[dict], list[st
 
 async def ai_report(store, gemini, ps: list[dict], days: int = 90, question: str = '') -> dict:
     """Разбор нейросетью: данные — collect, ответ сохраняется в настройке banlab_ai (его показывает статистика)."""
-    res, blocks, missing = collect(store, ps, days)
+    res, blocks, missing = await asyncio.to_thread(collect, store, ps, days)
     if missing:  # перед разбором — дособрать сети, иначе разрезы по хостерам неполные
         for ip in missing[:100]:
             await asyncio.to_thread(cached_info, store, ip)
-        res, blocks, _ = collect(store, ps, days)
+        res, blocks, _ = await asyncio.to_thread(collect, store, ps, days)
     raw = await gemini.ask(AI_SYSTEM, [{'role': 'user', 'text': ai_input(res, blocks, question)}])
     out = {**ai_clean(raw), 'ts': int(time.time()), 'question': question[:1000], 'blocks': res['total']}
     store.set('banlab_ai', json.dumps(out, ensure_ascii=False))
