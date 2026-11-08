@@ -452,8 +452,27 @@ function bulkBar() {
   return h('div', { class: 'bulk', role: 'toolbar', 'aria-label': 'Действия с выбранными' },
     h('b', null, `Выбрано: ${list.length}`),
     btn('Обновить', () => updateNodes(list), 's primary', 'up', { disabled: !list.some(outdated), title: list.some(outdated) ? null : 'Все выбранные уже на нужной версии' }),
+    btn('Уникальные настройки', () => stealthNodes(list), 's', 'shield'),
     h('span', { class: 'sp' }),
     h('button', { type: 'button', class: 'btn s', 'aria-label': 'Снять выбор', onclick: () => { UI.sel.clear(); UI.selMode = false; render(); } }, ic('x')));
+}
+
+/* уникальные настройки на уже стоящих нодах: у каждой свои случайные порт, отпечаток и маска (задача на каждую ноду) */
+function stealthNodes(list) {
+  confirmAct({ title: `Уникальные настройки для ${pl(list.length, 'ноды', 'нод', 'нод')}?`, icon: ['shield', 'run'], ok: 'Применить',
+    text: 'Каждая нода получит свой случайный порт для клиентов (примерно половина останется на 443), TLS-отпечаток и фрагментацию ClientHello. '
+      + 'Порт 443 на нодах продолжит работать, так что клиенты со старой подпиской не отвалятся; новые параметры придут с обновлением подписки. Для смены порта нужен доступ по SSH.',
+    fn: async () => {
+      const by = {}; list.forEach(n => { (by[n.pid] = by[n.pid] || []).push(n.uuid); });
+      let ids = 0; const skipped = [];
+      for (const [pid, uuids] of Object.entries(by)) {
+        const r = await api(`profiles/${pid}/nodes/apply-many`, 'POST', { uuids, stealth: true });
+        ids += r.ids.length; skipped.push(...r.skipped.map(x => `${x.name}: ${x.why}`));
+      }
+      UI.sel.clear(); UI.selMode = false;
+      toast(`Запущено: ${pl(ids, 'задача', 'задачи', 'задач')}`, skipped.length ? 'Пропущены — ' + skipped.join('; ') : 'Ход — в «Задачах»', skipped.length ? 'info' : 'ok');
+      refreshSoon();
+    } });
 }
 
 /* ── Карточка ноды ── */

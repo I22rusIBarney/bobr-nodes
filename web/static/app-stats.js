@@ -21,9 +21,10 @@ function adviceNote(a) {
   if (!a) return null;
   const x = a.here, b = a.best;
   return h('div', { class: 'notice', style: 'background:var(--warn-soft);margin:0' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
-    h('div', null, h('b', null, `${x.flag || ''} ${x.label}: ноды блокируют часто`),
+    h('div', null, h('b', null, `${x.flag || ''} ${x.label}: ` + (x.subnet >= 2 ? 'режут подсети хостера' : 'ноды блокируют часто')),
       `За ${D.stats.blocks.days} дней: ${rate(x)}` + (x.life_days != null ? `, до блокировки нода живёт около ${dec(x.life_days)} дн` : '') +
-      `. Для сравнения, ${b.flag || ''} ${b.label}: ${rate(b)}` + (b.life_days != null ? `, около ${dec(b.life_days)} дн` : '') + '.'));
+      `. Для сравнения, ${b.flag || ''} ${b.label}: ${rate(b)}` + (b.life_days != null ? `, около ${dec(b.life_days)} дн` : '') + '.'
+      + (x.subnet ? ` Здесь ${pl(x.subnet, 'раз', 'раза', 'раз')} резали всю подсеть /24 — похоже на бан хостера.` : '')));
 }
 
 function statsCards() {
@@ -64,7 +65,11 @@ function statsCards() {
       C.kinds.map(k => h('div', { class: 'li' }, h('div', { class: 'ic-tile' }, ic(k.kind === 'reip' ? 'globe' : k.kind === 'replace' ? 'refresh' : 'box')),
         h('div', { class: 'grow' }, h('div', { class: 't' }, k.label), h('div', { class: 's' }, pl(k.n, 'раз', 'раза', 'раз'))), h('span', { class: 'num' }, rubK(k.kop)))),
       h('div', { class: 'li' }, h('div', { class: 'grow' }, h('b', null, 'Разово за 30 дней'), h('div', { class: 's', style: 'white-space:normal' }, 'по задачам бота: покупки, замены, докупка и смены IP')),
-        h('b', { class: 'num' }, rubK(C.total_kop)))));
+        h('b', { class: 'num' }, rubK(C.total_kop)))),
+    C && (C.hosters || []).length ? [h('div', { class: 'section-h', style: 'margin-top:16px' }, h('h2', { style: 'font-size:15px' }, 'Во что обошлись блокировки'),
+      h('span', { class: 'faint', style: 'font-size:13px' }, 'замены и смены IP по хостерам')),
+      h('div', { class: 'list' }, C.hosters.map(x => h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, x.label),
+        h('div', { class: 's' }, pl(x.n, 'раз', 'раза', 'раз'))), h('span', { class: 'num' }, rubK(x.kop)))))] : null);
   return { blocksCard, costCard, B };
 }
 /* «Обзор»: итоги одной карточкой и вход в раздел */

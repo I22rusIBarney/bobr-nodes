@@ -4,9 +4,17 @@
    кнопка покупки активна, только когда выбраны домен, тариф и хотя бы один сквад. */
 
 function buyConfirm({ title, intro, plan, onBuy, note }) {
-  const P = plan;
-  if (!P.available) return modal({ title, icon: ['alert', 'warn'], body: `Локации ${P.loc_name || ''} сейчас нет в Bobr Cloud — купить ноду там же нельзя.` });
-  const sel = { zone: P.zone || (P.zones || [])[0] || '', idx: P.same ?? ((P.offers || [])[0] || {}).idx, squads: new Set(P.squads_default || []) };
+  const P0 = plan, alts = plan.alts || [];
+  let P = plan;
+  if (!P.available && !alts.length) return modal({ title, icon: ['alert', 'warn'], body: `Локации ${P.loc_name || ''} сейчас нет в Bobr Cloud — купить ноду там же нельзя.` });
+  const sel = { zone: P.zone || (P.zones || [])[0] || '', idx: P.same ?? ((P.offers || [])[0] || {}).idx, squads: new Set(P.squads_default || []), loc: P.loc };
+  // другая локация (замена при починке): тарифы — её, «как у старой» — только в своей
+  const pickLoc = code => { const a = alts.find(x => x.loc === code); if (!a) return;
+    P = code === P0.loc && P0.available ? P0 : { ...P0, loc: a.loc, loc_name: a.loc_name, flag: a.flag, offers: a.offers, same: null, available: true };
+    sel.loc = code; sel.idx = P.same ?? ((P.offers || [])[0] || {}).idx; };
+  if (P0.suggest) pickLoc(P0.suggest);
+  else if (!P0.available && alts.length) pickLoc(alts[0].loc);
+  const rateTxt = a => a.rate == null ? 'мало данных' : a.rate === 0 ? 'не блокировали' : `${String(a.rate).replace('.', ',')} в мес.`;
   const body = h('div', { class: 'form' }), err = h('div', { class: 'err', role: 'alert' });
   let buyBtn;
   const draw = () => {
@@ -16,6 +24,10 @@ function buyConfirm({ title, intro, plan, onBuy, note }) {
     body.replaceChildren(
       intro ? h('div', null, intro) : null,
       kvRows([['Где', `${P.flag || ''} ${P.loc_name || '—'}`], P.buys_left != null ? ['Покупок сегодня осталось', P.buys_left ? String(P.buys_left) : h('span', { class: 'st bad' }, 'лимит')] : null]),
+      P0.suggest_why ? h('div', { class: 'notice info', style: 'margin:0' }, h('span', { class: 'i' }, ic('info')), h('div', null, h('b', null, 'Совет: другая локация'), P0.suggest_why + '.')) : null,
+      alts.length > 1 ? fld('Локация', h('div', { class: 'chips' }, alts.map(a => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(sel.loc === a.loc),
+        onclick: () => { pickLoc(a.loc); draw(); } }, `${a.flag} ${a.loc_name}`, h('span', { class: 'faint', style: 'margin-left:6px' }, (a.loc === P0.loc ? 'старая · ' : '') + rateTxt(a))))),
+        'Частота блокировок нод за 90 дней — по всем группам.') : null,
       adviceNote(locAdvice(P.loc)),
       fld('Домен для имени', (P.zones || []).length ? h('div', { class: 'chips' }, P.zones.map(z => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(sel.zone === z), onclick: () => { sel.zone = z; draw(); } }, z)))
         : h('div', { class: 'err' }, 'Нет доменов Cloudflare — подключите Cloudflare для группы: новой ноде нужно имя.')),
@@ -35,7 +47,7 @@ function buyConfirm({ title, intro, plan, onBuy, note }) {
   draw();
   modal({ title, icon: ['wallet', 'warn'], body, actions: [{ l: 'Отмена' }, { l: 'Купить', cls: 'primary', ref: b => { buyBtn = b; draw(); }, fn: async (c, b) => {
     b.classList.add('busy'); b.disabled = true; err.textContent = '';
-    try { await onBuy({ zone: sel.zone, idx: sel.idx, squads: [...sel.squads] }); c(); }
+    try { await onBuy({ zone: sel.zone, idx: sel.idx, squads: [...sel.squads], ...(sel.loc && sel.loc !== P0.loc ? { loc: sel.loc } : {}) }); c(); }
     catch (x) { err.textContent = x.message; b.classList.remove('busy'); b.disabled = false; }
   } }] });
 }
@@ -45,7 +57,7 @@ async function replaceNode(n, confirmStep) {
   let P; try { P = await api('monitor/replace-plan?tok=' + encodeURIComponent(n.mon.tok)); } catch (x) { return toast('Не получилось', x.message, 'bad'); }
   const OLD = { panel: 'Когда новая нода заработает, старую бот уберёт из панели.', delete: 'Когда новая нода заработает, старую бот уберёт из панели и удалит её сервер.', keep: 'Старая нода останется как есть.' };
   buyConfirm({ title: `Новая нода вместо ${n.name}`, plan: P, note: OLD[P.old] || '',
-    intro: confirmStep ? 'Бесплатные шаги починки не помогли. Бот готов купить новую ноду в той же локации — проверьте выбор.' : 'Бот купит новую ноду в той же локации и поставит её.',
+    intro: confirmStep ? 'Бесплатные шаги починки не помогли. Бот готов купить новую ноду — проверьте выбор.' : 'Бот купит новую ноду и поставит её.',
     onBuy: async ch => { const r = await api('monitor/action', 'POST', { tok: n.mon.tok, action: confirmStep ? 'confirm' : 'replace', ...ch }); toast('Покупаю новую ноду', r.message); refreshSoon(); } });
 }
 /* платная смена IP, на которой починка остановилась */

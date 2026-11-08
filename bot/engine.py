@@ -1770,11 +1770,17 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
                 return 'готово'
         raise StepError('после возврата профиля нода не вышла на связь — посмотрите её в панели')
     want_port = node.get('port')
+    fp = None
+    if node.get('stealth'):  # уникальные настройки для уже стоящей ноды: свой порт, отпечаток и маска
+        sv = stealth()
+        want_port, fp = sv['port'] or 443, sv['fingerprint']
+        node = {**node, 'final_mask': sv['final_mask']}
+        log(f'уникальные настройки: порт {want_port}, отпечаток {fp}')
     if node.get('xhttp') and not domain:
         raise StepError('для запасного XHTTP нужен домен ноды: сертификат на ноде выпущен на домен, а не на IP')
     if isinstance(node.get('xhttp'), dict) and node['xhttp'].get('mode') == 'cdn' and cf is None:
         raise StepError('XHTTP через CDN: нужен токен Cloudflare (общий в «Подключениях» или у группы)')
-    need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or want_port)
+    need_ssh = bool(node.get('psiphon') or node.get('warp') or node.get('xhttp') or want_port not in (None, '', 443, '443'))
     extras, r = {}, None
     if need_ssh:
         stage('ssh')
@@ -1805,10 +1811,15 @@ def update_node(node: dict, prof: dict, logfile, log: Callable[[str], None], sta
             public = public_port(want_port, int(prof.get('node_port') or 2222)) or target
             if public != target:
                 setup_port(r, public, target, log)
-            for h in hosts:
-                if h.get('port') != public:
+            xh_in = {i['uuid'] for i in (cur or {}).get('inbounds', []) if i['tag'].startswith(XHTTP_PREFIX)}
+            for h in hosts:  # у хостов запасного XHTTP свой порт — его не трогаем
+                if h.get('port') != public and (h.get('inbound') or {}).get('configProfileInboundUuid') not in xh_in:
                     panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'port': public})
             log(f'панель: порт хостов — {public}' + ('' if public == target else f' (на ноде → {target})'))
+        if fp:
+            for h in hosts:
+                panel.call('PATCH', '/api/hosts', {'uuid': h['uuid'], 'fingerprint': fp})
+            log(f'панель: отпечаток {fp} на хостах ({len(hosts)})')
         if node.get('final_mask') is not None:
             mask = node['final_mask'] or None
             for h in hosts:

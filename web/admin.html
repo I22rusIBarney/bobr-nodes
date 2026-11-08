@@ -2407,13 +2407,14 @@ function bulkView(pid) {
   if (B.portMode === 'custom') rows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Порт'), textIn(B.port, '8443', x => { B.port = x.replace(/\D/g, ''); }, true, 'right')));
   rows.push(h('div', { class: 'seg-row' }, h('div', { class: 'mini-h' }, 'Final Mask'), UI.segmented([{ value: 'keep', label: 'Не менять' }, { value: 'on', label: 'Включить' }, { value: 'off', label: 'Убрать' }], B.mask, x => { B.mask = x; UI.nav.refresh(); })));
   if (B.mask === 'on') rows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON'), areaIn(B.maskJson, 8, x => { B.maskJson = x; }, jsonOk)));
+  rows.unshift(row({ title: 'Уникальные настройки', sub: 'у каждой ноды свои случайные порт, отпечаток и маска — порт и маска ниже не нужны', right: UI.toggle(!!B.stealth, on => { B.stealth = on; UI.nav.refresh(); }, 'Уникальные настройки') }));
   v.append(group('Хосты', rows));
   const go = h('button', { class: 'btn', type: 'button' }, 'Применить ко всем выбранным');
   go.onclick = UI.busy(go, async () => {
     const ex = extrasPayload(B.E);
     const body = { ...ex, uuids: [...U.sel], port: B.portMode === 'keep' ? null : B.portMode === '443' ? 443 : B.port,
-      final_mask: B.mask === 'keep' ? null : B.mask === 'on', final_mask_json: B.mask === 'on' ? B.maskJson : undefined };
-    if (!ex.psiphon && !ex.warp && !ex.xhttp && body.port === null && body.final_mask === null) return UI.toast('Нечего менять', true);
+      final_mask: B.mask === 'keep' ? null : B.mask === 'on', final_mask_json: B.mask === 'on' ? B.maskJson : undefined, stealth: !!B.stealth };
+    if (!ex.psiphon && !ex.warp && !ex.xhttp && body.port === null && body.final_mask === null && !B.stealth) return UI.toast('Нечего менять', true);
     const r = await UI.run(() => api(`profiles/${pid}/nodes/apply-many`, 'POST', body));
     if (!r) return;
     U.sel = null; delete NODES[pid]; delete GJ[pid];

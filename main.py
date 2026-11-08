@@ -80,6 +80,7 @@ async def main():
     runner = Runner(store, bot, f'{data_dir}/logs')
     monitor = Monitor(store, runner, bot, admins, access=access)
     runner.after_deploy = monitor.expect  # новая нода — сразу проверка из России
+    runner.ip_check = monitor.ip_check  # новый IP — до установки: не заблокирован ли уже
     dp['store'], dp['runner'], dp['public_url'], dp['monitor'] = store, runner, public_url, monitor
     if monitor is not None:
         monitor.public_url = public_url
