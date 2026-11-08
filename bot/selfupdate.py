@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import asyncio
 import json
 import logging
 import os
@@ -185,7 +186,7 @@ async def check_remote(data_dir: str | Path, force: bool = False, client=None) -
         return hit['res']
     res = {'state': 'unknown', 'current': current(), 'current_sha': cur[:7], 'version': '', 'sha': '', 'changes': [], 'checked_at': int(time.time())}
     own = client is None
-    c = client or httpx.AsyncClient(timeout=15, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
+    c = client or httpx.AsyncClient(timeout=8, headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'bobr-nodes'})
     try:
         r = await c.get(f'https://api.github.com/repos/{slug}/commits/main')
         r.raise_for_status()
@@ -194,14 +195,18 @@ async def check_remote(data_dir: str | Path, force: bool = False, client=None) -
         if cur and sha == cur:
             res['state'] = 'latest'
         else:
-            try:
-                log = (await c.get(f'https://raw.githubusercontent.com/{slug}/{sha}/bot/changelog.json')).json()
-            except Exception:  # noqa: BLE001 — истории нет: покажем без неё
-                log = []
+            async def changes():
+                try:
+                    return (await c.get(f'https://raw.githubusercontent.com/{slug}/{sha}/bot/changelog.json')).json()
+                except Exception:  # noqa: BLE001 — истории нет: покажем без неё
+                    return []
+            # история изменений и тесты — одновременно: страница «Обновление» не ждёт их по очереди
+            log, rr = await asyncio.gather(changes(), c.get(f'https://api.github.com/repos/{slug}/actions/runs',
+                                                             params={'head_sha': sha, 'per_page': 5}))
             if isinstance(log, list) and log:
                 res['version'] = log[0].get('version', '')
                 res['changes'] = newer(log, current())[:5]
-            runs = (await c.get(f'https://api.github.com/repos/{slug}/actions/runs', params={'head_sha': sha, 'per_page': 5})).json()
+            runs = rr.json()
             runs = [x for x in runs.get('workflow_runs') or [] if x.get('event') == 'push']
             if not runs:
                 res['state'] = 'testing'

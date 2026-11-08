@@ -25,6 +25,8 @@ async function loadAll(force) {
   if (D.st.theme) syncTheme(D.st.theme.mode);
   if (D.st.theme && D.st.theme.ui === 'classic') { location.replace('/admin?classic=1'); return; }  // классический выбрали на другом устройстве
   const first = D.loading, mark = k => { AT[k] = Date.now(); };
+  // экран — сразу по /api/state; панели, мониторинг и Bobr Cloud догружаются следом: медленная панель не держит всё
+  if (first) { D.loading = false; render(true); }
   await Promise.all([
     api('jobs').then(r => { D.jobs = r.jobs || []; }).catch(() => {}),
     ...(due('nodes', force || first) ? (mark('nodes'), groups().map(p => loadNodes(p.id))) : []),
