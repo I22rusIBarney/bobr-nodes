@@ -58,6 +58,17 @@ def settings_of(prof: dict) -> dict:
     return out
 
 
+def watched_hosts(prof: dict) -> dict[str, bool]:
+    """Выбор администратора: UUID хоста → проверять ли его отдельно (нет в словаре — по умолчанию)."""
+    return {str(k): bool(v) for k, v in (prof.get('mon_hosts') or {}).items()}
+
+
+def host_kinds(hosts: list[dict], loose: set[str], injectors: set[str]) -> dict[str, str]:
+    """Хост → loose (без ноды), node (вход ноды), balancer (шаблон собирает хосты), disabled."""
+    return {h['uuid']: 'disabled' if h.get('isDisabled') else 'balancer' if h.get('xrayJsonTemplateUuid') in injectors
+            else 'loose' if h['uuid'] in loose else 'node' for h in hosts}
+
+
 def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
     """Настройки мониторинга группы из админки → проверенные значения (ValueError с понятным текстом)."""
     out = settings_of(cur)
@@ -442,9 +453,14 @@ class Monitor:
         sub = ck.sub_name(prof['id'])
         skip = settings_of(prof)['mon_skip']
         bj = svc.bot_jobs_by_ip(self.store, prof['id'])
-        mine_all = {cid: [p for p in res if p.get('subName') == sub and not self.skip_group(p.get('groupName'), skip)]
-                    for cid, res in results.items() if self.healthy(res)}
+        mine_raw = {cid: [p for p in res if p.get('subName') == sub] for cid, res in results.items() if self.healthy(res)}
+        mine_all = {cid: [p for p in ps if not self.skip_group(p.get('groupName'), skip)] for cid, ps in mine_raw.items()}
         assigned, loose = self.assign(nodes, hosts or [], dns or {}, bj, injectors or set())
+        # какие хосты проверять отдельно: по умолчанию — без нод; любой другой (балансировщик, хост ноды) включают вручную
+        watch = watched_hosts(prof)
+        loose_ids = {h['uuid'] for h in loose}
+        loose = [h for h in hosts or [] if h.get('address') and not h.get('isDisabled')
+                 and watch.get(h['uuid'], h['uuid'] in loose_ids)]
 
         def by_addr(hs: list[dict], ps: list[dict]) -> list[dict]:
             keys = {(h.get('address'), int(h.get('port') or 0)) for h in hs}
@@ -452,11 +468,11 @@ class Monitor:
             return [p for p in ps if (p.get('server'), int(p.get('port') or 0)) in keys
                     or (p.get('server') in addrs and not p.get('port'))]
 
-        def tally(pick) -> dict:
+        def tally(pick, src=None) -> dict:
             data = fail = 0
             up = total = 0
             by = {}  # чекер → [прошло выходов, всего, лучшая задержка мс] — для карты на странице ноды
-            for cid, ps in mine_all.items():
+            for cid, ps in (src or mine_all).items():
                 got = [p for p in pick(ps) if p.get('lastCheck')]
                 if not got:
                     continue
@@ -489,7 +505,8 @@ class Monitor:
             def pick(ps, h=h, name=name):
                 return [p for p in ps if name and (self._norm(p.get('groupName')) == name or self._norm(p.get('name')) == name)] \
                     or by_addr([h], ps)
-            out['host:' + h['uuid']] = {'kind': 'host', **tally(pick), 'uuid': h['uuid'], 'name': h.get('remark') or h['address'],
+            # включённый вручную хост проверяем и в группах «не проверять» (балансировщик — тоже хост)
+            out['host:' + h['uuid']] = {'kind': 'host', **tally(pick, mine_raw if h['uuid'] in watch else None), 'uuid': h['uuid'], 'name': h.get('remark') or h['address'],
                                         'connected': True, 'country': '', 'pos': 10000 + i, 'hosts': [], 'cdn_hosts': [],
                                         'address': h.get('address')}
         return out
@@ -508,6 +525,8 @@ class Monitor:
                      and ((t['templateJson'].get('remnawave') or {}).get('injectHosts'))}
         dns = await asyncio.to_thread(resolve_all, {n['address'] for n in nodes} | {h.get('address') or '' for h in hosts})
         votes = self.votes(prof, results, nodes, hosts, dns, injectors)
+        _, loose = self.assign(nodes, hosts, dns, svc.bot_jobs_by_ip(self.store, prof['id']), injectors)
+        CACHE.put(prof, 'host_kinds', host_kinds(hosts, {h['uuid'] for h in loose}, injectors))
         cfg = settings_of(prof)
         now = time.time()
         seen = set()

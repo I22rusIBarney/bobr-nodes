@@ -2790,6 +2790,41 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         v['scripts'] = [{'id': x['id'], 'title': x.get('title') or x.get('path')} for x in store.scripts() if x.get('status') == 'approved']
         return J(v)
 
+    @r.get('/api/profiles/{pid}/hosts/watch')
+    async def hosts_watch(request):
+        """Хосты группы для раздела «Хосты»: какие проверяются отдельно и как они проходят из России."""
+        from .monitor import watched_hosts
+        p = profile_or_404(request.match_info['pid'], request)
+        (hosts,), _ = await cached(p, 'hosts')
+        kinds = PC.peek(p, 'host_kinds') or {}
+        watch = watched_hosts(p)
+        mon_st = store.mon_all(f'{p["id"]}:host:')
+        keep = ('status', 'data', 'fail', 'up', 'total', 'by', 'checked_at', 'since')
+        out = []
+        for h in hosts:
+            kind = kinds.get(h['uuid'], '')
+            st = mon_st.get(f'{p["id"]}:host:{h["uuid"]}')
+            out.append({'uuid': h['uuid'], 'remark': h.get('remark') or '', 'address': h.get('address') or '', 'port': h.get('port'),
+                        'kind': kind, 'hidden': bool(h.get('isHidden')),
+                        'watched': kind != 'disabled' and watch.get(h['uuid'], kind == 'loose'),
+                        'mon': {k: st.get(k) for k in keep} if st else None})
+        return J({'hosts': out, 'enabled': bool(p.get('mon_sub')), 'known': bool(kinds)})
+
+    @r.post('/api/profiles/{pid}/hosts/watch')
+    async def hosts_watch_set(request):
+        """Проверять ли хост отдельно: {uuid, on}. Выключенный пропадает из мониторинга при следующем опросе."""
+        p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        uuid = str(b.get('uuid') or '')
+        if not re.fullmatch(r'[0-9a-fA-F-]{8,64}', uuid):
+            raise ApiError('Хост не указан')
+        p = store.profile(p['id'])
+        p['mon_hosts'] = {**(p.get('mon_hosts') or {}), uuid: bool(b.get('on'))}
+        if len(p['mon_hosts']) > 2000:
+            raise ApiError('Слишком много хостов')
+        store.save_profile(p)
+        return J({'ok': True})
+
     @r.post('/api/checkers')
     async def checker_add(request):
         b = await body(request)
