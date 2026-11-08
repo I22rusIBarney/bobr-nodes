@@ -359,6 +359,7 @@ const SETTINGS = () => [
   { g: 'Сервер бота', id: 'audit', l: 'Журнал действий', i: 'activity', s: 'Кто, когда и что поменял', admin: 1 },
   { g: 'Инструменты', id: 'scripts', l: 'Мои скрипты', i: 'code', s: 'Свои установщики с GitHub', admin: 1 },
   { g: 'Инструменты', id: 'transfer', l: 'Перенос хостов', i: 'layers', s: 'Между панелями или из файла' },
+  { g: 'Инструменты', id: 'routing', l: 'Роутинг хостов', i: 'layers', s: 'Новые Xray JSON для хостов: файлы или архив' },
   { g: 'Инструменты', id: 'migrate', l: 'Переезд бота', i: 'server', s: 'На другой сервер со всеми данными', admin: 1 },
 ].filter(s => (!s.admin || isAdmin()) && (!s.member || !isAdmin()) && (!s.billing || (D.st.billing && D.st.billing.on)));
 function vSettings(sec) {
@@ -372,7 +373,7 @@ function vSettings(sec) {
   if (!cur) return [pageH('Настройки'), nav];
   const S_ = list.find(s => s.id === cur);
   const content = { health: setHealth, scripts: setScripts, reports: setReports, audit: setAudit, tariff: setTariff, subscription: setSubscription, problem: setProblem,
-    connections: setConnections, notifications: setNotif, summary: setSummary, checkers: setCheckers, users: setUsers, bot: setBot, look: () => vLook().slice(1), transfer: setTransfer, migrate: setMigrate, backup: setBackup }[cur]();
+    connections: setConnections, notifications: setNotif, summary: setSummary, checkers: setCheckers, users: setUsers, bot: setBot, look: () => vLook().slice(1), transfer: setTransfer, routing: setRouting, migrate: setMigrate, backup: setBackup }[cur]();
   return mobile ? [h('button', { type: 'button', class: 'back', onclick: () => go('settings') }, ic('chevL'), 'Настройки'), pageH(S_.l), content]
     : [pageH('Настройки'), h('div', { class: 'set-grid' }, nav, h('div', { style: 'min-width:0' }, h('h2', { class: 'set-h' }, S_.l), content))];
 }

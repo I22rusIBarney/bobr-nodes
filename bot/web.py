@@ -15,7 +15,7 @@ import shlex
 import socket
 import time
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote
 
 from aiohttp import web
 
@@ -2165,8 +2165,6 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         p = profile_or_404(b.get('pid', 0), request)
         squads = [x for x in (b.get('squads') or []) if isinstance(x, str)]
         mode = 'update' if b.get('template_mode') == 'update' else 'copy'
-        if any(x['pid'] == p['id'] and x['node_uuid'] == uuid for x in store.relays()):
-            raise ApiError('У ноды есть входы через Россию — сначала уберите их, чтобы бот снял проброс с российского сервера')
         lines: list[str] = []
 
         def run():
@@ -2187,6 +2185,103 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (engine.StepError, ApiError) as e:  # итог — на странице: что не так и что уже успели сделать
             return J({'ok': False, 'error': str(e), 'log': lines})
         return J({'ok': True, **res, 'log': lines})
+
+    # ── новый роутинг хостов: присланные Xray JSON → в шаблоны выбранных хостов ──
+    tpl_stage: dict[str, dict] = {}  # загруженные файлы до применения: id → {uid, at, name, json}; живут час
+
+    @r.put('/api/hosts/templates/files')
+    async def host_tpl_upload(request):
+        """Один файл (JSON или zip с JSON) — сырым телом, имя в X-File-Name. Ответ: что внутри и к какому хосту подходит."""
+        from . import hosttpl as ht
+        p = profile_or_404(request.query.get('pid', 0), request)
+        data = await request.content.read(ht.MAX_FILE + 1)
+        name = unquote(request.headers.get('X-File-Name', '') or 'config.json')[:200]
+        try:
+            files = ht.read_files(name, data)
+        except engine.StepError as e:
+            raise ApiError(str(e)) from None
+        files.sort(key=lambda f: ht.sort_key(f['name']))
+        try:
+            hosts = await asyncio.to_thread(lambda: panel_of(p).call('GET', '/api/hosts'))
+            tpls = {t['uuid']: t for t in await asyncio.to_thread(lambda: panel_of(p).templates())}
+        except engine.StepError as e:
+            raise ApiError(f'Панель: {e}') from None
+        now, uid = time.time(), uid_of(request)
+        for k in [k for k, v in tpl_stage.items() if now - v['at'] > 3600]:
+            tpl_stage.pop(k, None)
+        out = []
+        for f, host in zip(files, ht.suggest(files, hosts, tpls)):
+            fid = secrets.token_hex(8)
+            tpl_stage[fid] = {'uid': uid, 'pid': p['id'], 'at': now, 'name': f['name'], 'json': f['json']}
+            out.append({'id': fid, 'name': f['name'], 'suggest': host, **ht.summary(f['json'])})
+        return J({'files': out})
+
+    def tpl_backup_key(pid: int) -> str:
+        return f'hosttpl:undo:{pid}'
+
+    @r.post('/api/hosts/templates/apply')
+    async def host_tpl_apply(request):
+        """pairs: [{host, file}] — содержимое загруженных файлов в шаблоны этих хостов. Старое — в резерв для отката."""
+        from . import hosttpl as ht
+        b = await body(request)
+        p = profile_or_404(b.get('pid', 0), request)
+        uid, pairs = uid_of(request), []
+        for x in b.get('pairs') or []:
+            f = tpl_stage.get(str((x or {}).get('file') or ''))
+            if not f or f['uid'] != uid or f['pid'] != p['id']:
+                raise ApiError('Загруженные файлы устарели — загрузите их снова')
+            pairs.append((str(x.get('host') or ''), f['name'], f['json']))
+        if not 1 <= len(pairs) <= ht.MAX_FILES:
+            raise ApiError('Выберите хост хотя бы для одного файла')
+        lines: list[str] = []
+
+        def run():
+            with engine.PANEL_LOCK:
+                return ht.apply(panel_of(p), pairs, lines.append)
+        try:
+            res, backup = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            return J({'ok': False, 'error': str(e), 'log': lines})
+        if backup:
+            store.set(tpl_backup_key(p['id']), json.dumps({'at': time.time(), 'who': audit.who_of(request['user']), 'items': backup}))
+        for x in b.get('pairs') or []:
+            tpl_stage.pop(str(x.get('file')), None)
+        PC.drop(p['id'])
+        return J({'ok': True, **res, 'log': lines, 'undo': bool(backup)})
+
+    @r.get('/api/hosts/templates/undo')
+    async def host_tpl_undo_info(request):
+        p = profile_or_404(request.query.get('pid', 0), request)
+        try:
+            u = json.loads(store.get(tpl_backup_key(p['id'])) or 'null')
+        except ValueError:
+            u = None
+        return J({'undo': {'at': u['at'], 'who': u.get('who', ''), 'templates': [x['name'] for x in u['items']]} if u else None})
+
+    @r.post('/api/hosts/templates/undo')
+    async def host_tpl_undo(request):
+        """Вернуть шаблоны, какими они были до последнего обновления роутинга."""
+        from . import hosttpl as ht
+        b = await body(request)
+        p = profile_or_404(b.get('pid', 0), request)
+        try:
+            u = json.loads(store.get(tpl_backup_key(p['id'])) or 'null')
+        except ValueError:
+            u = None
+        if not u:
+            raise ApiError('Возвращать нечего: обновлений роутинга ещё не было')
+        lines: list[str] = []
+
+        def run():
+            with engine.PANEL_LOCK:
+                return ht.restore(panel_of(p), u['items'], lines.append)
+        try:
+            n = await asyncio.to_thread(run)
+        except engine.StepError as e:
+            return J({'ok': False, 'error': str(e), 'log': lines})
+        store.set(tpl_backup_key(p['id']), '')
+        PC.drop(p['id'])
+        return J({'ok': True, 'restored': n, 'log': lines})
 
     # ── развёртывание ──
     @r.get('/api/catalog')

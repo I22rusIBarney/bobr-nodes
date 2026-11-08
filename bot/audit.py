@@ -39,6 +39,8 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/apply', 'node.apply', 'Применил дополнения к ноде'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/apply-many', 'node.apply', 'Применил дополнения к нодам'),
     ('POST', r'/api/hosts/import', 'hosts.import', 'Перенёс хосты в панель'),
+    ('POST', r'/api/hosts/templates/apply', 'hosts.routing', 'Обновил роутинг (Xray JSON) хостов'),
+    ('POST', r'/api/hosts/templates/undo', 'hosts.routing', 'Вернул прежний роутинг хостов'),
     ('POST', r'/api/deploy', 'deploy', 'Запустил покупку и установку нод'),
     ('POST', r'/api/scripts', 'script.create', 'Добавил скрипт установки'),
     ('PUT', r'/api/scripts/(?P<sid>\d+)/recipe', 'script.edit', 'Изменил скрипт установки'),
