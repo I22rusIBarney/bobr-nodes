@@ -78,6 +78,8 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('POST', r'/api/backup/key', 'backup.key', 'Сменил ключ резервных копий'),
     ('POST', r'/api/invites', 'invite.create', 'Создал приглашение'),
     ('DELETE', r'/api/invites/(?P<iid>\d+)', 'invite.delete', 'Отозвал приглашение'),
+    ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/hoster', 'node.hoster', 'Подписал хостера ноды'),
+    ('POST', r'/api/stats/ask', 'stats.ai', 'Спросил нейросеть о блокировках'),
     ('POST', r'/api/users/(?P<tg>\d+)/block', 'user.block', 'Заблокировал или разблокировал пользователя'),
     ('DELETE', r'/api/users/(?P<tg>\d+)', 'user.delete', 'Удалил пользователя'),
 ]
@@ -90,7 +92,7 @@ SHOW = {'name': 'название', 'domain': 'домен', 'domains': 'доме
         'free': 'бесплатно', 'blocked': 'закрыт', 'price_rub': 'цена ₽', 'period_days': 'период, дней', 'scale': 'автомасштабирование',
         'scale_max': 'лимит нод', 'online_max': 'онлайн на ноду', 'update': 'автообновление', 'load': 'нагрузка', 'renew': 'автопродление',
         'autorenew': 'автопродление', 'action': 'действие', 'hour': 'час', 'host': 'хост', 'uuids': 'ноды', 'amount_rub': 'сумма ₽',
-        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'exit_egames': 'переустановить выход', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок'}
+        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'exit_egames': 'переустановить выход', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок', 'hoster': 'хостер', 'question': 'вопрос'}
 
 
 def match(method: str, path: str) -> tuple[str, str, dict] | None:

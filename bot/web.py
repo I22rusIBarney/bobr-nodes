@@ -109,6 +109,7 @@ ADMIN_ONLY = [
     (r'.*', r'/api/users/\d+/access'),
     (r'.*', r'/api/backup(/.*)?'),
     (r'.*', r'/api/audit'),
+    (r'POST', r'/api/stats/ask'),  # нейросеть — на ключе администратора
 ]
 
 
@@ -877,7 +878,56 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                   'load': autopilot.load_of(p['id'], uuid, hist=True) if autopilot else {},
                   'load_on': load_watched(p), 'disabled': bool(n.get('isDisabled')),
                   'busy': any(j['data'].get('node_uuid') == uuid for j in store.active_jobs() if j['profile_id'] == p['id']),
+                  'net': await node_net(p['id'], n['address'], ip),
                   'stale': stale})
+
+    async def node_net(pid: int, addr: str, ip: str) -> dict:
+        """Сеть ноды: ASN и владелец (RIPEstat, кэш на 30 дней), /24, хостер (подписан вручную) и последняя проверка соседей."""
+        from . import banlab
+        info = None
+        if ip:  # RIPEstat отвечает не мгновенно: страницу не держим, ответ всё равно ляжет в кэш
+            try:
+                info = await asyncio.wait_for(asyncio.to_thread(banlab.cached_info, store, ip), 4)
+            except asyncio.TimeoutError:
+                info = None
+        return {**{k: (info or {}).get(k, '') for k in ('asn', 'holder', 'prefix')}, 'net24': banlab.net24(ip or ''),
+                'hoster': store.get(f'hoster:{pid}:{addr}'), 'neigh': json.loads(store.get(f'neigh:{ip}') or 'null') if ip else None}
+
+    def node_of(p: dict, uuid: str) -> dict:
+        n = next((x for x in PC.peek(p, 'nodes') or [] if x['uuid'] == uuid), None)
+        if not n:
+            n = next((x for x in panel_of(p).call('GET', '/api/nodes') if x['uuid'] == uuid), None)
+        if not n:
+            raise ApiError('Ноды нет в панели', 404)
+        return n
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/hoster')
+    async def panel_node_hoster(request):
+        """Подпись хостера ноды для статистики блокировок (пусто — по владельцу сети)."""
+        p = profile_or_404(request.match_info['pid'], request)
+        n = await asyncio.to_thread(node_of, p, request.match_info['uuid'])
+        v = re.sub(r'\s+', ' ', str((await body(request)).get('hoster') or '')).strip()[:60]
+        store.set(f'hoster:{p["id"]}:{n["address"]}', v)
+        return J({'hoster': v})
+
+    @r.post('/api/profiles/{pid}/nodes/{uuid}/neighbors')
+    async def panel_node_neighbors(request):
+        """Соседи ноды по /24: открываются ли из России те, что живы из-за рубежа. Отвечает, режут подсеть или только ноду."""
+        from . import banlab
+        p = profile_or_404(request.match_info['pid'], request)
+        n = await asyncio.to_thread(node_of, p, request.match_info['uuid'])
+        bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
+        ip = bd.get('ip') or (n['address'] if engine.is_ip(n['address']) else await asyncio.to_thread(resolve, n['address']))
+        if not banlab.is_public(ip or ''):
+            raise ApiError('Не узнал публичный IPv4 ноды')
+        if monitor is None:
+            raise ApiError('Мониторинг выключен — проверять из России нечем')
+        v = await monitor.probe_neighbors(ip)
+        if v is None:
+            raise ApiError('Нет работающего чекера в России — поставьте его в «Мониторинге»')
+        v['text'] = banlab.NEIGH_TEXT[v['kind']]
+        store.set(f'neigh:{ip}', json.dumps(v, ensure_ascii=False))
+        return J(v)
 
     @r.get('/api/profiles/{pid}/nodes/{uuid}/diagnose')
     async def panel_node_diagnose(request):
@@ -3524,25 +3574,55 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         return J({'ok': True, 'auto_renew': v})
 
     # ── докупка при нагрузке: предложения ждут подтверждения администратора ──
+    _ipinfo_bg: set = set()
+    _ipinfo_tasks: set = set()
+
+    def block_stats(ps: list[dict], days: int) -> tuple[dict, list[dict]]:
+        """Статистика блокировок по группам ps; сеть нод, которой ещё нет в кэше, бот узнаёт в фоне."""
+        from . import banlab
+        res, blocks, missing = banlab.collect(store, ps, days)
+        todo = [ip for ip in dict.fromkeys(missing) if ip not in _ipinfo_bg][:50]
+        if todo:
+            _ipinfo_bg.update(todo)
+
+            async def fill():
+                try:
+                    for ip in todo:
+                        await asyncio.to_thread(banlab.cached_info, store, ip)
+                finally:
+                    _ipinfo_bg.difference_update(todo)
+            _ipinfo_tasks.add(t := asyncio.get_running_loop().create_task(fill()))
+            t.add_done_callback(_ipinfo_tasks.discard)
+        return res, blocks
+
+    def stats_days(request, default: int = 90) -> int:
+        try:
+            return max(7, min(365, int(request.query.get('days') or default)))
+        except ValueError:
+            return default
+
     @r.get('/api/stats/blocks')
     async def stats_blocks(request):
-        """Где и как поставленные ноды блокируют реже: по локациям и конфигурациям за days дней, плюс советы для покупки."""
+        """Где и как поставленные ноды блокируют реже: по локациям, конфигурациям, хостерам, сетям и настройкам
+        за days дней, пачки блокировок и проверки соседей, плюс советы для покупки."""
         from . import blockstats as bs
-        try:
-            days = max(7, min(365, int(request.query.get('days') or 90)))
-        except ValueError:
-            days = 90
-        ps, now = my_profiles(request), time.time()
-        nodes: dict[tuple, dict] = {}
-        for p in ps:
-            for j in store.done_jobs(p['id']):
-                d = j['data']
-                if d.get('ip') and d.get('kind') not in SERVICE_KINDS and not d.get('removed'):
-                    nodes[(p['id'], d['ip'])] = {'location': d.get('location') or '', 'loc_name': d.get('loc_name') or '',
-                                                 'flag': d.get('flag') or '', 'config': svc.config_label(store, d), 'born': j['updated_at']}
-        res = bs.summarize(store.blocks(now - days * 86400, [p['id'] for p in ps]), list(nodes.values()), now, days)
+        res, _ = block_stats(my_profiles(request), stats_days(request))
         res['advice'] = {r['key']: a for r in res['locations'] if (a := bs.advice(res, r['key']))}
+        res['ai'] = json.loads(store.get('banlab_ai') or 'null')
+        res['ai_ready'] = bool(store.get('gemini_key'))
         return J(res)
+
+    @r.post('/api/stats/ask')
+    async def stats_ask(request):
+        """Нейросеть разбирает статистику блокировок: что связано с банами и что делать. Последний ответ сохраняется."""
+        from . import banlab
+        b = await body(request)
+        days = max(7, min(365, int(b['days']))) if str(b.get('days') or '').isdigit() else 90
+        try:
+            out = await banlab.ai_report(store, gemini(), store.profiles(), days, str(b.get('question') or ''))
+        except sc.ScriptError as e:
+            raise ApiError(str(e)) from None
+        return J(out)
 
     @r.get('/api/stats/costs')
     async def stats_costs(request):

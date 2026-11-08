@@ -37,10 +37,12 @@ function statsSection() {
   const best = rows.filter(r => r.rate != null && r.months >= 1).sort((a, b) => a.rate - b.rate)[0];
   const blocksCard = h('section', { class: 'section' },
     h('div', { class: 'section-h', style: 'flex-wrap:wrap;row-gap:8px' }, h('h2', null, 'Где блокируют реже'), h('span', { class: 'faint', style: 'font-size:13px' }, '90 дней'),
-      h('div', { class: 'seg', role: 'tablist', style: 'margin-left:auto' }, [['locations', 'Локации'], ['configs', 'Установка']].map(([k, l]) =>
-        h('button', { type: 'button', role: 'tab', 'aria-selected': String(by === k), onclick: () => { UI.statsBy = k; render(); } }, l)))),
+      h('select', { class: 'sel', 'aria-label': 'Разрез', style: 'margin-left:auto;max-width:200px', onchange: e => { UI.statsBy = e.target.value; render(); } },
+        STATS_BY.map(([k, l]) => h('option', { value: k, selected: by === k || null }, l)))),
     !B ? h('div', { class: 'sk', style: 'height:160px' })
-      : !rows.length ? h('div', { class: 'sheet', style: 'padding:16px' }, h('div', { class: 'muted' }, 'Пока нечего сравнивать: бот начнёт записывать блокировки нод, купленных через него, с этой версии.'))
+      : !rows.length ? h('div', { class: 'sheet', style: 'padding:16px' }, h('div', { class: 'muted' }, by === 'locations' || by === 'configs'
+        ? 'Пока нечего сравнивать: бот начнёт записывать блокировки нод, купленных через него, с этой версии.'
+        : 'Пока нет данных в этом разрезе: сети нод бот узнаёт в фоне (обновите через минуту), настройки и соседей записывает с новых блокировок.'))
       : h('div', { class: 'list' }, rows.slice(0, 8).map(r => {
         const top = Object.entries(r.fixes).sort((a, b) => b[1] - a[1])[0];
         return h('div', { class: 'li' },
@@ -63,5 +65,65 @@ function statsSection() {
         h('div', { class: 'grow' }, h('div', { class: 't' }, k.label), h('div', { class: 's' }, pl(k.n, 'раз', 'раза', 'раз'))), h('span', { class: 'num' }, rubK(k.kop)))),
       h('div', { class: 'li' }, h('div', { class: 'grow' }, h('b', null, 'Разово за 30 дней'), h('div', { class: 's', style: 'white-space:normal' }, 'по задачам бота: покупки, замены, докупка и смены IP')),
         h('b', { class: 'num' }, rubK(C.total_kop)))));
-  return h('div', { class: 'grid2' }, blocksCard, costCard);
+  return [h('div', { class: 'grid2' }, blocksCard, costCard), B ? banSignals(B) : null, B ? aiCard(B) : null];
+}
+const STATS_BY = [['locations', 'Локации'], ['hosters', 'Хостеры'], ['asns', 'Сети (ASN)'], ['nets', 'Подсети /24'], ['configs', 'Тарифы'],
+  ['stealth', 'Уникальные настройки'], ['ports', 'Порты'], ['fps', 'TLS-отпечатки']];
+const NEIGH = { subnet: 'режут и соседей — бан подсети или хостера', single: 'соседи открываются — узнали именно ноду',
+  mixed: 'часть соседей тоже недоступна', unknown: 'живых соседей мало — вывода нет' };
+/* сигналы из истории: пачки блокировок в одной сети за сутки и итоги проверок соседей по /24 */
+function banSignals(B) {
+  const cl = B.clusters || [], nb = Object.entries(B.neighbors || {});
+  if (!cl.length && !nb.length) return null;
+  return h('section', { class: 'section' }, h('div', { class: 'section-h' }, h('h2', null, 'Почему блокируют'), h('span', { class: 'faint', style: 'font-size:13px' }, B.days + ' дней')),
+    h('div', { class: 'list' },
+      nb.length ? h('div', { class: 'li' }, h('div', { class: 'ic-tile' }, ic('radar')), h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't' }, 'Проверка соседей по /24 из России'),
+        h('div', { class: 's', style: 'white-space:normal' }, nb.sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} — ${NEIGH[k] || k}`).join(' · ')))) : null,
+      cl.slice(0, 6).map(c => h('div', { class: 'li' }, h('div', { class: 'ic-tile' }, ic('alert')), h('div', { class: 'grow', style: 'min-width:0' },
+        h('div', { class: 't', style: 'white-space:normal' }, `${pl(c.n, 'нода', 'ноды', 'нод')} за сутки в ${c.key}`),
+        h('div', { class: 's', style: 'white-space:normal' }, new Date(c.start * 1000).toLocaleDateString('ru-RU') + ' · ' + c.nodes.join(', ')))))));
+}
+/* разбор нейросетью: последний отчёт и вопрос своими словами (только администратор — ключ Gemini его) */
+function aiCard(B) {
+  const r = UI.aiAns || B.ai, CONF = { high: ['bad', 'уверенно'], medium: ['warn', 'вероятно'], low: ['', 'слабый сигнал'] };
+  const ask = e => busyBtn(e, async () => {
+    try { UI.aiAns = await api('stats/ask', 'POST', { question: UI.aiQ || '', days: B.days }); render(); }
+    catch (x) { toast('Нейросеть не ответила', x.message, 'bad'); }
+  });
+  if (!isAdmin() && !r) return null;
+  return h('section', { class: 'section' }, h('div', { class: 'section-h' }, h('h2', null, 'Разбор нейросетью'),
+      r ? h('span', { class: 'faint', style: 'font-size:13px' }, ago(r.ts * 1000) + ' · по ' + pl(r.blocks, 'блокировке', 'блокировкам', 'блокировкам')) : null),
+    h('div', { class: 'sheet', style: 'padding:16px;display:grid;gap:12px' },
+      r ? [h('div', null, r.summary),
+        r.findings.length ? h('div', { class: 'list' }, r.findings.map(f => h('div', { class: 'li' }, h('div', { class: 'grow', style: 'min-width:0' },
+          h('div', { class: 't', style: 'white-space:normal' }, f.factor), h('div', { class: 's', style: 'white-space:normal' }, f.evidence)),
+          h('span', { class: 'st ' + CONF[f.confidence][0], style: 'flex:none' }, CONF[f.confidence][1])))) : null,
+        r.actions.length ? h('div', null, h('b', null, 'Что сделать'), h('ul', { style: 'margin:6px 0 0;padding-left:20px' }, r.actions.map(a => h('li', null, a)))) : null,
+        r.need_data.length ? h('div', { class: 'muted' }, 'Для уверенного вывода не хватает: ' + r.need_data.join('; ')) : null]
+        : h('div', { class: 'muted' }, 'Нейросеть посмотрит частоту блокировок по хостерам, подсетям, настройкам и нагрузке, пачки банов и проверки соседей — и скажет, что сильнее всего связано с блокировками. Раз в неделю бот делает такой разбор сам и присылает итог.'),
+      isAdmin() ? (B.ai_ready ? [h('textarea', { class: 'inp', rows: 2, placeholder: 'Свой вопрос (необязательно): например, стоит ли уходить от этого хостера?', value: UI.aiQ || '',
+          oninput: e => { UI.aiQ = e.target.value; } }),
+        h('div', { class: 'chips' }, btn(r ? 'Разобрать заново' : 'Разобрать', ask, 's primary', 'refresh'))]
+        : h('div', { class: 'muted' }, 'Нужен ключ Gemini: «Настройки» → «Подключения».')) : null));
+}
+/* страница ноды: сеть, хостер и проверка соседей по /24 */
+function nodeNet(n, d) {
+  const x = d && d.net;
+  if (!x || !d.ip) return null;
+  const saveHoster = async v => {
+    try { const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/hoster`, 'POST', { hoster: v }); x.hoster = r.hoster; toast('Сохранено', r.hoster ? 'Хостер: ' + r.hoster : 'Хостер — по владельцу сети'); }
+    catch (e) { toast('Не сохранилось', e.message, 'bad'); }
+  };
+  const probe = e => busyBtn(e, async () => {
+    try { x.neigh = await api(`profiles/${n.pid}/nodes/${n.uuid}/neighbors`, 'POST'); render(); }
+    catch (er) { toast('Проверка не удалась', er.message, 'bad'); }
+  });
+  const nb = x.neigh;
+  return [
+    kv('Сеть', h('span', { style: 'white-space:normal' }, x.asn ? `${x.asn} ${x.holder}` : 'неизвестно', h('span', { class: 'faint' }, ' · ' + (x.prefix || x.net24)))),
+    kv('Хостер', h('input', { class: 'inp', style: 'max-width:220px', placeholder: x.holder || 'например, Aeza', value: x.hoster || '', 'aria-label': 'Хостер',
+      onchange: e => saveHoster(e.target.value.trim()) })),
+    kv('Соседи по /24', h('span', { style: 'white-space:normal' }, nb ? `${NEIGH[nb.kind] || nb.kind}` + (nb.checked ? ` (недоступны ${nb.blocked} из ${nb.checked})` : '') + ' · ' + ago(nb.ts * 1000)
+      : h('span', { class: 'faint' }, 'не проверялись')), btn('Проверить', probe, 's ghost', 'radar')),
+  ];
 }

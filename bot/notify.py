@@ -49,6 +49,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'system.update':    ('system', 'Бот обновился', TG, False, True),
     'system.update_available': ('system', 'Вышла новая версия бота', TG, False, True),
     'system.backup':    ('system', 'Резервная копия базы (файл)', TG, False, True),
+    'stats.ai':         ('system', 'Нейросеть: еженедельный разбор блокировок', TG, False, True),
     'report.new':       ('system', 'Ошибки и отзывы пользователей', TG, False, True),
     'report.reply':     ('tasks', 'Ответ на ваш отчёт о проблеме', TG, False, False),
     'survey.ask':       ('tasks', 'Опрос: всё ли работает после установки', TG, False, False),
