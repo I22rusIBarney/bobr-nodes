@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import random
 import re
 import secrets
 import shlex
@@ -405,6 +406,35 @@ def final_mask(raw):
     if not isinstance(raw, dict) or not raw or len(json.dumps(raw)) > 8000:
         raise StepError('Final Mask: нужен JSON-объект, например {"tcp": [{"type": "fragment", …}]}')
     return raw
+
+
+STEALTH_PORTS = (443, 8443, 2053, 2087, 2096, 9443)  # похожи на обычный HTTPS; 2083 — у запасного XHTTP
+FINGERPRINTS = ('chrome', 'firefox', 'safari', 'edge', 'ios', 'android')
+_RNG = random.SystemRandom()
+
+
+def stealth(rng=_RNG) -> dict:
+    """Случайные настройки хостов одной ноды, чтобы у нод не было общего отпечатка: порт для клиентов (половина —
+    443 и похожие на HTTPS, половина — 20000–60000), TLS-отпечаток, фрагментация ClientHello, у запасного XHTTP —
+    свой порт, padding и xmux. Профиль Xray остаётся общим: порты переадресуются на ноде."""
+    def span(lo, hi):
+        a = rng.randint(lo, hi)
+        return f'{a}-{rng.randint(a, hi)}'
+
+    def port():
+        return rng.choice(STEALTH_PORTS) if rng.random() < .5 else rng.randint(20000, 60000)
+    main = port()
+    xport = port()
+    while xport in (main, 443):  # 443 занят основным inbound
+        xport = port()
+    return {'port': None if main == 443 else main, 'fingerprint': rng.choice(FINGERPRINTS),
+            'final_mask': {'tcp': [{'type': 'fragment', 'settings': {'length': span(5, 30), 'packets': 'tlshello',
+                                                                     'interval': span(5, 25)}}]},
+            'xhttp_port': xport, 'xhttp_fingerprint': rng.choice(FINGERPRINTS),
+            # xPaddingBytes — внутри 100–1000: сервер Xray отклоняет padding вне своего диапазона по умолчанию
+            'xhttp_extra': {'xPaddingBytes': span(100, 1000),
+                            'xmux': {'maxConcurrency': span(4, 32), 'hMaxRequestTimes': span(300, 900),
+                                     'hMaxReusableSecs': span(900, 3000)}}}
 
 
 def public_port(raw, node_port: int = 2222) -> int | None:
@@ -914,9 +944,13 @@ class Panel:
         self.restart_node(pnode, log)
 
     def xhttp_publish(self, prof: dict, domain: str, ip: str, remark: str, cf: 'Cloudflare | None', log,
-                      mode: str = 'both') -> None:
+                      mode: str = 'both', opts: dict | None = None) -> None:
         """Хосты запасного XHTTP по режиму: direct — напрямую (домен ноды:порт), cdn — через Cloudflare CDN
-        (cdn-домен, оранжевое облако), both — оба. Хосты другого режима, оставшиеся с прошлого раза, убираются."""
+        (cdn-домен, оранжевое облако), both — оба. Хосты другого режима, оставшиеся с прошлого раза, убираются.
+        opts — уникальные настройки ноды (stealth): свой порт прямого хоста, отпечаток, xhttpExtraParams."""
+        opts = opts or {}
+        own = {k: v for k, v in (('fingerprint', opts.get('xhttp_fingerprint')),
+                                 ('xhttpExtraParams', opts.get('xhttp_extra'))) if v}
         mode = xhttp_mode(mode)
         x = xhttp_of(prof.get('config'))
         xin = next((i for i in prof['inbounds'] if x and i['tag'] == x['tag']), None)
@@ -933,7 +967,7 @@ class Panel:
             cf.upsert_a(cdn, ip, log, proxied=True)
             if cf.xhttp_rules(cdn, x['port'], log):
                 cdn_port = 443
-        targets = ([(domain, x['port'], 'XHTTP')] if mode in ('direct', 'both') else []) + \
+        targets = ([(domain, int(opts.get('xhttp_port') or x['port']), 'XHTTP')] if mode in ('direct', 'both') else []) + \
             ([(cdn, cdn_port, 'CDN')] if want_cdn else [])
         hosts = self.call('GET', '/api/hosts')
         mine = [h for h in hosts if str(((h.get('inbound') or {}).get('configProfileInboundUuid')) or '') == xin['uuid']]
@@ -951,10 +985,10 @@ class Panel:
         for addr, port, label in targets:
             body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': xin['uuid']},
                     'remark': f'{remark} {label}'[:100], 'address': addr, 'port': port, 'path': x['path'], 'sni': addr, 'host': addr,
-                    'alpn': 'h2,http/1.1', 'fingerprint': 'chrome', 'securityLayer': 'TLS'}
+                    'alpn': 'h2,http/1.1', 'fingerprint': 'chrome', 'securityLayer': 'TLS', **own}
             have = next((h for h in mine if h.get('address') == addr), None)
             if have:
-                self.call('PATCH', '/api/hosts', {'uuid': have['uuid'], 'port': port, 'path': x['path']})
+                self.call('PATCH', '/api/hosts', {'uuid': have['uuid'], 'port': port, 'path': x['path'], **own})
                 log(f'панель: хост «{have.get("remark", addr)}» обновлён ({addr}:{port})')
             else:
                 self.call('POST', '/api/hosts', body)
@@ -1024,8 +1058,8 @@ class Panel:
         body = {'inbound': {'configProfileUuid': prof['uuid'], 'configProfileInboundUuid': inbound['uuid']},
                 'address': node['domain']}
         if tls:  # свой TLS-профиль бота: SNI = домен ноды
-            body.update({'port': 443, 'sni': node['domain'], 'alpn': 'h2,http/1.1', 'fingerprint': 'firefox',
-                         'securityLayer': 'TLS'})
+            body.update({'port': 443, 'sni': node['domain'], 'alpn': 'h2,http/1.1',
+                         'fingerprint': (node.get('host') or {}).get('fingerprint') or 'firefox', 'securityLayer': 'TLS'})
         else:    # чужой профиль (например Reality): параметры безопасности — из inbound
             body.update({'port': int(inbound.get('port') or 443), 'securityLayer': 'DEFAULT'})
         opts = node.get('host') or {}
@@ -1478,13 +1512,20 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
             raise StepError(f'установщик завершился с кодом {rc}')
         log(f'установщик завершён, код {rc}' + (' (ждёт профиль из панели)' if rc == 2 else ''))
 
-    port = (node.get('host') or {}).get('port')
+    host = node.get('host') or {}
+    if host.get('stealth') and 'xhttp_port' not in host:
+        host = node['host'] = {**host, **stealth()}
+        log(f'уникальные настройки: порт {host["port"] or 443}, отпечаток {host["fingerprint"]}'
+            + (f', XHTTP на {host["xhttp_port"]}' if node.get('xhttp') else ''))
+    port = host.get('port')
     extras = {}
     if node.get('psiphon') or node.get('warp') or node.get('xhttp') or port:
         stage('extras')
         extras = install_extras(r, node, log)
         if port:
             setup_port(r, int(port), 443, log)
+        if 'xhttp' in extras and host.get('xhttp_port'):
+            setup_port(r, int(host['xhttp_port']), extras['xhttp']['port'], log)
     if panel is None:
         return 'установлено, панель пропущена'
     stage('panel')
@@ -1506,7 +1547,7 @@ def deploy(node: dict, prof: dict, logfile, log: Callable[[str], None], stage: C
         pprof = panel.register(node, profile, squads, int(prof.get('node_port') or 2222), log, extras)
         if 'xhttp' in extras:
             panel.xhttp_publish(pprof, node['domain'], node['ip'], node.get('remark') or node['name'],
-                                Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log, extras['xhttp']['mode'])
+                                Cloudflare(prof['cf_token']) if prof.get('cf_token') else None, log, extras['xhttp']['mode'], host)
 
     stage('check')
     for attempt in range(check_tries):

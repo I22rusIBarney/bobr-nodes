@@ -3,7 +3,7 @@
 
 /* ═════════ Настройки ноды ═════════ */
 const EXTRAS = [['psiphon', 'Psiphon', 'Запасной выход, когда сайты блокируют IP хостера'], ['warp', 'WARP', 'Выход через Cloudflare для сервисов, которые не любят IP дата-центров'],
-  ['xhttp', 'Запасной XHTTP', 'Второй способ подключения через CDN, если основной режут']];
+  ['xhttp', 'Запасной XHTTP', 'Второй способ подключения напрямую, если основной режут']];
 function nodeSettings(n, det) {
   const d = det.d;
   if (!d) return det.err ? empty('alert', 'Не загрузилось', det.err) : h('div', { class: 'sk', style: 'height:280px' });
@@ -18,7 +18,7 @@ function nodeSettings(n, det) {
     fn: async () => {
       const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/apply`, 'POST', { port: st.port || undefined, final_mask: st.mask == null ? undefined : st.mask,
         psiphon: st.add.psiphon ? { enabled: true, region: '', domains: '' } : undefined, warp: st.add.warp ? { enabled: true, domains: '' } : undefined,
-        xhttp: st.add.xhttp ? { enabled: true, mode: 'both' } : undefined });
+        xhttp: st.add.xhttp ? { enabled: true, mode: 'direct' } : undefined });
       UI.ns = null; jobToast(`${n.name}: настройки применяются`, r.id); refreshSoon();
     } });
   const hasFM = (d.hosts || []).some(x => x.final_mask);

@@ -3109,7 +3109,7 @@ function areaIn(val, rows, on, check) {
   return ta;
 }
 const jsonOk = t => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o); } catch (e) { return false; } };
-function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false, xhMode: s.xhMode || 'both' }; }
+function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false, xhMode: s.xhMode || 'direct' }; }
 function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains, xhMode: E.xhMode }); }
 function extrasRows(E, have, opts) {
   have = have || []; opts = opts || {};
@@ -3158,7 +3158,7 @@ function act(text, fn, cls) {
   } });
   return r;
 }
-function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'both' } : undefined }; }
+function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'direct' } : undefined }; }
 const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
 
 let D = null, DEPLOY_HINT = null;  // DEPLOY_HINT — локация, с которой открыть мастер
@@ -3410,14 +3410,23 @@ function deployView(pid) {
   // подключение клиентов: порт и Final Mask
   if (D.mask === undefined) { D.mask = lsGet('final_mask', true); D.maskJson = lsGet('final_mask_json', MASK_DEF); }
   if (!D.portMode) { D.portMode = lsGet('port_mode', 'std'); D.port = lsGet('port', '8443'); }
-  const crows = [row({ title: 'Порт', chevron: false, right: UI.segmented([{ value: 'std', label: '443' }, { value: 'custom', label: 'Свой' }], D.portMode,
-    x => { D.portMode = x; lsSet('port_mode', x); UI.nav.refresh(); }, 'compact') })];
-  if (D.portMode === 'custom') crows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Номер порта'), textIn(D.port, '8443', x => { D.port = x.replace(/\D/g, ''); lsSet('port', D.port); }, true, 'right')));
-  crows.push(row({ title: 'Final Mask', sub: 'фрагментация ClientHello на клиенте', right: UI.toggle(D.mask, on => { D.mask = on; lsSet('final_mask', on); UI.nav.refresh(); }, 'Final Mask') }));
-  if (D.mask) crows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON Final Mask'), areaIn(D.maskJson, 10, x => { D.maskJson = x; lsSet('final_mask_json', x); }, jsonOk)));
-  crows.push(h('div', { class: 'in-note' }, (D.portMode === 'custom' ? `Хосты получат порт ${D.port || '…'}; на ноде он переадресуется на порт Xray, 443 тоже продолжит работать. ` : '')
-    + 'Часть российских операторов режет ClientHello на 443/TCP — помогают Final Mask, свой порт или оба.'));
-  adv.push(...UI.fold({ title: 'Подключение клиентов', summary: `порт ${D.portMode === 'custom' ? (D.port || '…') : '443'}, Final Mask ${D.mask ? 'включён' : 'выключен'}`, key: 'd-conn', body: crows }));
+  if (D.stealth === undefined) D.stealth = lsGet('stealth', false);
+  const crows = [row({ title: 'Уникальные настройки', sub: 'у каждой ноды свой порт, TLS-отпечаток, маска и параметры XHTTP',
+    right: UI.toggle(D.stealth, on => { D.stealth = on; lsSet('stealth', on); UI.nav.refresh(); }, 'Уникальные настройки') })];
+  if (D.stealth) {
+    crows.push(h('div', { class: 'in-note' }, 'Половина нод получит 443 или похожий на HTTPS порт (8443, 2053…), остальные — случайный 20000–60000. '
+      + 'Отпечаток браузера и фрагментация ClientHello тоже случайные; у запасного XHTTP — свой порт, padding и xmux. Так у нод нет общего узнаваемого шаблона.'));
+  } else {
+    crows.push(row({ title: 'Порт', chevron: false, right: UI.segmented([{ value: 'std', label: '443' }, { value: 'custom', label: 'Свой' }], D.portMode,
+      x => { D.portMode = x; lsSet('port_mode', x); UI.nav.refresh(); }, 'compact') }));
+    if (D.portMode === 'custom') crows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Номер порта'), textIn(D.port, '8443', x => { D.port = x.replace(/\D/g, ''); lsSet('port', D.port); }, true, 'right')));
+    crows.push(row({ title: 'Final Mask', sub: 'фрагментация ClientHello на клиенте', right: UI.toggle(D.mask, on => { D.mask = on; lsSet('final_mask', on); UI.nav.refresh(); }, 'Final Mask') }));
+    if (D.mask) crows.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'JSON Final Mask'), areaIn(D.maskJson, 10, x => { D.maskJson = x; lsSet('final_mask_json', x); }, jsonOk)));
+    crows.push(h('div', { class: 'in-note' }, (D.portMode === 'custom' ? `Хосты получат порт ${D.port || '…'}; на ноде он переадресуется на порт Xray, 443 тоже продолжит работать. ` : '')
+      + 'Часть российских операторов режет ClientHello на 443/TCP — помогают Final Mask, свой порт или оба.'));
+  }
+  adv.push(...UI.fold({ title: 'Подключение клиентов', summary: D.stealth ? 'уникальные настройки у каждой ноды'
+    : `порт ${D.portMode === 'custom' ? (D.port || '…') : '443'}, Final Mask ${D.mask ? 'включён' : 'выключен'}`, key: 'd-conn', body: crows }));
   if (D.hostMode === 'normal') {
     hbody.push(h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Теги хостов'), input(D.tags, 'NORMAL', x => { D.tags = x; }, true)),
       h('div', { class: 'in-note' }, 'Хосты видимые, с тегом ' + (D.tags || 'NORMAL').toUpperCase() + ' — их подхватит ваш общий балансировщик. Шаблоны и хосты-балансировщики бот не создаёт.'));
@@ -3604,7 +3613,7 @@ function deployView(pid) {
       balancer_tag: D.tag, balancer_remark: D.bremark, balancer_template: D.btpl || null, remark_lang: D.lang,
       host_order: D.orderTouched && D.order ? D.order : undefined,
       ...extrasPayload(D.E), port: D.portMode === 'custom' ? D.port : null,
-      final_mask: D.mask, final_mask_json: D.mask ? D.maskJson : undefined }), 'Задачи запущены');
+      final_mask: D.mask, final_mask_json: D.mask ? D.maskJson : undefined, stealth: !!D.stealth }), 'Задачи запущены');
     if (!r) return;
     const gid = D.pid; D = null; delete GJ[gid]; await load(); UI.nav.reset(); UI.nav.push(() => groupView(gid));
   });
