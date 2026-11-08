@@ -13,8 +13,8 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
     сколько нода в среднем живёт до блокировки, сколько длится блокировка и что помогало."""
     since = now - days * 86400
     # хостер — подписанный вручную, иначе владелец сети по ASN
-    blocks = [{**b, 'hoster': b.get('hoster') or b.get('holder') or ''} for b in blocks]
-    nodes = [{**n, 'hoster': n.get('hoster') or n.get('holder') or ''} for n in nodes]
+    blocks = [{**b, 'hoster': b.get('hoster') or b.get('holder') or '', '_all': 'all'} for b in blocks]
+    nodes = [{**n, 'hoster': n.get('hoster') or n.get('holder') or '', '_all': 'all'} for n in nodes]
 
     def group(key: str, skip_empty: bool = False) -> list[dict]:
         out: dict[str, dict] = {}
@@ -68,7 +68,8 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
     return {'days': days, 'locations': group('location'), 'configs': group('config'),
             'hosters': group('hoster', True), 'asns': group('asn', True), 'nets': group('net24', True),
             'ports': group('port', True), 'fps': group('fp', True), 'stealth': group('stealth', True),
-            'clusters': clusters(real, 'net24') + clusters(real, 'asn'), 'neighbors': neigh, 'total': len(real)}
+            'clusters': clusters(real, 'net24') + clusters(real, 'asn'), 'neighbors': neigh, 'total': len(real),
+            'overall': (group('_all') or [None])[0]}
 
 
 LABELS = {'asn': lambda x: f"{x.get('asn')} {x.get('holder') or ''}".strip(),

@@ -155,6 +155,7 @@ const NAV = [
   { id: 'nodes', l: 'Ноды', i: 'server', cnt: () => allNodes().filter(urgent).length },
   { id: 'groups', l: 'Группы', i: 'layers' },
   { id: 'activity', l: 'Задачи', i: 'activity', cnt: () => D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400).length },
+  { id: 'stats', l: 'Статистика', i: 'chart' },
   { id: 'settings', l: 'Настройки', i: 'sliders' },
 ];
 const SECTION_OF = { node: 'nodes', task: 'activity', group: 'groups', look: 'settings', script: 'settings', report: 'settings' };
@@ -186,7 +187,7 @@ function shell(base, changed) {
       tabBtn(NAV[0], cur), tabBtn(NAV[1], cur),
       h('button', { type: 'button', onclick: () => openDeploy(), 'aria-label': 'Добавить ноды' }, h('span', { class: 'add' }, ic('plus'))),
       tabBtn(NAV[3], cur),
-      tabBtn({ id: 'more', l: 'Ещё', i: 'grid' }, ['groups', 'settings'].includes(cur) ? 'more' : cur)));
+      tabBtn({ id: 'more', l: 'Ещё', i: 'grid' }, ['groups', 'settings', 'stats'].includes(cur) ? 'more' : cur)));
 }
 function tabBtn(x, cur) {
   const c = x.cnt && x.cnt();
@@ -663,6 +664,7 @@ function vMore() {
   const row = (i, t, s, fn) => h('button', { type: 'button', class: 'li', onclick: fn }, h('div', { class: 'ic-tile' }, ic(i)),
     h('div', { class: 'grow' }, h('div', { class: 't' }, t), h('div', { class: 's' }, s)), h('span', { class: 'chev' }, ic('chevR')));
   return [pageH('Ещё'), h('div', { class: 'list' },
+    row('chart', 'Статистика', 'блокировки, хостеры, разбор нейросетью, расходы', () => go('stats')),
     row('layers', 'Группы', `${groups().length} · панели, мониторинг, автоматизация`, () => go('groups')),
     row('sliders', 'Настройки', 'подключения, уведомления, пользователи', () => go('settings')),
     row('contrast', 'Интерфейс и тема', 'светлая, тёмная, классический вид', () => go('settings/look')))];
@@ -732,7 +734,7 @@ function openPalette() {
   document.body.append(scrim, pal); layers.push(close); syncBack(); draw(); inp.focus();
 }
 
-const VIEWS = { overview: vOverview, nodes: vNodes, groups: vGroups, group: vGroup, activity: vActivity, settings: vSettings, script: vScript, report: vReport,
+const VIEWS = { overview: vOverview, nodes: vNodes, stats: vStats, groups: vGroups, group: vGroup, activity: vActivity, settings: vSettings, script: vScript, report: vReport,
   look: () => { setTimeout(() => go('settings/look')); return skeleton(); }, more: () => (innerWidth >= 720 ? (setTimeout(() => go('settings')), skeleton()) : vMore()) };
 render();
 loadAll();

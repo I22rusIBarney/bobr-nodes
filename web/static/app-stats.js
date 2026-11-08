@@ -1,14 +1,14 @@
 'use strict';
-/* Статистика на «Обзоре»: где и как поставленные ноды блокируют реже (по истории блокировок) и сколько тратит бот.
-   Советы по локации при покупке берутся отсюда же. Данные меняются медленно — обновляем раз в 10 минут. */
+/* Раздел «Статистика»: где и почему блокируют ноды (по истории блокировок), разбор нейросетью и сколько тратит бот.
+   На «Обзоре» — короткая карточка. Советы по локации при покупке берутся отсюда же. Обновляем раз в 10 минут. */
 
 const STATS_TTL = 600e3;
 function loadStats(force) {
-  const S = D.stats;
-  if (!force && S && (S.loading || Date.now() - S.at < STATS_TTL)) return;
-  D.stats = { ...(S || {}), loading: true, at: Date.now() };
-  Promise.all([api('stats/blocks?days=90').catch(() => null), api('stats/costs?days=30').catch(() => null)])
-    .then(([blocks, costs]) => { D.stats = { blocks, costs, at: Date.now() }; render(true); });
+  const S = D.stats, days = UI.statsDays || 90;
+  if (!force && S && S.days === days && (S.loading || Date.now() - S.at < STATS_TTL)) return;
+  D.stats = { ...(S || {}), loading: true, at: Date.now(), days };
+  Promise.all([api('stats/blocks?days=' + days).catch(() => null), api('stats/costs?days=30').catch(() => null)])
+    .then(([blocks, costs]) => { D.stats = { blocks, costs, at: Date.now(), days }; render(true); });
 }
 /* совет для покупки в локации code: { here, best } или null */
 function locAdvice(code) {
@@ -26,7 +26,7 @@ function adviceNote(a) {
       `. Для сравнения, ${b.flag || ''} ${b.label}: ${rate(b)}` + (b.life_days != null ? `, около ${dec(b.life_days)} дн` : '') + '.'));
 }
 
-function statsSection() {
+function statsCards() {
   loadStats();
   const S = D.stats || {};
   const B = S.blocks, C = S.costs;
@@ -36,14 +36,14 @@ function statsSection() {
   const rows = B ? B[by].filter(r => r.nodes || r.blocks) : [];
   const best = rows.filter(r => r.rate != null && r.months >= 1).sort((a, b) => a.rate - b.rate)[0];
   const blocksCard = h('section', { class: 'section' },
-    h('div', { class: 'section-h', style: 'flex-wrap:wrap;row-gap:8px' }, h('h2', null, 'Где блокируют реже'), h('span', { class: 'faint', style: 'font-size:13px' }, '90 дней'),
+    h('div', { class: 'section-h', style: 'flex-wrap:wrap;row-gap:8px' }, h('h2', null, 'Где блокируют реже'), h('span', { class: 'faint', style: 'font-size:13px' }, (B ? B.days : UI.statsDays || 90) + ' дней'),
       h('select', { class: 'sel', 'aria-label': 'Разрез', style: 'margin-left:auto;max-width:200px', onchange: e => { UI.statsBy = e.target.value; render(); } },
         STATS_BY.map(([k, l]) => h('option', { value: k, selected: by === k || null }, l)))),
     !B ? h('div', { class: 'sk', style: 'height:160px' })
       : !rows.length ? h('div', { class: 'sheet', style: 'padding:16px' }, h('div', { class: 'muted' }, by === 'locations' || by === 'configs'
         ? 'Пока нечего сравнивать: бот начнёт записывать блокировки нод, купленных через него, с этой версии.'
         : 'Пока нет данных в этом разрезе: сети нод бот узнаёт в фоне (обновите через минуту), настройки и соседей записывает с новых блокировок.'))
-      : h('div', { class: 'list' }, rows.slice(0, 8).map(r => {
+      : h('div', { class: 'list' }, rows.slice(0, 12).map(r => {
         const top = Object.entries(r.fixes).sort((a, b) => b[1] - a[1])[0];
         return h('div', { class: 'li' },
           by === 'locations' ? h('span', { class: 'flag', style: 'font-size:20px;width:28px;text-align:center' }, r.flag || '🏳') : h('div', { class: 'ic-tile' }, ic('box')),
@@ -65,7 +65,50 @@ function statsSection() {
         h('div', { class: 'grow' }, h('div', { class: 't' }, k.label), h('div', { class: 's' }, pl(k.n, 'раз', 'раза', 'раз'))), h('span', { class: 'num' }, rubK(k.kop)))),
       h('div', { class: 'li' }, h('div', { class: 'grow' }, h('b', null, 'Разово за 30 дней'), h('div', { class: 's', style: 'white-space:normal' }, 'по задачам бота: покупки, замены, докупка и смены IP')),
         h('b', { class: 'num' }, rubK(C.total_kop)))));
-  return [h('div', { class: 'grid2' }, blocksCard, costCard), B ? banSignals(B) : null, B ? aiCard(B) : null];
+  return { blocksCard, costCard, B };
+}
+/* «Обзор»: итоги одной карточкой и вход в раздел */
+function statsSection() {
+  const { B } = statsCards(), o = B && B.overall;
+  return h('section', { class: 'section' }, h('div', { class: 'section-h' }, h('h2', null, 'Блокировки'), btn('Статистика', () => go('stats'), 'ghost s more')),
+    !B ? h('div', { class: 'sk', style: 'height:80px' }) : h('button', { type: 'button', class: 'sheet', style: 'display:block;width:100%;text-align:left;padding:16px;cursor:pointer;border:0;color:inherit;font:inherit', onclick: () => go('stats') },
+      h('div', null, B.total ? `${pl(B.total, 'блокировка', 'блокировки', 'блокировок')} за ${B.days} дней` + (o && o.rate != null ? ` · ${dec(o.rate)} в мес. на ноду` : '') : `За ${B.days} дней блокировок не было`),
+      h('div', { class: 'muted', style: 'margin-top:4px' }, B.ai ? 'Нейросеть: ' + B.ai.summary.slice(0, 160) + (B.ai.summary.length > 160 ? '…' : '') : 'Хостеры, подсети, проверки соседей и разбор нейросетью — в «Статистике».')));
+}
+/* раздел «Статистика» */
+function vStats() {
+  const { blocksCard, costCard, B } = statsCards(), o = B && B.overall, days = UI.statsDays || 90;
+  const tile = (v, l, warn) => h('div', { class: 'sheet', style: 'padding:14px 16px;min-width:0' }, h('b', { class: 'num', style: 'font-size:22px;display:block;' + (warn ? 'color:var(--warn)' : '') }, v), h('div', { class: 'muted', style: 'font-size:13px' }, l));
+  const top = B && (B.hosters || []).filter(r => r.rate != null && r.blocks).sort((a, b) => b.rate - a.rate)[0];
+  return [
+    pageH('Статистика', 'Где и почему блокируют ноды, разбор нейросетью и расходы'),
+    h('div', { class: 'toolbar' }, seg([[30, '30 дн'], [90, '90 дн'], [180, '180 дн'], [365, 'Год']].map(([v, l]) => ({ v, l })), days,
+      v => { UI.statsDays = v; loadStats(true); render(); }, 'Период')),
+    !B ? h('div', { class: 'sk', style: 'height:90px;margin-bottom:16px' }) : h('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:20px' },
+      tile(o ? o.nodes : 0, 'нод под наблюдением'), tile(B.total, 'блокировок', B.total > 0),
+      tile(o && o.rate != null ? dec(o.rate) : '—', 'в мес. на ноду'), tile(o && o.life_days != null ? dec(o.life_days) + ' дн' : '—', 'живёт до блокировки'),
+      top ? tile(top.label.length > 18 ? top.label.slice(0, 17) + '…' : top.label, `чаще всех: ${dec(top.rate)} в мес.`, true) : null),
+    B ? aiCard(B) : null,
+    h('div', { class: 'grid2' }, blocksCard, B ? banSignals(B) || h('div') : h('div')),
+    B ? recentBlocks(B) : null,
+    costCard,
+  ];
+}
+/* последние блокировки со снимком ноды */
+function recentBlocks(B) {
+  const rs = B.recent || [];
+  if (!rs.length) return null;
+  const steps = (D.mon && D.mon.steps) || {};
+  const fixName = k => !k ? '' : k === 'self' ? 'прошло само' : k === 'replace' ? 'новая нода' : k === 'removed' ? 'нода убрана' : steps[k] || k;
+  const dur = b => { const s = (b.end || Date.now() / 1000) - b.start; return s < 3600 ? Math.max(1, Math.round(s / 60)) + ' мин' : s < 86400 ? Math.round(s / 3600) + ' ч' : Math.round(s / 86400) + ' дн'; };
+  return h('section', { class: 'section' }, h('div', { class: 'section-h' }, h('h2', null, 'Последние блокировки')),
+    h('div', { class: 'list' }, rs.slice(0, UI.recentAll ? 40 : 10).map(b => h('div', { class: 'li' },
+      h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, b.name && b.flag && !b.name.includes(b.flag) ? b.flag + ' ' + b.name : b.name || '—'),
+        h('div', { class: 's', style: 'white-space:normal' }, [new Date(b.start * 1000).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+          b.hoster || b.holder || '', b.net24 || '', b.port ? 'порт ' + b.port : '', b.stealth ? 'уникальные настройки' : '',
+          b.users != null ? `${b.users} онлайн` : '', b.neigh ? NEIGH[b.neigh] : '', fixName(b.fix) ? 'помогло: ' + fixName(b.fix) : ''].filter(Boolean).join(' · '))),
+      h('span', { class: 'st ' + (b.end ? '' : 'bad'), style: 'flex:none' }, b.end ? dur(b) : 'идёт ' + dur(b))))),
+    rs.length > 10 ? h('div', { class: 'chips', style: 'margin-top:10px' }, btn(UI.recentAll ? 'Свернуть' : `Показать все (${rs.length})`, () => { UI.recentAll = !UI.recentAll; render(); }, 's ghost')) : null);
 }
 const STATS_BY = [['locations', 'Локации'], ['hosters', 'Хостеры'], ['asns', 'Сети (ASN)'], ['nets', 'Подсети /24'], ['configs', 'Тарифы'],
   ['stealth', 'Уникальные настройки'], ['ports', 'Порты'], ['fps', 'TLS-отпечатки']];
@@ -120,11 +163,14 @@ function nodeNet(n, d) {
   });
   const nb = x.neigh;
   return [
-    kv('Сеть', h('span', { style: 'white-space:normal' }, x.asn ? `${x.asn} ${x.holder}` : 'неизвестно', h('span', { class: 'faint' }, ' · ' + (x.prefix || x.net24)))),
-    kv('Хостер', h('input', { class: 'inp', style: 'max-width:220px', placeholder: x.holder || 'например, Aeza', value: x.hoster || '', 'aria-label': 'Хостер',
+    kv('Сеть', h('span', { style: 'display:grid;gap:2px;min-width:0' }, h('span', null, x.asn || 'неизвестно', h('span', { class: 'faint' }, ' · ' + (x.net24 || x.prefix))),
+      x.holder ? h('span', { class: 'faint', style: 'font-size:13px;overflow:hidden;text-overflow:ellipsis' }, x.holder) : null)),
+    kv('Хостер', h('input', { class: 'inp', style: 'width:100%;max-width:220px', placeholder: x.holder ? x.holder.split(' ')[0] : 'например, Aeza', value: x.hoster || '', 'aria-label': 'Хостер',
       onchange: e => saveHoster(e.target.value.trim()) })),
-    kv('Соседи по /24', h('span', { style: 'white-space:normal' }, nb ? `${NEIGH[nb.kind] || nb.kind}` + (nb.checked ? ` (недоступны ${nb.blocked} из ${nb.checked})` : '') + ' · ' + ago(nb.ts * 1000)
-      : h('span', { class: 'faint' }, 'не проверялись')), btn('Проверить', probe, 's ghost', 'radar')),
+    kv('Соседи', h('span', { style: 'display:grid;gap:8px;justify-items:start;min-width:0' },
+      h('span', { style: 'white-space:normal' }, nb ? `${NEIGH[nb.kind] || nb.kind}` + (nb.checked ? ` (недоступны ${nb.blocked} из ${nb.checked})` : '') + ' · ' + ago(nb.ts * 1000)
+        : h('span', { class: 'faint' }, 'по /24 не проверялись')),
+      btn('Проверить соседей', probe, 's', 'radar'))),
   ];
 }
 
@@ -164,8 +210,8 @@ function vHosts() {
     return h('div', { class: 'li' },
       h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, x.remark || x.address),
         h('div', { class: 's', style: 'white-space:normal' }, [x.address + (x.port ? ':' + x.port : ''), HKIND[x.kind], x.hidden ? 'скрытый' : '',
-          s && x.mon && x.mon.checked_at ? 'проверен ' + ago(x.mon.checked_at * 1000) : ''].filter(Boolean).join(' · '))),
-      s ? h('span', { class: 'ru ' + s.cls, style: 'flex:none;max-width:45%;text-align:right;' + (s.cls === 'warn' ? 'color:var(--warn)' : s.cls ? '' : 'color:var(--ink-3)') }, s.t) : null,
+          s && x.mon && x.mon.checked_at ? 'проверен ' + ago(x.mon.checked_at * 1000) : ''].filter(Boolean).join(' · ')),
+        s ? h('div', { class: 'ru ' + s.cls, style: 'margin-top:4px;white-space:normal;' + (s.cls === 'warn' ? 'color:var(--warn)' : s.cls ? '' : 'color:var(--ink-3)') }, s.t) : null),
       x.kind === 'disabled' ? null : toggle(x.watched, (on, el) => setWatch(p, x, on, el), 'Проверять ' + (x.remark || x.address)));
   };
   return [
