@@ -647,6 +647,40 @@ def balancer_tag_of(template_json) -> str | None:
     return None
 
 
+def host_reach(hosts: list[dict], templates: list[dict]) -> dict[str, list[str] | None]:
+    """Скрытый хост попадает в подписку только через балансировщик: шаблон с remnawave.injectHosts, который выбирает
+    его (по тегу или названию), и видимый включённый хост с этим шаблоном. UUID скрытого хоста → названия хостов-
+    балансировщиков, которые его подтягивают; [] — ни один; None — селектор незнакомый, сказать нельзя."""
+    def picks(sel: dict, h: dict) -> bool | None:
+        try:
+            if sel.get('type') == 'tagRegex':
+                return any(re.search(sel.get('pattern') or '', t) for t in (h.get('tags') or []))
+            if sel.get('type') == 'remarkRegex':
+                return bool(re.search(sel.get('pattern') or '', h.get('remark') or ''))
+        except re.error:
+            return None
+        return None
+    shown = {}  # шаблон → видимые включённые хосты с ним (их видят клиенты)
+    for h in hosts:
+        if h.get('xrayJsonTemplateUuid') and not h.get('isHidden') and not h.get('isDisabled'):
+            shown.setdefault(h['xrayJsonTemplateUuid'], []).append(h.get('remark') or h.get('address') or '')
+    out: dict[str, list[str] | None] = {}
+    for h in hosts:
+        if not h.get('isHidden') or h.get('isDisabled'):
+            continue
+        names, unknown = [], False
+        for t in templates:
+            tj = t.get('templateJson') if isinstance(t.get('templateJson'), dict) else {}
+            inj = ((tj.get('remnawave') or {}).get('injectHosts') or []) if isinstance(tj.get('remnawave'), dict) else []
+            res = [picks(e.get('selector') or {}, h) for e in inj if isinstance(e, dict)]
+            if any(res):
+                names += shown.get(t['uuid'], [])
+            elif None in res:
+                unknown = True
+        out[h['uuid']] = sorted(set(names)) if names or not unknown else None
+    return out
+
+
 def make_balancer_template(base: dict, tag: str) -> dict:
     """Копия шаблона-балансировщика под другой тег: injectHosts ^TAG$ с префиксом tag, селекторы балансиров и наблюдателя."""
     tag = tag.upper()

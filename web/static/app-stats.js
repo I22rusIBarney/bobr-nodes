@@ -223,7 +223,11 @@ function vHosts() {
     return h('div', { class: 'li' },
       h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'white-space:normal' }, x.remark || x.address),
         h('div', { class: 's', style: 'white-space:normal' }, [x.address + (x.port ? ':' + x.port : ''), HKIND[x.kind], x.hidden ? 'скрытый' : '',
-          s && x.mon && x.mon.checked_at ? 'проверен ' + ago(x.mon.checked_at * 1000) : ''].filter(Boolean).join(' · ')),
+          (x.tags || []).length ? 'теги ' + x.tags.join(', ') : '', s && x.mon && x.mon.checked_at ? 'проверен ' + ago(x.mon.checked_at * 1000) : ''].filter(Boolean).join(' · ')),
+        x.hidden && Array.isArray(x.reach) ? (x.reach.length
+          ? h('div', { class: 's', style: 'white-space:normal;margin-top:4px' }, 'в подписке через: ' + x.reach.join(', '))
+          : h('div', { class: 's', style: 'white-space:normal;margin-top:4px;color:var(--warn)' },
+            'Скрытый и не входит ни в один балансировщик — его нет в подписке: ни клиенты, ни чекеры его не видят. Добавьте ему тег, который подхватывает балансировщик (например NORMAL или тег страны)')) : null,
         s ? h('div', { class: 'ru ' + s.cls, style: 'margin-top:4px;white-space:normal;' + (s.cls === 'warn' ? 'color:var(--warn)' : s.cls ? '' : 'color:var(--ink-3)') }, s.t) : null),
       x.kind === 'disabled' ? null : toggle(x.watched, (on, el) => setWatch(p, x, on, el), 'Проверять ' + (x.remark || x.address)));
   };

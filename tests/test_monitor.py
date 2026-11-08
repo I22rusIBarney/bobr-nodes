@@ -143,3 +143,19 @@ def test_host_watch_choice(tmp_path):
     assert v['host:h3']['data'] == 1 and v['host:h3']['fail'] == 0   # АВТО-ВЫБОР в «не проверять», но включён вручную
     assert M.host_kinds([own, wl, bal, {'uuid': 'h4', 'isDisabled': True}], {'h2'}, {'t1'}) == \
         {'h1': 'node', 'h2': 'loose', 'h3': 'balancer', 'h4': 'disabled'}
+
+
+def test_hidden_host_reach():
+    """Скрытый хост виден в подписке только через балансировщик, который выбирает его по тегу и сам показан клиентам."""
+    from bot import engine
+    tpl = lambda u, pat, t='tagRegex': {'uuid': u, 'templateJson': {'remnawave': {'injectHosts': [{'selector': {'type': t, 'pattern': pat}}]}}}  # noqa: E731
+    hosts = [{'uuid': 'lv', 'remark': 'Latvia', 'isHidden': True, 'tags': ['LV', 'NORMAL']},
+             {'uuid': 'se', 'remark': 'Sweden', 'isHidden': True, 'tags': ['SE']},
+             {'uuid': 'pl', 'remark': 'Poland', 'isHidden': True, 'tags': ['PL']},
+             {'uuid': 'odd', 'remark': 'X', 'isHidden': True, 'tags': []},
+             {'uuid': 'auto', 'remark': 'АВТО-ВЫБОР', 'xrayJsonTemplateUuid': 't1'},
+             {'uuid': 'plb', 'remark': 'Poland bal', 'xrayJsonTemplateUuid': 't2', 'isDisabled': True}]
+    r = engine.host_reach(hosts, [tpl('t1', '^NORMAL$'), tpl('t2', '^PL$'), tpl('t3', 'x', 'uuids')])
+    assert r['lv'] == ['АВТО-ВЫБОР'] and r['se'] is None   # незнакомый селектор (uuids) — не утверждаем, что не виден
+    r = engine.host_reach(hosts, [tpl('t1', '^NORMAL$'), tpl('t2', '^PL$')])
+    assert r['se'] == [] and r['pl'] == [] and 'auto' not in r   # балансировщик PL выключен — Польши в подписке нет
