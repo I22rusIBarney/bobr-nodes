@@ -28,7 +28,7 @@ def xhttp_label(x) -> str:
 
 def extras_label(d: dict) -> str:
     port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
-    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + ([xhttp_label(d['xhttp'])] if d.get('xhttp') else []) + \
+    parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + ([xhttp_label(d['xhttp'])] if d.get('xhttp') else []) + (['Hysteria2'] if d.get('hy2') else []) + \
         ([f'порт {port}'] if port not in (None, '', 443, '443') else []) + \
         (['уникальные настройки'] if (d.get('host') or {}).get('stealth') or d.get('kind') == 'node' and d.get('stealth') else [])
     return ', '.join(parts)
@@ -49,7 +49,7 @@ def stages_for(d: dict) -> list[tuple[str, str]]:
         return [('panel', 'Исходный профиль в панели'), ('check', 'Нода на связи')]
     if d.get('kind') == 'node':
         out = ([('ssh', 'Вход по SSH'), ('extras', 'Установка: ' + extra)] if extra else []) + \
-            [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') or d.get('xhttp') else [])
+            [('panel', 'Профиль и хосты в панели')] + ([('check', 'Нода на связи')] if d.get('psiphon') or d.get('warp') or d.get('xhttp') or d.get('hy2') else [])
         return out
     skip = set(d.get('skipped_stages') or []) | (set() if extra else {'extras'})
     names = {'extras': 'Дополнения: ' + extra, **({'ip': 'Сервер из Bobr Cloud'} if d.get('existing') else {})}
@@ -446,7 +446,7 @@ class Runner:
         """Дополнения на уже работающей ноде панели (без покупки и установки)."""
         loop = asyncio.get_running_loop()
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
-                'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
+                'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'), 'hy2': d.get('hy2'),
                 'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'), 'stealth': d.get('stealth'),
                 **self._node_ssh(d, prof)}
         pconf = {**prof, 'ssh_pubkey': self.pubkeys(prof), 'cf_token': cf_token_of(self.store, prof)}
@@ -621,7 +621,7 @@ class Runner:
                 node = {'name': d['name'], 'ip': d['ip'], 'domain': d['domain'], 'country': d.get('country', ''),
                         'remark': d.get('remark', ''), **login,
                         'host': d.get('host'), 'squads': d.get('squads'), 'place': d.get('place'),
-                        'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
+                        'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'), 'hy2': d.get('hy2'),
                         'traffic_control': prof.get('traffic_control', True), 'known_hosts': self.known_hosts()}
                 pconf = {**prof, 'cf_token': cf_token_of(self.store, prof),
                          'ssh_pubkey': self.pubkeys(prof)}

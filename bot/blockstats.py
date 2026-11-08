@@ -68,7 +68,7 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
             neigh[b['neigh']] = neigh.get(b['neigh'], 0) + 1
     return {'days': days, 'locations': group('location'), 'configs': group('config'),
             'hosters': group('hoster', True), 'asns': group('asn', True), 'nets': group('net24', True),
-            'ports': group('port', True), 'fps': group('fp', True), 'stealth': group('stealth', True),
+            'ports': group('port', True), 'fps': group('fp', True), 'stealth': group('stealth', True), 'hy2': group('hy2', True),
             'clusters': clusters(real, 'net24') + clusters(real, 'asn'), 'neighbors': neigh, 'total': len(real),
             'overall': (group('_all') or [None])[0]}
 
@@ -76,7 +76,8 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
 LABELS = {'asn': lambda x: f"{x.get('asn')} {x.get('holder') or ''}".strip(),
           'port': lambda x: f"порт {x.get('port')}",
           'fp': lambda x: f"отпечаток {x.get('fp')}",
-          'stealth': lambda x: 'уникальные настройки' if str(x.get('stealth')) == '1' else 'обычные настройки'}
+          'stealth': lambda x: 'уникальные настройки' if str(x.get('stealth')) == '1' else 'обычные настройки',
+          'hy2': lambda x: 'с Hysteria2' if str(x.get('hy2')) == '1' else 'без Hysteria2'}
 
 
 def advice(stats: dict, location: str) -> dict | None:

@@ -2336,7 +2336,7 @@ function sshFields(F, view, botKey) {
 
 // ───────── ноды панели ─────────
 const NODES = {}, NODE = {};
-const FEAT = { psiphon: 'Psiphon', warp: 'WARP', xhttp: 'XHTTP' };
+const FEAT = { psiphon: 'Psiphon', warp: 'WARP', xhttp: 'XHTTP', hy2: 'Hysteria2' };
 const REGION = (() => { try { return new Intl.DisplayNames(['ru'], { type: 'region' }); } catch (e) { return null; } })();
 const flagName = cc => { try { return /^[A-Za-z]{2}$/.test(cc || '') && REGION ? REGION.of(cc.toUpperCase()) : ''; } catch (e) { return ''; } };
 const flagOf = cc => /^[A-Za-z]{2}$/.test(cc || '') && cc.toUpperCase() !== 'XX' ? String.fromCodePoint(...[...cc.toUpperCase()].map(c => 0x1F1A5 + c.charCodeAt(0))) : '🏳️';
@@ -2414,7 +2414,7 @@ function bulkView(pid) {
     const ex = extrasPayload(B.E);
     const body = { ...ex, uuids: [...U.sel], port: B.portMode === 'keep' ? null : B.portMode === '443' ? 443 : B.port,
       final_mask: B.mask === 'keep' ? null : B.mask === 'on', final_mask_json: B.mask === 'on' ? B.maskJson : undefined, stealth: !!B.stealth };
-    if (!ex.psiphon && !ex.warp && !ex.xhttp && body.port === null && body.final_mask === null && !B.stealth) return UI.toast('Нечего менять', true);
+    if (!ex.psiphon && !ex.warp && !ex.xhttp && !ex.hy2 && body.port === null && body.final_mask === null && !B.stealth) return UI.toast('Нечего менять', true);
     const r = await UI.run(() => api(`profiles/${pid}/nodes/apply-many`, 'POST', body));
     if (!r) return;
     U.sel = null; delete NODES[pid]; delete GJ[pid];
@@ -3110,16 +3110,16 @@ function areaIn(val, rows, on, check) {
   return ta;
 }
 const jsonOk = t => { try { const o = JSON.parse(t); return o && typeof o === 'object' && !Array.isArray(o); } catch (e) { return false; } };
-function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false, xhMode: s.xhMode || 'direct' }; }
+function extrasState() { const s = lsGet('extras', {}); return { psi: false, region: s.region || '', psiDomains: s.psiDomains || PSI_DEF, warp: false, warpDomains: s.warpDomains || WARP_DEF, xh: false, hy: false, xhMode: s.xhMode || 'direct' }; }
 function saveExtras(E) { lsSet('extras', { region: E.region, psiDomains: E.psiDomains, warpDomains: E.warpDomains, xhMode: E.xhMode }); }
 function extrasRows(E, have, opts) {
   have = have || []; opts = opts || {};
   const rows = [];
-  const TILE = { psiphon: ['globe', 'blue'], warp: ['cloud', 'violet'], xhttp: ['route', 'teal'] };
+  const TILE = { psiphon: ['globe', 'blue'], warp: ['cloud', 'violet'], xhttp: ['route', 'teal'], hy2: ['bolt', 'amber'] };
   const tog = (key, titleT, sub) => row({ icon: TILE[key][0], color: TILE[key][1], title: titleT, cls: 'wrap', sub: have.includes(key) ? null : sub,
     status: have.includes(key) ? ['в профиле', 'ok'] : null,
     right: have.includes(key) ? null : UI.toggle(E[EK[key]], on => { E[EK[key]] = on; UI.nav.refresh(); }, titleT) });
-  const EK = { psiphon: 'psi', warp: 'warp', xhttp: 'xh' };
+  const EK = { psiphon: 'psi', warp: 'warp', xhttp: 'xh', hy2: 'hy' };
   rows.push(tog('psiphon', 'Psiphon', 'выход для выбранных доменов'));
   if (E.psi) rows.push(h('label', { class: 'field' }, h('span', { class: 'lbl' }, 'Страна выхода'), textIn(E.region, 'авто, или DE, NL', x => { E.region = x.toUpperCase(); saveExtras(E); }, true, 'right')),
     h('label', { class: 'field stack' }, h('span', { class: 'lbl' }, 'Домены через Psiphon'), areaIn(E.psiDomains, 4, x => { E.psiDomains = x; saveExtras(E); })));
@@ -3136,6 +3136,7 @@ function extrasRows(E, have, opts) {
         : E.xhMode === 'cdn' ? 'Появится один хост: ' + cdn + '.' + cdnWhy
         : 'Появятся два хоста: ' + direct + ', и ' + cdn + '.' + cdnWhy));
     }
+    rows.push(tog('hy2', 'Hysteria2', 'второй протокол на UDP 443: быстрый на плохих каналах. Делит IP с основным входом — если его распознают и забанят IP, отвалится и VLESS'));
   }
   return rows;
 }
@@ -3159,7 +3160,7 @@ function act(text, fn, cls) {
   } });
   return r;
 }
-function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'direct' } : undefined }; }
+function extrasPayload(E) { return { psiphon: E.psi ? { enabled: true, region: E.region, domains: E.psiDomains } : undefined, warp: E.warp ? { enabled: true, domains: E.warpDomains } : undefined, xhttp: E.xh ? { enabled: true, mode: E.xhMode || 'direct' } : undefined, hy2: E.hy ? { enabled: true } : undefined }; }
 const EXTRAS_NOTE = 'Ставятся на ноду по SSH со сверкой SHA-256. Выходы видны только самому серверу. В профиль добавляются выход (psiphon-out — SOCKS5 172.17.0.1:1080, warp-out — метка 255) и правило для доменов в конце маршрутизации, после блокировок.';
 
 let D = null, DEPLOY_HINT = null;  // DEPLOY_HINT — локация, с которой открыть мастер

@@ -456,7 +456,7 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
                 **({'own': True, 'ip': own['ip'], 'ssh': own['ssh'], 'hoster': own.get('hoster') or '', 'skipped_stages': ['buy', 'ip']}
                    if own else {}),
                 'host': host, 'squads': squads, 'place': (places or {}).get(dom),
-                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'script_id': (store.profile(pid) or {}).get('script_id') if script_id == 'group' else script_id,
+                'psiphon': (extras or {}).get('psiphon'), 'warp': (extras or {}).get('warp'), 'xhttp': (extras or {}).get('xhttp'), 'hy2': (extras or {}).get('hy2'), 'script_id': (store.profile(pid) or {}).get('script_id') if script_id == 'group' else script_id,
                 **(note or {}),
                 'price_kop': q['one_kop'], 'buyer': buyer_of(store, store.profile(pid) or {})}
         jid = store.add_job(batch, pid, chat_id, data)
