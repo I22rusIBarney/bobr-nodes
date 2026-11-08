@@ -318,7 +318,7 @@ async def main():
     ok((await web.get('/static/ui.css')).status == 200 and (await web.get('/static/../main.py')).status == 404, 'статика только своя')
     ok((await web.get('/static/fx.js')).status == 200, 'модуль оформления отдаётся')
     st, js = await wapi('state')
-    ok(js['theme'] == {'bg': 'none', 'effect': 'none', 'image': '', 'glass': 0, 'hero': 'auto', 'ui': 'classic'}, 'оформление по умолчанию: без фона, без эффектов, поля непрозрачные, картинка по сезону, классический интерфейс')
+    ok(js['theme'] == {'bg': 'none', 'effect': 'none', 'image': '', 'glass': 0, 'hero': 'auto', 'ui': 'classic', 'mode': None}, 'оформление по умолчанию: без фона, без эффектов, поля непрозрачные, картинка по сезону, классический интерфейс, тема — как на устройстве')
     ok((await wapi('theme', 'POST', {'ui': 'beta'}))[0] == 400 and (await wapi('theme', 'POST', {'ui': 'new'}))[1]['ui'] == 'new'
        and (await wapi('theme', 'POST', {'ui': 'classic'}))[1]['ui'] == 'classic', 'интерфейс: классический или новый, по выбору пользователя')
     app = await web.get('/app')
@@ -498,6 +498,18 @@ async def main():
     ok(any('Доступ открыт' in t for t in sent_to(n, 77)) and any('По приглашению' in t for t in sent_to(n, 1)),
        f'Вася вошёл по ссылке, администратору сообщили: {[m.text[:40] for _, m in sess.sent[n:] if hasattr(m, "text")]}')
     ok(any('Групп: 1' in t for t in sent_to(n, 77)), 'в меню Васи сразу его группа (завёл администратор)')
+
+    # ── оформление для всех: задаёт администратор, личный выбор пользователя после этого снова возможен
+    ok((await vwapi('theme', 'POST', {'mode': 'dark'}))[1]['mode'] == 'dark', 'тема — своя у каждого')
+    ok((await vwapi('theme', 'POST', {'mode': 'light', 'scope': 'all'}))[0] == 403, 'тему для всех пользователь не меняет')
+    st, js = await wapi('theme', 'POST', {'mode': 'light', 'ui': 'new', 'scope': 'all'})
+    ok(st == 200 and js['global']['mode'] == 'light' and js['global']['ui'] == 'new', 'администратор задал тему и интерфейс для всех')
+    vt = (await vwapi('state'))[1]['theme']
+    ok(vt['mode'] == 'light' and vt['ui'] == 'new' and (await vwapi('state'))[1].get('theme_global') is None,
+       'у пользователя сразу общая тема; общих настроек он не видит')
+    ok((await vwapi('theme', 'POST', {'mode': 'dark'}))[1]['mode'] == 'dark' and (await wapi('state'))[1]['theme_global']['mode'] == 'light',
+       'после общей темы пользователь может снова выбрать свою')
+    await wapi('theme', 'POST', {'mode': 'auto', 'ui': 'classic', 'scope': 'all'})
     n = len(sess.sent)
     await dp.feed_update(bot, upd_msg('/start ' + token, User(id=78, is_bot=False, first_name='Петя')))
     ok(any('уже использовано' in t for t in sent_to(n, 78)) and store.user(78) is None, 'одноразовое приглашение второй раз не работает')

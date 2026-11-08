@@ -22,6 +22,7 @@ async function loadAll(force) {
   catch (e) { D.err = e; D.loading = false; render(true); pollTimer = setTimeout(loadAll, 30000); return; }
   if (D.st.role === 'paused') { D.loading = false; render(true); return; }  // подписка на паузе — только экран оплаты
   try { localStorage.setItem('bn:ui', D.st.theme && D.st.theme.ui === 'classic' ? 'classic' : 'new'); } catch (e) {}  // /admin откроет сразу нужный
+  if (D.st.theme) syncTheme(D.st.theme.mode);
   if (D.st.theme && D.st.theme.ui === 'classic') { location.replace('/admin?classic=1'); return; }  // классический выбрали на другом устройстве
   const first = D.loading, mark = k => { AT[k] = Date.now(); };
   await Promise.all([
@@ -622,11 +623,38 @@ function vLook() {
     h('div', { class: 'sheet form', style: 'padding:16px;max-width:640px;margin-bottom:20px' },
       h('div', { class: 'fld' }, h('label', null, 'Тема'),
         seg([{ v: 'auto', l: 'Как в Telegram' }, { v: 'light', l: 'Светлая' }, { v: 'dark', l: 'Тёмная' }], themePref, v => { setTheme(v); render(); }, 'Тема'),
-        h('div', { class: 'hint' }, 'Запоминается на этом устройстве.'))),
+        h('div', { class: 'hint' }, 'Только для вас — на всех ваших устройствах.'))),
+    isAdmin() && D.st.theme_global ? lookForAll() : null,
     h('div', { class: 'list', style: 'max-width:640px' },
       dangerRow('contrast', 'Классический интерфейс', 'Вернуться к прежнему виду. Переключиться обратно можно в его «Оформлении».',
         btn('Вернуть классический', async e => { const b = e.currentTarget; b.classList.add('busy');
           try { await api('theme', 'POST', { ui: 'classic' }); try { localStorage.setItem('bn:ui', 'classic'); } catch (e) {} location.replace('/admin?classic=1'); } catch (x) { b.classList.remove('busy'); toast('Не получилось', x.message, 'bad'); } }, 's')))];
+}
+function lookForAll() {  // администратор: оформление по умолчанию для всех пользователей бота
+  const G0 = D.st.theme_global, set = G0.set || [];
+  const cur = { mode: set.includes('mode') ? G0.mode : themePref, ui: set.includes('ui') ? G0.ui : 'new' };  // не задано — как сейчас у вас
+  const S = UI.lookAll || (UI.lookAll = { ...cur });
+  const MODE = { auto: 'как в Telegram', light: 'светлая', dark: 'тёмная' }, UIN = { new: 'новый', classic: 'классический' };
+  const diff = ['mode', 'ui'].filter(k => S[k] !== cur[k]);
+  const send = diff.length ? diff : ['mode', 'ui'];  // ничего не меняли — применить текущее ещё раз (сбросить личный выбор)
+  const what = send.map(k => k === 'mode' ? `тема «${MODE[S.mode]}»` : `${UIN[S.ui]} интерфейс`).join(' и ');
+  const apply = () => confirmAct({ title: 'Применить для всех?', icon: ['contrast', 'run'], ok: 'Применить',
+    text: `${what[0].toUpperCase() + what.slice(1)} — у всех пользователей бота, включая вас. Личный выбор у них сбросится на этот; потом каждый сможет поменять у себя.`,
+    fn: async () => {
+      const r = await api('theme', 'POST', { scope: 'all', ...Object.fromEntries(send.map(k => [k, S[k]])) });
+      D.st.theme_global = r.global; D.st.theme = { ...r, global: undefined }; UI.lookAll = null;
+      syncTheme(r.mode); toast('Оформление для всех обновлено', 'Пользователи увидят его при следующем открытии');
+      if (r.ui === 'classic') { try { localStorage.setItem('bn:ui', 'classic'); } catch (e) {} location.replace('/admin?classic=1'); } else render();
+    } });
+  return h('div', { class: 'sheet form', style: 'padding:16px;max-width:640px;margin-bottom:20px' },
+    h('h3', { style: 'margin:0 0 4px' }, 'Для всех пользователей'),
+    h('p', { class: 'muted', style: 'margin:0 0 12px' }, 'Что увидят все пользователи бота. Видно только администраторам.'),
+    h('div', { class: 'fld' }, h('label', null, 'Тема'),
+      seg([{ v: 'auto', l: 'Как в Telegram' }, { v: 'light', l: 'Светлая' }, { v: 'dark', l: 'Тёмная' }], S.mode, v => { S.mode = v; render(); }, 'Тема для всех')),
+    h('div', { class: 'fld' }, h('label', null, 'Интерфейс'),
+      seg([{ v: 'new', l: 'Новый' }, { v: 'classic', l: 'Классический' }], S.ui, v => { S.ui = v; render(); }, 'Интерфейс для всех'),
+      set.includes('ui') && G0.ui === 'classic' ? h('div', { class: 'hint' }, 'Сейчас у всех по умолчанию классический.') : null),
+    h('div', { class: 'chips', style: 'margin-top:4px' }, btn(diff.length ? 'Применить для всех' : 'Применить ещё раз для всех', apply, 's ' + (diff.length ? 'primary' : ''))));
 }
 function vMore() {
   const row = (i, t, s, fn) => h('button', { type: 'button', class: 'li', onclick: fn }, h('div', { class: 'ic-tile' }, ic(i)),
