@@ -2129,7 +2129,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         runner.start(jid)
         return J({'id': jid})
 
-    def parse_apply(p: dict, b: dict) -> tuple[dict, object, object]:
+    def parse_apply(p: dict, b: dict) -> tuple[dict, object, object, bool]:
         """Дополнения, порт и Final Mask из запроса; ApiError — если что-то не так или менять нечего."""
         try:
             extras = parse_extras(b)
@@ -2139,22 +2139,25 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             fm = None if fm is None else (engine.final_mask(b.get('final_mask_json') or None) if fm else False)
         except engine.StepError as e:
             raise ApiError(str(e)) from None
-        if not extras and port == '' and fm is None:
+        stealth = bool(b.get('stealth'))
+        if stealth:  # уникальные настройки: порт, отпечаток и маску нода выберет сама
+            port, fm = '', None
+        if not extras and port == '' and fm is None and not stealth:
             raise ApiError('Нечего менять')
-        return extras, port, fm
+        return extras, port, fm, stealth
 
     async def node_apply(p: dict, n: dict, parsed, uid: int) -> int:
         """Задача «дополнения на ноде» для ноды n из панели; ApiError — почему нельзя."""
-        extras, port, fm = parsed
+        extras, port, fm, stealth = parsed
         ssh = node_ssh(p['id'], n['uuid'], n['address'])
-        if (extras or port != '') and not ssh:
+        if (extras or port != '' or stealth) and not ssh:
             raise ApiError('нет доступа по SSH — без него Psiphon, WARP, XHTTP и порт не поставить')
         bd = bot_jobs_by_ip(p['id']).get(n['address']) or {}
         data = {'kind': 'node', 'node_uuid': n['uuid'], 'name': n['name'], 'ip': bd.get('ip') or n['address'],
                 'domain': bd.get('domain') or n['name'], 'domains': [bd['domain']] if bd.get('domain') else [],
                 'flag': '🛠', 'loc_name': n['name'], 'spec': 'дополнения на ноде', 'ssh': ssh,
                 'psiphon': extras.get('psiphon'), 'warp': extras.get('warp'), 'xhttp': extras.get('xhttp'),
-                'port': port, 'final_mask': fm}
+                'port': port, 'final_mask': fm, **({'stealth': True, 'spec': 'уникальные настройки'} if stealth else {})}
         jid = store.add_job('node-' + n['uuid'][:8], p['id'], uid, data)
         await runner.render(jid, force=True)
         runner.start(jid)
@@ -2962,7 +2965,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if found and not can(request, found[0]):
             raise ApiError('Нода не найдена', 404)
         # новая нода: домен, тариф и сквады выбирает администратор — без них покупки нет
-        choice = {'zone': str(b.get('zone') or '')[:100], 'idx': b.get('idx'), 'squads': b.get('squads')} if what in ('replace', 'confirm') else None
+        choice = {'zone': str(b.get('zone') or '')[:100], 'idx': b.get('idx'), 'squads': b.get('squads'), 'loc': str(b.get('loc') or '')[:40]} if what in ('replace', 'confirm') else None
         try:
             return J({'ok': True, 'message': await mon().action(str(b.get('tok') or ''), what, choice)})
         except ValueError as e:
@@ -3682,7 +3685,21 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             days = max(1, min(365, int(request.query.get('days') or 30)))
         except ValueError:
             days = 30
-        return J({'days': days, **bs.costs(store.jobs_since([p['id'] for p in my_profiles(request)], time.time() - days * 86400))})
+        from . import banlab
+        ps = [p['id'] for p in my_profiles(request)]
+        since = time.time() - days * 86400
+        # хостер заблокированной ноды: подписанный вручную или владелец сети — из истории блокировок (там снимок на момент бана)
+        banned = {(b['pid'], b['addr']): b.get('hoster') or b.get('holder') for b in store.blocks(since - 30 * 86400, ps)}
+
+        def hoster_of(j):
+            d, pid = j['data'], j['profile_id']
+            addr = d.get('replaces') or d.get('domain') or ''
+            who = store.get(f'hoster:{pid}:{addr}') if addr else ''
+            who = who or banned.get((pid, addr))
+            if not who and d.get('precheck_kop') and d.get('ip'):  # новый сервер с заблокированным IP
+                who = (banlab.cached_info(store, d['ip'], fetch=False) or {}).get('holder')
+            return who or ''
+        return J({'days': days, **bs.costs(store.jobs_since(ps, since), hoster_of)})
 
     @r.get('/api/scale/pending')
     async def scale_pending(request):

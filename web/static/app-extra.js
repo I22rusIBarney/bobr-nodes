@@ -9,14 +9,16 @@ function nodeSettings(n, det) {
   if (!d) return det.err ? empty('alert', 'Не загрузилось', det.err) : h('div', { class: 'sk', style: 'height:280px' });
   const st = UI.ns && UI.ns.id === n.id ? UI.ns : (UI.ns = { id: n.id, add: {}, port: '', mask: null, ssh: { user: d.ssh.user, port: String(d.ssh.port), key: d.ssh.key, password: '', key_text: '', sudo_password: '' } });
   const has = new Set(d.features || []), adds = Object.keys(st.add).filter(k => st.add[k]);
-  const changes = adds.length + (st.port ? 1 : 0) + (st.mask != null ? 1 : 0);
+  const changes = adds.length + (st.stealth ? 1 : (st.port ? 1 : 0) + (st.mask != null ? 1 : 0));
   const apply = () => confirmAct({ title: `Применить к ${n.name}?`, icon: ['sliders', 'run'], ok: 'Применить',
     text: h('div', null, h('ul', { style: 'margin:0 0 10px;padding-left:18px;color:var(--ink)' },
-      adds.map(k => h('li', null, 'Добавить ' + EXTRAS.find(x => x[0] === k)[1])), st.port ? h('li', null, `Порт для клиентов: ${st.port}`) : null,
-      st.mask != null ? h('li', null, 'Final Mask: ' + (st.mask ? 'включить' : 'выключить')) : null),
+      adds.map(k => h('li', null, 'Добавить ' + EXTRAS.find(x => x[0] === k)[1])), st.stealth ? h('li', null, 'Уникальные настройки: случайные порт, отпечаток и маска') : null,
+      !st.stealth && st.port ? h('li', null, `Порт для клиентов: ${st.port}`) : null,
+      !st.stealth && st.mask != null ? h('li', null, 'Final Mask: ' + (st.mask ? 'включить' : 'выключить')) : null),
       'Бот зайдёт на сервер по SSH и перезапустит ноду — клиенты переподключатся за несколько секунд.'),
     fn: async () => {
-      const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/apply`, 'POST', { port: st.port || undefined, final_mask: st.mask == null ? undefined : st.mask,
+      const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/apply`, 'POST', { stealth: !!st.stealth || undefined,
+        port: st.stealth ? undefined : st.port || undefined, final_mask: st.stealth || st.mask == null ? undefined : st.mask,
         psiphon: st.add.psiphon ? { enabled: true, region: '', domains: '' } : undefined, warp: st.add.warp ? { enabled: true, domains: '' } : undefined,
         xhttp: st.add.xhttp ? { enabled: true, mode: 'direct' } : undefined });
       UI.ns = null; jobToast(`${n.name}: настройки применяются`, r.id); refreshSoon();
@@ -28,7 +30,9 @@ function nodeSettings(n, det) {
       ? h('div', { class: 'switch' }, h('span', { class: 'grow' }, h('b', null, t), h('span', null, s)), h('span', { class: 'st ok' }, 'стоит'))
       : switchRow(t, s, !!st.add[k], v => { st.add[k] = v; render(); }))),
     h('div', { class: 'section-h' }, h('h2', null, 'Подключение')),
-    h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:12px' },
+    h('div', { class: 'list', style: 'margin-bottom:12px' }, switchRow('Уникальные настройки', 'Случайные порт (половина нод остаётся на 443), TLS-отпечаток и фрагментация — чтобы ноды не были похожи друг на друга. 443 продолжит работать для старых подписок',
+      !!st.stealth, v => { st.stealth = v; render(); })),
+    st.stealth ? null : h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:12px' },
       fld('Порт для клиентов', h('input', { class: 'inp mono', 'data-k': 'nport', inputmode: 'numeric', style: 'max-width:160px', placeholder: String(d.inbound_port || 443), value: st.port,
         oninput: e => { st.port = e.target.value.trim(); render(); } }), `Сейчас ${d.inbound_port || 443}. Пусто — не менять, 443 — вернуть стандартный.`),
       fld('Final Mask', seg([{ v: null, l: 'Не менять' }, { v: true, l: 'Включить' }, { v: false, l: 'Выключить' }], st.mask, v => { st.mask = v; render(); }, 'Final Mask'),

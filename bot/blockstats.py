@@ -26,7 +26,7 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
             if k not in out:
                 out[k] = {'key': k, 'label': (x.get('loc_name') or k.upper()) if key == 'location' else LABELS.get(key, str)(x) if key in LABELS else k,
                           'flag': x.get('flag') or '' if key == 'location' else '', 'nodes': 0, 'months': 0.0,
-                          'blocks': 0, 'outages': 0, 'fixes': {}, '_dur': [], '_life': []}
+                          'blocks': 0, 'outages': 0, 'subnet': 0, 'fixes': {}, '_dur': [], '_life': []}
             elif key == 'location' and not out[k]['flag'] and x.get('flag'):
                 out[k].update(flag=x['flag'], label=x.get('loc_name') or out[k]['label'])
             return out[k]
@@ -44,6 +44,7 @@ def summarize(blocks: list[dict], nodes: list[dict], now: float, days: int) -> d
                 r['outages'] += 1
                 continue
             r['blocks'] += 1
+            r['subnet'] += b.get('neigh') == 'subnet'  # проверка соседей: резали всю /24
             if b.get('end'):
                 r['_dur'].append(b['end'] - b['start'])
                 r['fixes'][b.get('fix') or 'self'] = r['fixes'].get(b.get('fix') or 'self', 0) + 1
@@ -86,7 +87,8 @@ def advice(stats: dict, location: str) -> dict | None:
     if not here or len(locs) < 2:
         return None
     best = min(locs, key=lambda r: r['rate'])
-    if best['key'] == location or here['rate'] < max(best['rate'] * 2, best['rate'] + 0.5):
+    # совет и тогда, когда частота не хуже, но здесь уже не раз резали подсеть целиком (бан хостера)
+    if best['key'] == location or here['rate'] < max(best['rate'] * 2, best['rate'] + 0.5) and here.get('subnet', 0) < 2:
         return None
     return {'here': here, 'best': best}
 
@@ -94,22 +96,31 @@ def advice(stats: dict, location: str) -> dict | None:
 COST_KINDS = {'new': 'Новые ноды', 'replace': 'Замены заблокированных', 'scale': 'Докупка при нагрузке', 'reip': 'Смены IP'}
 
 
-def costs(jobs: list[dict]) -> dict:
+def costs(jobs: list[dict], hoster_of=None) -> dict:
     """Разовые траты бота по задачам: покупки серверов (новые ноды, замены, докупка) и смены IP.
-    Покупка считается, если сервер куплен (есть server_id и он не был уже существующим) — даже если установка потом упала."""
+    Покупка считается, если сервер куплен (есть server_id и он не был уже существующим) — даже если установка потом упала.
+    hoster_of(job) → хостер заблокированной ноды: во что обошлись блокировки (замены и смены IP) у каждого хостера."""
     out = {k: {'kind': k, 'label': v, 'kop': 0, 'n': 0} for k, v in COST_KINDS.items()}
-    items = []
+    items, by_host = [], {}
     for j in jobs:
         d = j['data']
+        found = []
         if d.get('kind') == 'reip':
-            kop, kind = d.get('charged_kop'), 'reip'
+            found.append((d.get('charged_kop'), 'reip'))
         elif not d.get('kind') and d.get('server_id') and not d.get('existing'):
-            kop, kind = d.get('price_kop'), 'replace' if d.get('monitor') else 'scale' if d.get('autoscale') else 'new'
-        else:
-            continue
-        if not kop:
-            continue
-        out[kind]['kop'] += int(kop)
-        out[kind]['n'] += 1
-        items.append({'ts': j['created_at'], 'kind': kind, 'kop': int(kop), 'name': d.get('domain') or d.get('name') or '', 'pid': j['profile_id'], 'job': j['id']})
-    return {'total_kop': sum(x['kop'] for x in out.values()), 'kinds': [x for x in out.values() if x['n']], 'items': items[::-1][:50]}
+            found.append((d.get('price_kop'), 'replace' if d.get('monitor') else 'scale' if d.get('autoscale') else 'new'))
+        if d.get('precheck_kop'):  # IP нового сервера пришёл заблокированным — смена до установки
+            found.append((d['precheck_kop'], 'reip'))
+        for kop, kind in found:
+            if not kop:
+                continue
+            out[kind]['kop'] += int(kop)
+            out[kind]['n'] += 1
+            items.append({'ts': j['created_at'], 'kind': kind, 'kop': int(kop), 'name': d.get('domain') or d.get('name') or '', 'pid': j['profile_id'], 'job': j['id']})
+            if kind in ('replace', 'reip') and hoster_of is not None:
+                who = hoster_of(j) or 'не известен'
+                x = by_host.setdefault(who, {'label': who, 'kop': 0, 'n': 0})
+                x['kop'] += int(kop)
+                x['n'] += 1
+    return {'total_kop': sum(x['kop'] for x in out.values()), 'kinds': [x for x in out.values() if x['n']], 'items': items[::-1][:50],
+            'hosters': sorted(by_host.values(), key=lambda x: -x['kop'])}

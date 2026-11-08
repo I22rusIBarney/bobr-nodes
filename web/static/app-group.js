@@ -4,6 +4,9 @@
 const tzNow = () => -new Date().getTimezoneOffset();
 const numIn = (val, onset, attrs = {}) => h('input', { class: 'inp mono', inputmode: 'numeric', style: 'max-width:140px', value: String(val ?? ''), ...attrs,
   onchange: e => { const v = parseInt(e.target.value.replace(/\D/g, ''), 10); onset(Number.isFinite(v) ? v : 0); } });
+/* выбор из словаря {значение: подпись} — длинные подписи на телефоне не влезают в сегменты */
+const optSel = (opts, val, onset, label) => h('select', { class: 'sel', style: 'width:100%', 'aria-label': label, onchange: e => onset(e.target.value) },
+  Object.entries(opts).map(([v, l]) => h('option', { value: v, selected: val === v || null }, l[0].toUpperCase() + l.slice(1))));
 const hourSel = (val, onset, label) => h('select', { class: 'sel', 'aria-label': label || 'Час', value: String(val), onchange: e => onset(+e.target.value) },
   Array.from({ length: 24 }, (_, i) => h('option', { value: String(i) }, `${i}:00`)));
 const area = (val, rows, oninput, ph) => h('textarea', { class: 'inp mono', rows: String(rows), spellcheck: 'false', placeholder: ph || '', oninput: e => oninput(e.target.value) }, val);
@@ -55,7 +58,7 @@ function groupMon(g) {
   if (!m) return h('div', { class: 'sk', style: 'height:200px' });
   const ALL = Object.keys(D.mon.steps), key = 'm' + g.id;
   const S = GD[key] || (GD[key] = { sub: '', mode: m.mon_mode, on: new Set(m.mon_steps), order: [...m.mon_steps, ...ALL.filter(k => !m.mon_steps.includes(k))],
-    script: m.mon_script, port: String(m.mon_port || 8443), old: m.mon_old, max: String(m.mon_max_buys), buy: (m.mon_buy || []).map(x => ({ ...x })), last: m.mon_buy_last, skip: m.mon_skip || '' });
+    script: m.mon_script, port: String(m.mon_port || 8443), old: m.mon_old, pre: m.mon_precheck || 'stop', max: String(m.mon_max_buys), buy: (m.mon_buy || []).map(x => ({ ...x })), last: m.mon_buy_last, skip: m.mon_skip || '' });
   const mv = (arr, i, j) => { [arr[i], arr[j]] = [arr[j], arr[i]]; render(); };
   const arrows = (arr, i, removable) => h('span', { class: 'chips', style: 'gap:4px;flex-wrap:nowrap' },
     btn('', () => mv(arr, i, i - 1), 's', 'up', { disabled: i === 0, 'aria-label': 'Выше', style: 'padding:0 8px' }),
@@ -84,7 +87,7 @@ function groupMon(g) {
   const save = e => busyBtn(e, async () => {
     try {
       const r = await api(`profiles/${g.id}/monitor`, 'POST', { mon_sub: S.sub, mon_mode: S.mode, mon_steps: S.order.filter(k => S.on.has(k)), mon_script: S.script, mon_port: S.port,
-        mon_old: S.old, mon_max_buys: S.max, mon_buy: S.buy, mon_buy_last: S.last, mon_skip: S.skip });
+        mon_old: S.old, mon_precheck: S.pre, mon_max_buys: S.max, mon_buy: S.buy, mon_buy_last: S.last, mon_skip: S.skip });
       toast('Сохранено', r.resync ? 'Записываю подписку на чекеры — результаты примерно через минуту' : null); delete GD[key]; D.mon = await api('monitor'); render();
     } catch (x) { toast('Не получилось', x.message, 'bad'); }
   });
@@ -120,10 +123,12 @@ function groupMon(g) {
       h('div', { class: 'chips', style: 'margin-bottom:12px' }, S.buy.some(x => x.type === 'same') ? null : btn('Как у старой', () => addBuy({ type: 'same' }), 's', 'plus'),
         btn('Готовый тариф', pickPreset, 's', 'plus'), btn('Своя конфигурация', pickCustom, 's', 'plus')),
       h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:22px' },
-        fld('Если не подошёл ни один', seg(Object.entries(D.mon.buy_last).map(([v, l]) => ({ v, l })), S.last, v => { S.last = v; render(); }, 'Запасной вариант')),
-        fld('Старый сервер после замены', seg(Object.entries(D.mon.old).map(([v, l]) => ({ v, l })), S.old, v => { S.old = v; render(); }, 'Старый сервер'),
+        fld('Если не подошёл ни один', optSel(D.mon.buy_last, S.last, v => { S.last = v; }, 'Запасной вариант')),
+        fld('Старый сервер после замены', optSel(D.mon.old, S.old, v => { S.old = v; }, 'Старый сервер'),
           'Удалённый в Bobr Cloud сервер не вернуть.'),
-        fld('Покупок за сутки, не больше', h('input', { class: 'inp mono', inputmode: 'numeric', style: 'max-width:140px', value: S.max, oninput: e => { S.max = e.target.value.replace(/\D/g, ''); } }), `Сегодня куплено: ${m.buys_today}.`))),
+        fld('Покупок за сутки, не больше', h('input', { class: 'inp mono', inputmode: 'numeric', style: 'max-width:140px', value: S.max, oninput: e => { S.max = e.target.value.replace(/\D/g, ''); } }), `Сегодня куплено: ${m.buys_today}.`),
+        fld('Если IP нового сервера уже заблокирован', optSel(D.mon.precheck || {}, S.pre, v => { S.pre = v; }, 'Заблокированный IP'),
+          'Перед установкой бот проверяет новый IP с чекеров в России — после покупки и после смены IP.'))),
     section('Не проверять', h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:22px' },
       fld('Группы подписки (балансировщики)', h('input', { class: 'inp', 'data-k': 'mskip', value: S.skip, placeholder: 'АВТО-ВЫБОР, NORMAL', oninput: e => { S.skip = e.target.value; } }),
         'Через запятую, достаточно части названия: общий балансировщик повторяет ноды, которые и так проверяются.'))),

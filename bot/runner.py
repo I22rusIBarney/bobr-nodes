@@ -30,7 +30,7 @@ def extras_label(d: dict) -> str:
     port = (d.get('host') or {}).get('port') if d.get('kind') != 'node' else d.get('port')
     parts = (['Psiphon'] if d.get('psiphon') else []) + (['WARP'] if d.get('warp') else []) + ([xhttp_label(d['xhttp'])] if d.get('xhttp') else []) + \
         ([f'порт {port}'] if port not in (None, '', 443, '443') else []) + \
-        (['уникальные настройки'] if d.get('kind') != 'node' and (d.get('host') or {}).get('stealth') else [])
+        (['уникальные настройки'] if (d.get('host') or {}).get('stealth') or d.get('kind') == 'node' and d.get('stealth') else [])
     return ', '.join(parts)
 
 
@@ -165,6 +165,7 @@ class Runner:
         self.ip_timeout = ip_timeout
         self.rebuy_wait = min(5.0, poll_every)
         self.feedback = None  # отзывы и ошибки: отчёт при падении задачи, опрос после установки (задаётся в main)
+        self.ip_check = None  # async (ip) -> {'blocked': bool} | None: открывается ли IP из России (мониторинг, задаётся в main)
         self.after_deploy = None  # (jid) -> None: мониторинг проверяет новую ноду из России  # Bobr Cloud возвращает деньги за несозданный сервер сразу
         self.edit_every = edit_every
         self.tasks: dict[int, asyncio.Task] = {}
@@ -362,6 +363,12 @@ class Runner:
                 await self.render(jid)
                 await asyncio.sleep(self.poll_every * 3)
         self.last[jid] = f'новый IP: {d["new_ip"]}'
+        res = await self._ip_blocked(jid, d['new_ip'], prof)
+        if res:
+            # повтор задачи — новая смена IP: этот адрес уже заблокирован, ставить на него ноду незачем
+            self.store.patch_job_data(jid, new_ip='', change_sent=False)
+            raise Fail(f'новый IP {d["new_ip"]} уже заблокирован в России (проверили {res["checkers"]} чекера) — '
+                       'нажмите «Повторить», чтобы сменить IP ещё раз, или выберите другую починку')
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'old_ip': d['old_ip'], 'new_ip': d['new_ip'],
                 'domains': d.get('domains') or [], **self._node_ssh(d, prof)}
         pconf = {**prof, 'cf_token': cf_token_of(self.store, prof)}
@@ -382,12 +389,62 @@ class Runner:
         if d.get('deploy_job'):  # задача покупки помнит IP сервера — для SSH и поиска ноды дальше
             self.store.patch_job_data(int(d['deploy_job']), ip=d['new_ip'])
 
+    async def _ip_blocked(self, jid: int, ip: str, prof: dict) -> dict | None:
+        """Проверка нового IP из России: результат, если IP заблокирован; None — открыт, проверять нечем или выключено."""
+        from .monitor import settings_of
+        if self.ip_check is None or settings_of(prof)['mon_precheck'] == 'off':
+            return None
+        self.last[jid] = f'проверяю из России, не заблокирован ли {ip}'
+        await self.render(jid)
+        try:
+            res = await self.ip_check(ip)
+        except Exception:  # noqa: BLE001 — проверка вспомогательная, установку не роняет
+            log.exception('ip_check %s', ip)
+            return None
+        return res if res and res.get('blocked') else None
+
+    async def _precheck(self, jid: int, d: dict, prof: dict, bc) -> dict:
+        """Новый сервер: IP не заблокирован ли уже в России. По настройке группы — остановиться или один раз сменить IP."""
+        from .monitor import settings_of
+        if d.get('ip_checked') == d['ip']:
+            return d
+        res = await self._ip_blocked(jid, d['ip'], prof)
+        if not res:
+            return self.store.patch_job_data(jid, ip_checked=d['ip'])
+        if settings_of(prof)['mon_precheck'] == 'reip' and d.get('server_id') and not d.get('precheck_reip'):
+            old = d['ip']
+            d = self.store.patch_job_data(jid, precheck_reip=True)  # до запроса: повтор не спишет деньги второй раз
+            try:
+                price = (await bc.server(d['server_id'])).get('change_ip_price_kop')
+            except BcloudError:
+                price = None
+            await bc.change_ip(d['server_id'])
+            if price is not None:
+                d = self.store.patch_job_data(jid, precheck_kop=int(price))
+            self.last[jid] = f'IP {old} уже заблокирован в России — меняю IP в Bobr Cloud'
+            await self.render(jid)
+            end = time.monotonic() + self.reip_timeout
+            while True:
+                srv = await bc.server(d['server_id'], sync=True)
+                if srv.get('ip') and srv['ip'] != old:
+                    engine.forget_host(self.known_hosts(), srv['ip'])
+                    d = self.store.patch_job_data(jid, ip=srv['ip'])
+                    break
+                if time.monotonic() > end:
+                    raise Fail('Bobr Cloud так и не сообщил новый IP — проверьте сервер в Bobr Cloud и нажмите «Повторить»')
+                await asyncio.sleep(self.poll_every * 3)
+            return await self._precheck(jid, d, prof, bc)
+        # повтор возьмёт IP из Bobr Cloud заново: сменили его там — проверим новый
+        self.store.patch_job_data(jid, ip=None)
+        raise Fail(f'IP сервера {d["ip"]} уже заблокирован в России (проверили {res["checkers"]} чекера) — нода на нём работать не будет. '
+                   'Смените IP сервера в Bobr Cloud и нажмите «Повторить» или включите в мониторинге группы автоматическую смену')
+
     async def _run_node(self, jid: int, d: dict, prof: dict) -> None:
         """Дополнения на уже работающей ноде панели (без покупки и установки)."""
         loop = asyncio.get_running_loop()
         node = {'node_uuid': d['node_uuid'], 'name': d.get('name', ''), 'ip': d.get('ip', ''),
                 'domains': d.get('domains') or [], 'psiphon': d.get('psiphon'), 'warp': d.get('warp'), 'xhttp': d.get('xhttp'),
-                'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'),
+                'port': d.get('port'), 'final_mask': d.get('final_mask'), 'rollback': d.get('rollback'), 'stealth': d.get('stealth'),
                 **self._node_ssh(d, prof)}
         pconf = {**prof, 'ssh_pubkey': self.pubkeys(prof), 'cf_token': cf_token_of(self.store, prof)}
         self.last[jid] = 'ждём свободный слот'
@@ -546,6 +603,7 @@ class Runner:
                 except BcloudError as e:  # имя в bcloud — удобство, не повод останавливать установку
                     log.info('rename %s: %s', jid, e)
 
+            d = await self._precheck(jid, d, prof, bc)
             self.last[jid] = 'ждём свободный слот установки'
             await self.render(jid)
             async with self.sem():

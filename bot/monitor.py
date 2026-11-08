@@ -39,11 +39,12 @@ STEP_LABEL = {'mask': 'Final Mask и свой порт', 'script': 'переус
 MODES = {'watch': 'только показывать', 'notify': 'сообщать', 'ask': 'сообщать и предлагать починку', 'auto': 'чинить сам, платное — после подтверждения'}
 PAID = ('reip', 'replace')  # платные шаги: бот готовит их, но выполняет только после подтверждения администратора
 OLD = {'panel': 'убрать из панели, сервер оставить', 'delete': 'убрать из панели и удалить в Bobr Cloud', 'keep': 'ничего не трогать'}
+PRECHECK = {'stop': 'остановить установку и сообщить', 'reip': 'сменить IP один раз (платно) и проверить снова', 'off': 'не проверять'}
 BUY_LAST = {'cheapest': 'самый дешёвый тариф в локации', 'none': 'не покупать — сообщить'}
 SKIP_DEFAULT = 'АВТО-ВЫБОР, АВТОВЫБОР, AUTO-SELECT, NORMAL'  # общий балансировщик: его ноды проверяются и так
 DEFAULTS = {'mon_buy': [{'type': 'same'}], 'mon_buy_last': 'cheapest', 'mon_skip': SKIP_DEFAULT,
             'mon_sub': '', 'mon_mode': 'ask', 'mon_steps': list(STEPS), 'mon_script': None, 'mon_port': 8443,
-            'mon_old': 'panel', 'mon_max_buys': 2, 'mon_quiet': False, 'mon_mute': []}
+            'mon_old': 'panel', 'mon_max_buys': 2, 'mon_quiet': False, 'mon_mute': [], 'mon_precheck': 'stop'}
 FAILS_TO_ALERT = 3
 DEGRADE_HIST = 288  # задержек на ноду для «обычной» (сутки при опросе раз в 5 минут)
 RECOVER_CYCLES = 2
@@ -109,6 +110,10 @@ def clean_settings(raw: dict, cur: dict, scripts: list[dict]) -> dict:
             out['mon_port'] = engine.public_port(raw['mon_port'], int(cur.get('node_port') or 2222)) or 443
         except engine.StepError as e:
             raise ValueError(str(e)) from None
+    if raw.get('mon_precheck') is not None:
+        if raw['mon_precheck'] not in PRECHECK:
+            raise ValueError('новый IP заблокирован: stop, reip или off')
+        out['mon_precheck'] = raw['mon_precheck']
     if raw.get('mon_old') is not None:
         if raw['mon_old'] not in OLD:
             raise ValueError('старый сервер: panel, delete или keep')
@@ -719,6 +724,45 @@ class Monitor:
                 return {**banlab.verdict(abroad, ru), 'checker': ch.get('name') or ch.get('ip')}
         return None
 
+    def neigh_of(self, prof: dict, st: dict) -> str:
+        """Итог проверки соседей для текущей блокировки ноды: subnet | single | mixed | unknown | ''."""
+        rows = [b for b in self.store.blocks(float(st.get('since') or 0) - 3600, [prof['id']]) if b['addr'] == st.get('addr') and not b.get('end')]
+        return (rows[-1].get('neigh') or '') if rows else ''
+
+    async def ip_check(self, ip: str, tries: int = 6, wait: float = 10) -> dict | None:
+        """Открывается ли IP из России: порты, живые с сервера бота, проверяют до двух чекеров.
+        {'blocked': bool, 'ports': [...]} или None — сказать нельзя (нет чекеров или из-за рубежа порты закрыты)."""
+        from . import banlab
+        from . import diagnose as dg
+        cks = [c for c in self.store.checkers() if c.get('status') == 'running']
+        if not cks or not banlab.is_public(ip):
+            return None
+        abroad = {}
+        for i in range(tries):  # новый сервер принимает SSH не сразу
+            abroad = await banlab.alive_abroad([ip], dg.tcp_open, keep=1)
+            if abroad:
+                break
+            if i + 1 < tries:
+                await asyncio.sleep(wait)
+        if not abroad:
+            return None
+        path, _, kh = self.keyfiles()
+        cmd = banlab.ru_probe_cmd(abroad)
+        votes = []
+        for ch in cks:
+            try:
+                _, out = await asyncio.to_thread(lambda: ck.remote(ch, path, kh).run(cmd, 60))
+            except (engine.StepError, OSError):
+                continue
+            ru = banlab.parse_probe(engine.strip_ansi(out))
+            if ip in ru:
+                votes.append(ru[ip])
+                if ru[ip] or len(votes) >= 2:  # открылся хоть у одного — не заблокирован; два «нет» — заблокирован
+                    break
+        if not votes:
+            return None
+        return {'blocked': not any(votes), 'ports': abroad[ip], 'checkers': len(votes)}
+
     async def degradation(self, prof: dict, st: dict, cfg: dict, now: float) -> None:
         """Нода ещё проходит, но хуже обычного: задержка из России выросла вдвое (и хотя бы на 150 мс) против её же
         обычной за сутки, или часть чекеров не проходит три проверки подряд. Сообщаем раз в 12 часов — до полной блокировки."""
@@ -849,6 +893,15 @@ class Monitor:
         plan = ['replace'] if only_replace else [x for x in cfg['mon_steps'] if x not in done]
         if st.get('cause') == 'down':  # сервер не отвечает нигде: маскировка, XHTTP, переустановка и смена IP не помогут
             plan = [x for x in plan if x == 'replace']
+        elif self.neigh_of(prof, st) == 'subnet':
+            # режут всю /24: маскировка и переустановка на том же IP не помогут, новый IP у того же хостера — скорее
+            # всего из той же подсети. Остаются вход через CDN и новая нода (лучше в другой локации)
+            cut = [x for x in plan if x in ('mask', 'script', 'reip')]
+            plan = [x for x in plan if x not in cut]
+            if cut and not st.get('subnet_said'):
+                st['subnet_said'] = True
+                await self.say(prof, f'🧭 {self.head(prof, st)}\nсоседей по подсети /24 из России тоже не открыть — похоже на бан подсети хостера. '
+                                     f'Пропускаю: {", ".join(STEP_LABEL[x] for x in cut)}.', st=st)
         for step in plan:
             if step in PAID and st.get('ok_step') != step:
                 st.update(status='confirm', step=step, job=None, job_done=False, steps_done=done)
@@ -1003,11 +1056,13 @@ class Monitor:
         if len(buys) >= cfg['mon_max_buys']:
             raise ValueError(f'лимит покупок за сутки исчерпан ({cfg["mon_max_buys"]}) — поменяйте его в настройках мониторинга')
         cat = await svc.load_catalog(self.store, prof)
-        loc = bd.get('location') or (st.get('country') or '').lower()
+        choice = st.pop('choice', None) or {}
+        loc = choice.get('loc') or bd.get('location') or (st.get('country') or '').lower()  # другую локацию выбирают в окне покупки
         L = next((x for x in cat['locations'] if x['code'] == loc), None)
         if not L:
             raise ValueError(f'локации «{loc or "?"}» сейчас нет в Bobr Cloud')
-        choice = st.pop('choice', None) or {}
+        if loc != (bd.get('location') or ''):
+            bd = {**bd, 'idx': None, 'custom': None}  # «как у старой» — только в её локации
         if isinstance(choice.get('idx'), int):  # тариф выбрали в панели
             o = next((x for x in L['offers'] if x['idx'] == choice['idx']), None)
             if not o:
@@ -1026,6 +1081,34 @@ class Monitor:
                                     note={'monitor': True, 'replaces': st['addr']})
         self.store.set(f'mon_buys:{prof["id"]}', json.dumps(buys + [time.time()]))
         return ids[0], f'покупаю новую ноду {doms[0]} в {L["flag"]} {L["name"]}, {why}'
+
+    def replace_alts(self, prof: dict, st: dict, cat: dict, loc: str) -> tuple[list[dict], str, str]:
+        """Куда ещё можно поставить замену: локации Bobr Cloud с частотой блокировок за 90 дней (по всем группам).
+        Совет — лучшая из них, если здесь режут подсеть или блокируют заметно чаще."""
+        from . import banlab
+        from . import blockstats as bs
+        stats, _, _ = banlab.collect(self.store, self.store.profiles(), 90)
+        rate = {r['key']: r for r in stats['locations']}
+        alts = []
+        for L in cat['locations']:
+            if not L.get('offers'):
+                continue
+            r = rate.get(L['code']) or {}
+            alts.append({'loc': L['code'], 'loc_name': L['name'], 'flag': L['flag'], 'rate': r.get('rate'), 'months': r.get('months') or 0,
+                         'offers': sorted(({'idx': o['idx'], 'label': svc.spec_text(o), 'price_kop': o['price_kop']} for o in L['offers']),
+                                          key=lambda o: o['price_kop'])})
+        known = [a for a in alts if a['rate'] is not None and a['months'] >= 1]
+        best = min(known, key=lambda a: a['rate']) if known else None
+        subnet = self.neigh_of(prof, st) == 'subnet'
+        adv = bs.advice(stats, loc)
+        suggest, why = '', ''
+        if best and best['loc'] != loc and (subnet or adv):
+            suggest = best['loc']
+            why = ('соседей этой ноды по подсети тоже режут — у того же хостера новая нода, скорее всего, получит IP из забаненной сети'
+                   if subnet else 'в этой локации блокируют заметно чаще')
+            why += f'; в {best["flag"]} {best["loc_name"]} — {str(best["rate"]).replace(".", ",")} в мес. на ноду'
+        alts.sort(key=lambda a: (a['loc'] != loc, a['loc'] != suggest, a['rate'] is None, a['rate'] or 0))
+        return alts[:8], suggest, why
 
     async def default_zone(self, prof: dict, st: dict, bd: dict) -> str:
         """Домен для имени новой ноды: домен группы для автоимён, иначе зона Cloudflare, в которой имя старой ноды."""
@@ -1067,7 +1150,9 @@ class Monitor:
         same = None
         if bd.get('idx') is not None and any(o['idx'] == bd['idx'] for o in offers):
             same = bd['idx']
-        return {'name': st.get('name') or st['addr'], 'loc': loc, 'loc_name': L['name'] if L else '', 'flag': L['flag'] if L else '',
+        alts, suggest, why = self.replace_alts(prof, st, cat, loc)
+        return {'alts': alts, 'suggest': suggest, 'suggest_why': why,
+                'name': st.get('name') or st['addr'], 'loc': loc, 'loc_name': L['name'] if L else '', 'flag': L['flag'] if L else '',
                 'available': bool(L), 'zones': zones, 'zone': zone, 'offers': sorted(offers, key=lambda o: o['price_kop']),
                 'same': same, 'custom': bool(bd.get('custom')),
                 'squads': squads, 'squads_default': [x for x in mine if any(s['uuid'] == x for s in squads)],
@@ -1161,7 +1246,7 @@ class Monitor:
                            **{k: v for k, v in cfg.items() if k != 'mon_sub'}, 'nodes': nodes,
                            'buys_today': len(self.buys_today(p['id']))})
         return {'checkers': checkers, 'groups': groups, 'polled_at': int(self.polled_at), 'every': int(self.every),
-                'steps': STEP_LABEL, 'modes': MODES, 'old': OLD, 'buy_last': BUY_LAST}
+                'steps': STEP_LABEL, 'modes': MODES, 'old': OLD, 'buy_last': BUY_LAST, 'precheck': PRECHECK}
 
 
 # федеральные округа: код → название. Регион чекера выбирают в его карточке; пока не выбран — угадываем по названию
@@ -1229,4 +1314,7 @@ def clean_choice(choice: dict | None) -> dict:
     idx = c.get('idx')
     if idx is not None and (not isinstance(idx, int) or isinstance(idx, bool)):
         raise ValueError('Неверный тариф')
-    return {'zone': zone, 'idx': idx, 'squads': squads[:20]}
+    loc = str(c.get('loc') or '').strip().lower()
+    if loc and not re.fullmatch(r'[a-z0-9_-]{1,40}', loc):
+        raise ValueError('Неверная локация')
+    return {'zone': zone, 'idx': idx, 'squads': squads[:20], **({'loc': loc} if loc else {})}
