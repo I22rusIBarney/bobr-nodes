@@ -141,3 +141,13 @@ def test_country_balancer_tags_from_wizard():
     assert with_n['tags'] == ['PL', 'NORMAL'] and with_n['hidden'] and with_n['balancer']['tag'] == 'PL'
     assert without['tags'] == ['PL'] and multi['tags'] == ['DE', 'NORMAL']
     assert svc.host_options('pl', 'normal', 'NORMAL')['tags'] == ['NORMAL']
+
+
+def test_country_balancer_free_tags():
+    from bot import services as svc
+    h = svc.host_options('pl', 'balancer', 'NORMAL,EU, pl', 'PL_WAW')
+    assert h['tags'][0] == 'PL_WAW' and set(h['tags']) == {'PL_WAW', 'NORMAL', 'EU', 'PL'} and len(h['tags']) == len(set(h['tags']))
+    assert svc.host_options('pl', 'balancer', 'NORMAL, PL_WAW', 'PL_WAW')['tags'] == ['PL_WAW', 'NORMAL']   # без дублей
+    import pytest
+    with pytest.raises(ValueError):
+        svc.host_options('pl', 'balancer', 'норм', 'PL')
