@@ -674,12 +674,13 @@ function nodeHistory(n) {  // события мониторинга, задач�
 }
 
 /* ── Задача ── */
+const TASK_POLL = {};
 function drawerTask(id) {
   const st = D.job[id];
   if (!st || (!st.loading && Date.now() - st.at > 5000 && st.d && !['done', 'failed'].includes(st.d.status))) {
     D.job[id] = { ...(st || {}), loading: true, at: Date.now() };
-    api('jobs/' + id).then(r => { D.job[id] = { d: r, at: Date.now() }; }).catch(e => { D.job[id] = { err: e.message, at: Date.now() }; }).then(() => render(true));
-    if (st && st.d && !['done', 'failed'].includes(st.d.status)) setTimeout(() => render(true), 5000);
+    // сбой одного опроса не прячет задачу: на экране остаётся последнее состояние
+    api('jobs/' + id).then(r => { D.job[id] = { d: r, at: Date.now() }; }).catch(e => { D.job[id] = st && st.d ? { d: st.d, at: Date.now() } : { err: e.message, at: Date.now() }; }).then(() => render(true));
   }
   const j = st && st.d;
   const head = h('div', { class: 'drawer-h' }, h('div', { style: 'min-width:0;flex:1' },
@@ -688,7 +689,7 @@ function drawerTask(id) {
     h('button', { type: 'button', class: 'icon-btn x', onclick: closeOverlay, 'aria-label': 'Закрыть' }, ic('x')));
   if (!j) return h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Задача' }, head,
     h('div', { class: 'drawer-body' }, st && st.err ? empty('alert', 'Не загрузилось', st.err, btn('Повторить', () => { D.job[id] = null; render(); }, 'primary')) : h('div', { class: 'sk', style: 'height:200px' })));
-  if (!['done', 'failed'].includes(j.status)) setTimeout(() => { if (parse().name === 'task') render(true); }, 5000);
+  if (!['done', 'failed'].includes(j.status) && !TASK_POLL[id]) TASK_POLL[id] = setTimeout(() => { delete TASK_POLL[id]; if (parse().name === 'task') render(true); }, 5000);  // один таймер, а не по одному на перерисовку
   const cur = j.stages.findIndex(s => s.code === j.stage);
   return h('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': jobTitle(j) }, head,
     h('div', { class: 'drawer-body', 'data-keep': 'task' + id },

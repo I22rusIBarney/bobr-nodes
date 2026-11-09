@@ -4,7 +4,11 @@
 const RL_ST = { new: ['run', 'создаётся'], buying: ['run', 'покупаю сервер'], installing: ['run', 'ставлю'], ok: ['ok', 'работает'], warn: ['warn', 'нода не отвечает'], failed: ['bad', 'ошибка'] };
 const RL_MODE = { egames: 'роутинг, как в eGames', vision: 'роутинг, Vision TLS', xray: 'роутинг, REALITY', haproxy: 'проброс (HAProxy)' };
 const MASK_DEF = JSON.stringify({ tcp: [{ type: 'fragment', settings: { length: '10-20', packets: 'tlshello', interval: '10-20' } }] });
-const reloadDetail = n => { D.detail[n.id] = null; render(); };
+// обновление во время установки: прежние данные остаются на экране, пока грузятся свежие (без мигания заглушкой)
+const reloadDetail = n => { const c = D.detail[n.id]; D.detail[n.id] = c && c.d ? { d: c.d, at: 0 } : null; render(true); };
+// один таймер на ноду: каждая перерисовка ставила свой, и обновления множились
+const RL_POLL = {};
+const pollDetail = (n, ms, still) => { if (RL_POLL[n.id]) return; RL_POLL[n.id] = setTimeout(() => { delete RL_POLL[n.id]; if (still() && !(D.detail[n.id] || {}).loading) reloadDetail(n); }, ms); };
 
 function nodeBridge(n, det) {
   const d = det.d;
@@ -14,7 +18,7 @@ function nodeBridge(n, det) {
   const x = rid && (d.relays || []).find(r => r.id === rid);
   if (x) return relayDetail(n, d, x);
   const rs = d.relays || [];
-  if (rs.some(r => ['new', 'buying', 'installing'].includes(r.status))) setTimeout(() => { if (parse().name === 'node' && UI.tabs.node === 'bridge') reloadDetail(n); }, 4000);
+  if (rs.some(r => ['new', 'buying', 'installing'].includes(r.status))) pollDetail(n, 4000, () => parse().name === 'node' && UI.tabs.node === 'bridge');
   return [h('p', { class: 'muted', style: 'margin:0 0 14px' }, 'Клиенты подключаются к серверу входа в России, а в интернет выходят с этой ноды. Если заблокируют вход — меняется только вход, нода остаётся.'),
     rs.length ? h('div', { class: 'list', style: 'margin-bottom:14px' }, rs.map(r => { const [cls, w] = RL_ST[r.status] || ['off', r.status];
       return h('button', { type: 'button', class: 'li', onclick: () => { UI.relay = { node: n.id, id: r.id }; render(); } }, h('div', { class: 'ic-tile' }, ic('route')),
@@ -97,7 +101,7 @@ function relayAdd(n, d) {
 
 function relayDetail(n, d, x) {
   const running = ['new', 'buying', 'installing'].includes(x.status), [cls, w] = RL_ST[x.status] || ['off', x.status];
-  if (running) setTimeout(() => { if (UI.relay && UI.relay.id === x.id && parse().name === 'node') reloadDetail(n); }, 3500);
+  if (running) pollDetail(n, 3500, () => UI.relay && UI.relay.id === x.id && parse().name === 'node');
   const act = (fn, ok) => async e => busyBtn(e, async () => { try { const r = await fn(); if (ok || (r && r.message)) toast(ok || r.message); reloadDetail(n); } catch (y) { toast('Не получилось', y.message, 'bad'); } });
   const shared = (d.relays || []).filter(o => o.id !== x.id && o.ip && o.ip === x.ip).length;
   const sshAsk = exit => { const v = { pw: '', forget: true }, err = h('div', { class: 'err', role: 'alert' });
