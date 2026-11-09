@@ -72,9 +72,9 @@ function relayAdd(n, d) {
       body = [fld('Где', h('div', { class: 'chips' }, C.c.locations.map(l => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(R.loc === l.code),
           onclick: () => { R.loc = l.code; if (R.idx !== 'custom') R.idx = [...l.offers].sort((a, b) => a.price_kop - b.price_kop)[0].idx; render(); } }, l.flag ? h('span', { class: 'flag' }, l.flag) : null, l.name))),
         (n.country && R.loc === n.country.toLowerCase() ? 'Та же страна, что у ноды, — задержка почти не вырастет. ' : '') + 'Входу хватит самого маленького тарифа: он только пересылает трафик.'),
-        L ? fld('Тариф', h('div', { class: 'choice' }, [...L.offers].sort((a, b) => a.price_kop - b.price_kop).map(o => opt(o.idx === R.idx, `${o.cpu} vCPU · ${o.ram} ГБ`, `диск ${o.disk} ГБ` + (o.speed ? ' · ' + o.speed : ''),
-          () => { R.idx = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес')))).concat(customOpt ? [customOpt] : [])),
-          customForm, C.c.balance_kop != null ? `На балансе ${rubK(C.c.balance_kop)} (${C.c.buyer}).` : null) : null];
+        L ? fld('Тариф', h('div', null, h('div', { class: 'choice' }, [...L.offers].sort((a, b) => a.price_kop - b.price_kop).map(o => opt(o.idx === R.idx, `${o.cpu} vCPU · ${o.ram} ГБ`, `диск ${o.disk} ГБ` + (o.speed ? ' · ' + o.speed : ''),
+          () => { R.idx = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес')))).concat(customOpt ? [customOpt] : [])), customForm),
+          C.c.balance_kop != null ? `На балансе ${rubK(C.c.balance_kop)} (${C.c.buyer}).` : null) : null];
     }
   } else if (R.src === 'server') {
     const Sv = UI.rlSrv && UI.rlSrv.pid === n.pid ? UI.rlSrv : null;
