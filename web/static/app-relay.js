@@ -48,13 +48,33 @@ function relayAdd(n, d) {
     if (!C || C.loading) body = sk(180);
     else if (C.err) body = empty('alert', 'Bobr Cloud не ответил', C.err, btn('Повторить', () => { UI.rlCat = null; render(); }, 'primary'));
     else { const L = C.c.locations.find(l => l.code === R.loc);
-      pick = L && L.offers.find(o => o.idx === R.idx);
+      const conf = C.c.configurator;
+      if (R.idx === 'custom') {  // своя конфигурация: цену считает Bobr Cloud под выбранную локацию
+        const sp = R.spec || (R.spec = { cpu: conf.cpu.min, ram: conf.ram.min, disk: conf.disk.min });
+        const qk = [n.pid, R.loc, sp.cpu, sp.ram, sp.disk].join('/');
+        if (!R.q || R.q.k !== qk) {
+          R.q = { k: qk, loading: true };
+          clearTimeout(R.qt);
+          R.qt = setTimeout(() => api(`quote?pid=${n.pid}&location=${R.loc}&cpu=${sp.cpu}&ram=${sp.ram}&disk=${sp.disk}`)
+            .then(o => { if (R.q.k === qk) R.q = { k: qk, o }; }).catch(e => { if (R.q.k === qk) R.q = { k: qk, err: e.message }; }).then(() => render(true)), 400);
+        }
+        pick = R.q.o || null;
+      } else pick = L && L.offers.find(o => o.idx === R.idx);
+      const customOpt = conf ? opt(R.idx === 'custom', 'Своя конфигурация', 'vCPU, память и диск — сколько нужно', () => { R.idx = 'custom'; render(); },
+        R.idx === 'custom' && R.q && R.q.o ? h('span', { class: 'price' }, rubK(R.q.o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес')) : null) : null;
+      const customForm = conf && R.idx === 'custom' ? h('div', { class: 'form', style: 'margin-top:12px' },
+        [['cpu', 'vCPU'], ['ram', 'Память, ГБ'], ['disk', 'Диск, ГБ']].map(([k, t]) => fld(t,
+          h('input', { class: 'inp mono', type: 'number', inputmode: 'numeric', min: conf[k].min, max: conf[k].max, step: conf[k].step || 1, value: String(R.spec[k]), style: 'max-width:140px',
+            onchange: e => { const v = Math.round(+e.target.value); R.spec[k] = Math.min(conf[k].max, Math.max(conf[k].min, isFinite(v) ? v : conf[k].min)); render(); } }),
+          `от ${conf[k].min} до ${conf[k].max}` + ((conf[k].step || 1) > 1 ? `, шаг ${conf[k].step}` : ''))),
+        h('div', { class: 'muted', style: 'font-size:13px' }, R.q && R.q.loading ? 'Считаю цену в Bobr Cloud…' : R.q && R.q.err ? 'Цена: ' + R.q.err
+          : R.q && R.q.o ? `${rubK(R.q.o.price_kop)} в месяц` + (R.q.o.speed ? ' · ' + R.q.o.speed : '') : '')) : null;
       body = [fld('Где', h('div', { class: 'chips' }, C.c.locations.map(l => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(R.loc === l.code),
-          onclick: () => { R.loc = l.code; R.idx = [...l.offers].sort((a, b) => a.price_kop - b.price_kop)[0].idx; render(); } }, l.flag ? h('span', { class: 'flag' }, l.flag) : null, l.name))),
+          onclick: () => { R.loc = l.code; if (R.idx !== 'custom') R.idx = [...l.offers].sort((a, b) => a.price_kop - b.price_kop)[0].idx; render(); } }, l.flag ? h('span', { class: 'flag' }, l.flag) : null, l.name))),
         (n.country && R.loc === n.country.toLowerCase() ? 'Та же страна, что у ноды, — задержка почти не вырастет. ' : '') + 'Входу хватит самого маленького тарифа: он только пересылает трафик.'),
         L ? fld('Тариф', h('div', { class: 'choice' }, [...L.offers].sort((a, b) => a.price_kop - b.price_kop).map(o => opt(o.idx === R.idx, `${o.cpu} vCPU · ${o.ram} ГБ`, `диск ${o.disk} ГБ` + (o.speed ? ' · ' + o.speed : ''),
-          () => { R.idx = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес'))))),
-          C.c.balance_kop != null ? `На балансе ${rubK(C.c.balance_kop)} (${C.c.buyer}).` : null) : null];
+          () => { R.idx = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес')))).concat(customOpt ? [customOpt] : [])),
+          customForm, C.c.balance_kop != null ? `На балансе ${rubK(C.c.balance_kop)} (${C.c.buyer}).` : null) : null];
     }
   } else if (R.src === 'server') {
     const Sv = UI.rlSrv && UI.rlSrv.pid === n.pid ? UI.rlSrv : null;
@@ -82,7 +102,7 @@ function relayAdd(n, d) {
   const submit = async () => {
     const body2 = { mode: 'egames', exit_egames: R.exitEg, final_mask: R.mask, final_mask_json: R.mask ? MASK_DEF : undefined, listen: R.custom ? R.port : '443', remark: R.remark,
       target_port: String(d.relay_port || 443), source: R.src, background: true,
-      ...(R.src === 'buy' ? { location: R.loc, idx: R.idx } : R.src === 'server' ? { server_id: R.sid, convert: !!conv } : { ip: R.ip, ...R.ssh }) };
+      ...(R.src === 'buy' ? (R.idx === 'custom' ? { location: R.loc, idx: null, custom: { ...R.spec } } : { location: R.loc, idx: R.idx }) : R.src === 'server' ? { server_id: R.sid, convert: !!conv } : { ip: R.ip, ...R.ssh }) };
     const r = await api(`profiles/${n.pid}/nodes/${n.uuid}/relays`, 'POST', body2);
     UI.rlf = null; UI.relay = { node: n.id, id: r.id }; reloadDetail(n);
     toast(r.pending ? 'Мост ставится' : r.ok ? 'Вход работает' : 'Мост поставлен с замечаниями', r.pending ? 'Ход — здесь же, обычно 3–8 минут' : r.message, r.ok || r.pending ? 'ok' : 'bad');

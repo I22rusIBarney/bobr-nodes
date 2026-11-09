@@ -1316,14 +1316,23 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             L = next((x for x in cat['locations'] if x['code'] == loc), None)
             if not L:
                 raise ApiError('Этой локации сейчас нет в Bobr Cloud')
-            o = next((x for x in L['offers'] if x['idx'] == b.get('idx')), None)
+            if b.get('idx') is None and isinstance(b.get('custom'), dict):  # своя конфигурация из конструктора
+                try:
+                    o = await svc.custom_offer(store, p, cat, loc, b['custom'])
+                except ValueError as e:
+                    raise ApiError(str(e)) from None
+                except BcloudError as e:
+                    raise ApiError(f'Bobr Cloud: {e}') from None
+            else:
+                o = next((x for x in L['offers'] if x['idx'] == b.get('idx')), None)
             if not o:
                 raise ApiError('Выберите тариф')
             ip = ''
             pw = secrets.token_urlsafe(18)
             b = {**b, 'user': 'root', 'port': 22, 'password': pw, 'key': ''}
             extra.update(loc=loc, flag=L['flag'], bought=True, price_kop=o['price_kop'], spec=svc.spec_text(o),
-                         buy={'location': loc, 'os': cat['os_code'], 'idx': o['idx']})
+                         buy={'location': loc, 'os': cat['os_code'], 'idx': o['idx'],
+                              **({'spec': {k: o[k] for k in ('cpu', 'ram', 'disk')}} if o['idx'] is None else {})})
         others = [x for x in store.relays() if ip and x['ip'] == ip]
         if any(not can(request, store.profile(x['pid'])) for x in others):
             raise ApiError('Этот сервер уже используют для входа в другой группе')
@@ -1384,7 +1393,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         # новый сервер: покупка сейчас (деньги и ошибки Bobr Cloud — сразу в ответе), проброс — когда сервер создастся
         bc = bcloud_from(store, buyer_of(store, p))
         try:
-            srv = await bc.buy(x['buy']['location'], x['buy']['os'], x['buy']['idx'], '1m', acc['password'])
+            srv = await bc.buy(x['buy']['location'], x['buy']['os'], x['buy']['idx'], '1m', acc['password'], spec=x['buy'].get('spec'))
         except BcloudError as e:
             raise ApiError(f'Bobr Cloud: {e}') from None
         x.update(server_id=int(srv['id']), status='buying', stage='wait', buying_since=int(time.time()),
