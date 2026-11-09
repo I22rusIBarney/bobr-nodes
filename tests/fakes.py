@@ -390,6 +390,8 @@ def make_fake_remote(engine, mock_sh: str, behaviour: dict):
                 return 0, ''
             if cmd == 'id -u':
                 return 0, '0\n'
+            if 'APT_FREE' in cmd:  # перед установкой: apt не занят автообновлениями
+                return 0, 'APT_FREE 0\n'
             if 'authorized_keys' in cmd:
                 return 0, ''
             if 'NV_DONE' in cmd:

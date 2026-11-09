@@ -46,7 +46,7 @@ def test_installer_forgets_changed_hostkey_once(monkeypatch):
     monkeypatch.setattr(engine, 'forget_host', lambda kh, h, p=22: forgot.append((kh, h, p)))
     r = engine.Remote({'ip': '192.0.2.1', 'known_hosts': '/tmp/kh', 'ssh_port': 2222}, None)
     engine.wait_ssh(r, logs.append, timeout=60)
-    assert forgot == [('/tmp/kh', '192.0.2.1', 2222)] and len(calls) == 2
+    assert forgot == [('/tmp/kh', '192.0.2.1', 2222)] and calls.count('id -u') == 2
     assert any('забыт' in x for x in logs)
 
 
@@ -64,3 +64,23 @@ def test_installer_stops_if_hostkey_changes_again(monkeypatch):
         assert str(e) == engine.HOSTKEY_CHANGED and forgot == ['192.0.2.1']
     else:
         raise AssertionError('повторная смена ключа не остановила установку')
+
+
+def test_install_waits_for_unattended_upgrades():
+    class R:
+        def __init__(self, out):
+            self.out, self.cmds = out, []
+
+        def run(self, cmd, timeout=120):
+            self.cmds.append(cmd)
+            return 0, self.out
+    logs = []
+    r = R('APT_UU\nAPT_FREE 45\n')
+    engine.free_apt(r, logs.append)
+    assert 'pkill -TERM -x unattended-upgr' in r.cmds[0] and 'apt-daily-upgrade.timer' not in r.cmds[0]
+    assert any('автообновления' in x and '45' in x for x in logs)
+    logs.clear()
+    engine.free_apt(R('APT_FREE 0\n'), logs.append)
+    assert logs == []
+    engine.free_apt(R('APT_BUSY\n'), logs.append)
+    assert any('подождёт' in x for x in logs)

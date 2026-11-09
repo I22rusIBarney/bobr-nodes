@@ -1372,6 +1372,7 @@ def wait_ssh(r: Remote, log, timeout=600):
             rc, out = r.run('id -u', 30)
             if rc == 0 and out.strip().splitlines()[-1:] == ['0']:
                 log('SSH доступен, вход под root')
+                free_apt(r, log)
                 return
             last = out.strip()[-120:] or f'код {rc}'
             if 'не принял пароль' in last:
@@ -1388,6 +1389,34 @@ def wait_ssh(r: Remote, log, timeout=600):
                 raise StepError(last if last == HOSTKEY_CHANGED else f'не удалось войти по SSH под root: {last}') from None
         time.sleep(15)
     raise StepError(f'не удалось войти по SSH под root: {last}')
+
+
+# Свежий сервер часто сразу после запуска ставит обновления безопасности (unattended-upgrades) и держит блокировку
+# apt — установщик тогда минутами пишет «Waiting for cache lock». Просим автообновление остановиться штатно (SIGTERM:
+# оно доделывает текущий пакет и выходит, dpkg не ломается) и ждём освобождения. Таймеры не трогаем — обновления
+# безопасности дальше идут по расписанию.
+FREE_APT = (
+    'busy() { pgrep -x unattended-upgr >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -x dpkg >/dev/null; }; '
+    'busy || { echo APT_FREE 0; exit 0; }; '
+    'pgrep -x unattended-upgr >/dev/null && echo APT_UU; '
+    'systemctl stop apt-daily-upgrade.service apt-daily.service >/dev/null 2>&1; pkill -TERM -x unattended-upgr 2>/dev/null; '
+    'i=0; while [ $i -lt 300 ]; do busy || { echo APT_FREE $i; exit 0; }; sleep 5; i=$((i+5)); done; echo APT_BUSY'
+)
+
+
+def free_apt(r, log) -> None:
+    """Перед установкой: дождаться, пока система не занята apt/dpkg (не дольше 5 минут, дальше — как есть)."""
+    try:
+        _, out = r.run(FREE_APT, 360)
+    except StepError as e:
+        log(f'не проверил занятость apt: {e}')
+        return
+    m = re.search(r'APT_FREE (\d+)', out)
+    if 'APT_UU' in out or (m and int(m.group(1))):
+        log('на сервере шли автообновления системы — попросил их остановиться'
+            + (f', apt свободен через {m.group(1)} с' if m else ''))
+    if 'APT_BUSY' in out:
+        log('apt всё ещё занят другим процессом — установка подождёт сама (до 10 минут)')
 
 
 def remote_install_cmd(ref, sha, resume, long_key):
