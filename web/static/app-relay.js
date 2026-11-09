@@ -61,7 +61,8 @@ function relayAdd(n, d) {
       const pickRow = (x, sub, isConv) => h('button', { type: 'button', class: 'li', onclick: () => { R.sid = x.id; R.convert = isConv; render(); } },
         h('span', { class: 'cb-m' + (R.sid === x.id ? ' on' : ''), style: 'border-radius:50%' }, R.sid === x.id ? ic('check') : null),
         h('div', { class: 'grow' }, h('div', { class: 't' }, `${x.flag || ''} ${x.name || x.ip}`), h('div', { class: 's', style: 'white-space:normal' }, sub)));
-      body = [fld('Свободные серверы', ok.length ? h('div', { class: 'list', style: 'background:var(--sheet-2)' }, ok.map(x => pickRow(x, [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ`, x.relay ? 'уже вход для другой ноды' : ''].filter(Boolean).join(' · '), false)))
+      body = [fld('Свободные серверы', ok.length ? h('div', { class: 'list', style: 'background:var(--sheet-2)' }, ok.map(x => pickRow(x, [x.ip, `${x.cpu} vCPU, ${x.ram} ГБ`, x.relay ? 'уже вход для другой ноды' : '',
+            x.stale ? `система переустановлена — прежняя нода ${x.stale.domain || x.stale.ip} уйдёт из панели` : ''].filter(Boolean).join(' · '), false)))
           : h('div', { class: 'muted' }, cv.length ? 'Свободных нет — можно переделать сервер с нодой (ниже).' : 'Свободных серверов нет — купите новый.'), 'Пароль root бот возьмёт из Bobr Cloud.'),
         cv.length ? fld('С нодой — переделать в мост', h('div', { class: 'list', style: 'background:var(--sheet-2)' }, cv.map(x => pickRow(x, `${x.ip} · нода ${x.node.domain || x.ip} будет убрана`, true))),
           'Бот остановит ноду, уберёт её хосты из панели и A-запись, затем поставит мост. Пользователи этой ноды переключатся на другие ноды подписки.') : null];

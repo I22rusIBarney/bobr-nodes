@@ -134,7 +134,7 @@ function wizWhere(w) {
         : !w.own.length ? empty('server', 'Серверов нет', 'В Bobr Cloud у покупателя этой группы нет купленных серверов.')
         : h('div', { class: 'list' }, w.own.map(s => h('label', { class: 'switch', style: s.ready ? '' : 'opacity:.55;cursor:default' },
           h('input', { type: 'checkbox', class: 'cb', disabled: !s.ready, checked: w.sel.has(s.id), onchange: e => { e.target.checked ? w.sel.add(s.id) : w.sel.delete(s.id); render(); } }),
-          h('span', { class: 'grow' }, h('b', null, `${s.flag || ''} ${s.name || s.ip}`), h('span', null, `${s.loc_name} · ${s.cpu} vCPU, ${s.ram} ГБ, ${s.disk} ГБ · ${s.ip}` + (s.ready ? '' : ` · ${s.why}`))))))) : null,
+          h('span', { class: 'grow' }, h('b', null, `${s.flag || ''} ${s.name || s.ip}`), h('span', null, `${s.loc_name} · ${s.cpu} vCPU, ${s.ram} ГБ, ${s.disk} ГБ · ${s.ip}` + (s.ready ? (s.stale ? ` · система переустановлена — прежняя нода ${s.stale.domain || s.stale.ip} уйдёт из панели` : '') : ` · ${s.why}`))))))) : null,
     w.src === 'buy' ? h('div', { class: 'block' }, h('h4', null, 'Страны'), !w.cat.locations.length ? h('div', { class: 'muted' }, 'В Bobr Cloud сейчас нет доступных локаций.')
       : h('div', { class: 'chips' }, w.cat.locations.map(l => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(w.locs.includes(l.code)),
         onclick: () => { w.locs = w.locs.includes(l.code) ? w.locs.filter(x => x !== l.code) : [...w.locs, l.code]; render(); } },

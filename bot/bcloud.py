@@ -119,9 +119,10 @@ class Bcloud:
     async def rename(self, sid: int, name: str) -> None:
         await self._call('POST', f'/servers/{sid}/rename', json={'tg_id': self.tg_id, 'name': name})
 
-    async def set_bridge(self, sid: int, role: str, peer: str = '') -> None:
-        """Пометить сервер в кабинете Bobr Cloud: entry — вход моста, exit — выход, '' — снять отметку."""
-        await self._call('POST', f'/servers/{sid}/bridge', json={'tg_id': self.tg_id, 'role': role, 'peer': peer})
+    async def set_bridge(self, sid: int, role: str, peer: str = '', link: list[int] | None = None) -> None:
+        """Пометить сервер в кабинете Bobr Cloud: entry — вход моста, exit — выход, '' — снять отметку.
+        link — id связанных серверов: в кабинете они стоят рядом."""
+        await self._call('POST', f'/servers/{sid}/bridge', json={'tg_id': self.tg_id, 'role': role, 'peer': peer, 'link': link or []})
 
     async def delete(self, sid: int) -> dict:
         """Удалить сервер владельца в Bobr Cloud (возврат остатка — по настройкам Bobr Cloud)."""
