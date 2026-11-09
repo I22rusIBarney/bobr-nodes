@@ -167,6 +167,10 @@ svg.i { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none;
 .attn-item .what b { display: block; font-weight: 600; }
 .attn-item .what span { color: var(--ink-2); font-size: 13.5px; }
 .attn-item .acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.attn-item.swipe { touch-action: pan-y; position: relative; }
+.attn-x { display: none; background: none; border: 0; color: var(--ink-3, var(--ink-2)); padding: 6px; border-radius: 8px; cursor: pointer; }
+.attn-x:hover { color: var(--ink); background: var(--rule); }
+@media (hover: hover) and (pointer: fine) { .attn-x { display: inline-flex; align-items: center; } }
 .attn-ic { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; }
 .attn-ic.bad { background: var(--air-red-soft); color: var(--air-red); } .attn-ic.warn { background: var(--warn-soft); color: var(--warn); } .attn-ic.run { background: var(--run-soft); color: var(--run); }
 .all-clear { display: flex; align-items: center; gap: 14px; padding: 18px; }

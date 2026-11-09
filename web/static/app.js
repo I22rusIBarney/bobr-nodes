@@ -309,48 +309,95 @@ async function retryJob(j) {
 /* ── «Требует внимания» ── */
 function attention() {
   const ns = allNodes(), out = [], st = D.st;
-  if (st.issues && st.issues.length) out.push({ sev: 'warn', icon: 'sliders', title: 'Нужна настройка', text: st.issues.join(', '),
+  if (st.issues && st.issues.length) out.push({ key: 'issues:' + st.issues.join(','), sev: 'warn', icon: 'sliders', title: 'Нужна настройка', text: st.issues.join(', '),
     acts: [{ l: 'Настроить', p: 1, fn: () => go(isAdmin() ? 'settings/connections' : 'groups') }] });
-  if (st.host && st.host.level === 'bad') out.push({ sev: 'bad', icon: 'server', title: 'Серверу бота не хватает ресурсов', text: `Процессор ${st.host.cpu ?? '—'}%, память ${st.host.mem ?? '—'}%`,
+  if (st.host && st.host.level === 'bad') out.push({ key: 'host', sev: 'bad', icon: 'server', title: 'Серверу бота не хватает ресурсов', text: `Процессор ${st.host.cpu ?? '—'}%, память ${st.host.mem ?? '—'}%`,
     acts: [{ l: 'Подробнее', fn: () => go('settings/health') }] });
   for (const n of ns.filter(offline))
-    out.push({ sev: 'bad', icon: 'unplug', title: `${n.name} не на связи`, text: `${n.group} · панель не видит ноду`,
+    out.push({ key: 'off:' + n.id, sev: 'bad', icon: 'unplug', title: `${n.name} не на связи`, text: `${n.group} · панель не видит ноду`,
       acts: [{ l: 'Открыть', p: 1, fn: () => go('node/' + n.id) }] });
   for (const n of ns.filter(waitsMe))
-    out.push({ sev: 'bad', icon: 'wallet', title: `${n.name}: нужно ваше решение`,
+    out.push({ key: 'me:' + n.id + ':' + n.mon.step, sev: 'bad', icon: 'wallet', title: `${n.name}: нужно ваше решение`,
       text: n.mon.step === 'replace' ? 'Бесплатные шаги починки не помогли. Купить новую ноду в той же локации? Домен, тариф и сквады — на ваш выбор.'
         : 'Бесплатные шаги починки не помогли. Сменить IP в Bobr Cloud? Это платно.',
       acts: [{ l: n.mon.step === 'replace' ? 'Выбрать и купить' : 'Сменить IP', p: 1, fn: () => n.mon.step === 'replace' ? replaceNode(n, true) : confirmReip(n) }, { l: 'Не трогать', fn: () => ignoreNode(n) }] });
   for (const n of ns.filter(n => ruState(n) === 'bad' && !waitsMe(n)))
-    out.push({ sev: 'warn', icon: 'shieldX', title: `${n.name} не проходит из России`,
+    out.push({ key: 'ru:' + n.id, sev: 'warn', icon: 'shieldX', title: `${n.name} не проходит из России`,
       text: `${n.mon.since ? since(n.mon.since * 1000) + ' · ' : ''}${n.mon.status === 'gave_up' ? 'автопочинка не помогла · ' : ''}${n.online != null ? `у ${n.online} пользователей может не быть связи` : n.group}. Платное — только после вашего подтверждения`,
       acts: [{ l: 'Починить', p: 1, fn: () => fixNode(n) }, { l: 'Новая нода', fn: () => replaceNode(n, false) }, { l: 'Не чинить', fn: () => ignoreNode(n) }] });
   for (const a of (D.scale || []))
-    out.push({ sev: 'run', icon: 'plus', title: `${a.name} перегружена — докупить ноду рядом?`, text: `${a.group} · ${a.label}${a.price_kop ? ', ' + rubK(a.price_kop) + '/мес' : ''}. Без вашего подтверждения бот ничего не покупает`,
+    out.push({ key: 'scale:' + a.name, sev: 'run', icon: 'plus', title: `${a.name} перегружена — докупить ноду рядом?`, text: `${a.group} · ${a.label}${a.price_kop ? ', ' + rubK(a.price_kop) + '/мес' : ''}. Без вашего подтверждения бот ничего не покупает`,
       acts: [{ l: 'Выбрать и докупить', p: 1, fn: () => scaleNode(a) }] });
   const failed = D.jobs.filter(j => j.status === 'failed' && Date.now() / 1000 - j.updated_at < 3 * 86400);
-  if (failed.length > 3) out.push({ sev: 'bad', icon: 'alert', title: `${pl(failed.length, 'задача', 'задачи', 'задач')} с ошибкой за 3 дня`, text: failed.slice(0, 3).map(j => j.domain).join(', ') + '…',
+  if (failed.length > 3) out.push({ key: 'failed:' + failed.map(j => j.id).join(','), sev: 'bad', icon: 'alert', title: `${pl(failed.length, 'задача', 'задачи', 'задач')} с ошибкой за 3 дня`, text: failed.slice(0, 3).map(j => j.domain).join(', ') + '…',
     acts: [{ l: 'Показать', p: 1, fn: () => { UI.af = 'failed'; go('activity'); } }] });
-  else for (const j of failed) out.push({ sev: 'bad', icon: 'alert', title: `${jobTitle(j)} — ошибка`, text: j.error || `остановилась на шаге «${j.stage}»`,
+  else for (const j of failed) out.push({ key: 'job:' + j.id, sev: 'bad', icon: 'alert', title: `${jobTitle(j)} — ошибка`, text: j.error || `остановилась на шаге «${j.stage}»`,
     acts: [{ l: 'Повторить', p: 1, fn: () => retryJob(j) }, { l: 'Подробнее', fn: () => go('task/' + j.id) }] });
   for (const n of ns.filter(rentSoon))
-    out.push({ sev: 'warn', icon: 'clock', title: `Аренда ${n.name} кончится через ${pl(Math.max(0, Math.round(n.rent.days_left)), 'день', 'дня', 'дней')}`,
+    out.push({ key: 'rent:' + n.id, sev: 'warn', icon: 'clock', title: `Аренда ${n.name} кончится через ${pl(Math.max(0, Math.round(n.rent.days_left)), 'день', 'дня', 'дней')}`,
       text: n.rent.risk || `Автопродление выключено · ${rubK(n.rent.price_kop)} за 30 дней`, acts: [{ l: 'Продлить', p: 1, fn: () => renew(n) }, { l: 'Открыть', fn: () => go('node/' + n.id) }] });
   const old = ns.filter(outdated);
-  if (old.length) out.push({ sev: 'run', icon: 'up', title: `${pl(old.length, 'нода', 'ноды', 'нод')} на старой версии`, text: `Есть ${old[0].target}`,
+  if (old.length) out.push({ key: 'old:' + old[0].target + ':' + old.length, sev: 'run', icon: 'up', title: `${pl(old.length, 'нода', 'ноды', 'нод')} на старой версии`, text: `Есть ${old[0].target}`,
     acts: [{ l: 'Обновить все', p: 1, fn: () => updateNodes(old) }, { l: 'Показать', fn: () => { UI.nf = { ...UI.nf, status: 'old', cc: null, q: '', group: 'all' }; go('nodes'); } }] });
   return out;
 }
+/* Смахнуть уведомление: скрыто на этом устройстве, пока проблема не уйдёт (или сутки) — вернётся, если случится снова.
+   Нужен ключ, связанный с самой проблемой: другая проблема по той же ноде — новое уведомление. */
+const ATTN_KEY = 'bn-attn-hidden', ATTN_TTL = 86400e3;
+let attnHidden = {};
+try { attnHidden = JSON.parse(localStorage.getItem(ATTN_KEY) || '{}') || {}; } catch (e) { /* без хранилища */ }
+const attnSave = () => { try { localStorage.setItem(ATTN_KEY, JSON.stringify(attnHidden)); } catch (e) { /* без хранилища */ } };
+function attnVisible(items, settled) {
+  const now = Date.now(), live = new Set(items.map(a => a.key));
+  let changed = false;
+  for (const k of Object.keys(attnHidden))  // проблема ушла (данные загружены целиком) или прошли сутки — забываем
+    if (now - attnHidden[k] > ATTN_TTL || (settled && !live.has(k))) { delete attnHidden[k]; changed = true; }
+  if (changed) attnSave();
+  return items.filter(a => !a.key || !attnHidden[a.key]);
+}
+function attnDismiss(a) {
+  attnHidden[a.key] = Date.now(); attnSave(); render(true);
+  toast('Скрыто', 'Вернётся, если проблема останется через сутки или случится снова', 'info',
+    { l: 'Вернуть', fn: () => { delete attnHidden[a.key]; attnSave(); render(true); } });
+}
+function attnSwipe(el, a) {  // горизонтальный свайп; вертикальная прокрутка и нажатия на кнопки — как раньше
+  let x0 = 0, y0 = 0, dx = 0, dir = '';
+  el.addEventListener('touchstart', e => { const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; dx = 0; dir = ''; el.style.transition = 'none'; }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    const t = e.touches[0], mx = t.clientX - x0, my = t.clientY - y0;
+    if (!dir && Math.abs(mx) + Math.abs(my) > 8) dir = Math.abs(mx) > Math.abs(my) * 1.3 ? 'x' : 'y';
+    if (dir !== 'x') return;
+    e.preventDefault(); dx = mx;
+    el.style.transform = `translateX(${dx}px)`; el.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / el.offsetWidth));
+  }, { passive: false });
+  const end = () => {
+    if (dir !== 'x') return;
+    el.style.transition = 'transform .2s ease, opacity .2s ease';
+    if (Math.abs(dx) > el.offsetWidth * 0.35) {
+      el.style.transform = `translateX(${dx > 0 ? '' : '-'}110%)`; el.style.opacity = '0';
+      setTimeout(() => attnDismiss(a), 180);
+    } else { el.style.transform = ''; el.style.opacity = ''; }
+    dir = '';
+  };
+  el.addEventListener('touchend', end); el.addEventListener('touchcancel', end);
+  el.addEventListener('click', e => { if (Math.abs(dx) > 8) { e.stopPropagation(); e.preventDefault(); } }, true);  // свайп — не нажатие
+}
 function attnRow(a) {
-  return h('div', { class: 'attn-item' }, h('div', { class: 'attn-ic ' + a.sev }, ic(a.icon)),
+  const el = h('div', { class: 'attn-item' + (a.key ? ' swipe' : '') }, h('div', { class: 'attn-ic ' + a.sev }, ic(a.icon)),
     h('div', { class: 'what' }, h('b', null, a.title), h('span', null, a.text)),
-    h('div', { class: 'acts' }, a.acts.map(x => btn(x.l, x.fn, 's ' + (x.p ? 'primary' : '')))));
+    h('div', { class: 'acts' }, a.acts.map(x => btn(x.l, x.fn, 's ' + (x.p ? 'primary' : ''))),
+      a.key ? h('button', { type: 'button', class: 'attn-x', title: 'Скрыть', 'aria-label': 'Скрыть уведомление', onclick: () => attnDismiss(a) }, ic('x')) : null));
+  if (a.key) attnSwipe(el, a);
+  return el;
 }
 const jobTitle = j => (j.spec && j.spec.startsWith('Xray') ? j.spec.split(' ').slice(0, 2).join(' ') + ' · ' : j.spec && j.spec.startsWith('обновление') ? 'Обновление ' : j.spec === 'смена IP' ? 'Смена IP ' : j.spec === 'дополнения на ноде' ? 'Дополнения ' : 'Установка ') + (j.loc_name && !/[А-я]/.test(j.loc_name) ? j.loc_name : j.domain);
 
 /* ── Обзор ── */
 function vOverview() {
-  const ns = allNodes(), items = attention(), gs = groups();
+  const ns = allNodes(), gs = groups();
+  const all = attention(), items = attnVisible(all, gs.every(p => D.nodes[p.id] || D.nerr[p.id]) && !D.cachedAt), hiddenN = all.length - items.length;
+  const showHidden = hiddenN ? h('button', { type: 'button', class: 'btn ghost s', style: 'margin-top:8px', onclick: () => { attnHidden = {}; attnSave(); render(true); } },
+    `Показать скрытые (${hiddenN})`) : null;
   if (!gs.length) return [pageH('Добро пожаловать', 'Подключите панель Remnawave — бот начнёт ставить в неё ноды и следить за ними.'),
     empty('layers', 'Групп пока нет', 'Группа — это панель Remnawave со своим доменом и нодами.', btn('Подключить панель', newGroup, 'primary', 'plus'))];
   const cnt = f => ns.filter(f).length;
@@ -369,7 +416,10 @@ function vOverview() {
       h('div', { class: 'section-h' }, h('h2', { id: 'h-attn' }, 'Требует внимания'), items.length ? h('span', { class: 'tag' }, items.length) : null),
       items.length ? h('div', { class: 'airmail' }, h('div', { class: 'inner' }, items.map(attnRow)))
         : h('div', { class: 'sheet all-clear' }, h('div', { class: 'attn-ic', style: 'background:var(--ok-soft);color:var(--ok)' }, ic('check')),
-          h('div', null, h('b', null, loadingNodes ? 'Проверяю панели…' : 'Всё в порядке'), h('div', { class: 'muted' }, loadingNodes ? 'Загружаю свежие данные с панелей групп.' : 'Ноды на связи и проходят из России. Если что-то случится, бот напишет в Telegram.')))),
+          h('div', null, h('b', null, loadingNodes ? 'Проверяю панели…' : hiddenN ? 'Новых проблем нет' : 'Всё в порядке'),
+            h('div', { class: 'muted' }, loadingNodes ? 'Загружаю свежие данные с панелей групп.' : hiddenN ? 'Остальные уведомления вы скрыли — они вернутся, если проблема не уйдёт за сутки.'
+              : 'Ноды на связи и проходят из России. Если что-то случится, бот напишет в Telegram.'))),
+      showHidden),
     h('div', { class: 'grid2' },
       h('div', null,
         h('section', { class: 'section' },
