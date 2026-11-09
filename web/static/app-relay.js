@@ -206,7 +206,7 @@ function relayDetail(n, d, x) {
         : dangerRow('shield', 'Переделать как в eGames', shared ? 'На сервере есть другие входы — сначала уберите их' : 'REALITY «под себя» на своём домене, до выхода — Shadowsocks. Клиентам нужно обновить подписку',
           shared ? null : btn('Переделать', () => confirmAct({ title: 'Переделать мост?', icon: ['shield', 'run'], ok: 'Переделать', text: 'Бот уберёт прежний мост из панели и с сервера, даст входу имя на вашем домене, выпустит сертификат и поставит ноду с REALITY. Сервер и оплата не меняются.',
             fn: async () => { await api(`relays/${x.id}/to-xray`, 'POST', { mode: 'egames', exit_egames: false }); reloadDetail(n); } }), 's'))) : null,
-    (x.log || []).length ? [h('div', { class: 'section-h' }, h('h2', null, running ? 'Журнал' : 'Последняя установка')), h('div', { class: 'log', style: 'margin-bottom:14px' }, x.log.slice(-16).join('\n'))] : null,
+    (x.log || []).length ? [h('div', { class: 'section-h' }, h('h2', null, running ? 'Журнал' : 'Последняя установка')), h('div', { class: 'log', style: 'margin-bottom:14px', 'data-keep': 'rllog' + x.id, 'data-tail': '' }, x.log.slice(-16).join('\n'))] : null,
     h('div', { class: 'list' },
       dangerRow('key', 'Забыть ключ сервера', 'Только если систему на сервере переустанавливали', btn('Забыть', () => confirmAct({ title: 'Забыть ключ сервера?', icon: ['key', 'warn'], ok: 'Забыть',
         text: 'Нужно, только если систему на сервере переустанавливали. Иначе смена ключа — признак подмены сервера.', fn: async () => { const r = await api(`relays/${x.id}/forget-hostkey`, 'POST'); toast(r.message || 'Готово'); } }), 's')),
