@@ -1386,6 +1386,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                       time.strftime('%H:%M:%S ') + 'жду, пока Bobr Cloud создаст сервер и выдаст IP'])
         x['id'] = store.save_relay(x)
         relay_bg(x['id'])
+        bridge_kick()
         return J({'id': x['id'], 'ok': True, 'pending': True,
                   'message': f'Купил сервер {x["flag"]} {x["spec"]} за {x["price_kop"] // 100} ₽/мес — поставлю проброс, '
                              'когда Bobr Cloud его создаст (обычно 1–3 минуты)'})
@@ -1455,6 +1456,29 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 relay_start(store.relay(x['id']), store.profile(x['pid']), wait=x.get('source') in ('server', 'buy'))
     app.on_startup.append(relay_resume)
 
+    # отметки мостов в кабинете Bobr Cloud: после изменений входов и раз в 15 минут (на случай ручных правок)
+    bridge_state = {'task': None}
+
+    async def bridge_sync(delay: float) -> None:
+        await asyncio.sleep(delay)
+        bridge_state['task'] = None
+        try:
+            await svc.sync_bridge_marks(store)
+        except Exception:  # noqa: BLE001 — отметки не должны мешать мостам
+            logging.getLogger(__name__).exception('bridge marks sync failed')
+
+    def bridge_kick(delay: float = 10) -> None:
+        if not bridge_state['task']:
+            bridge_state['task'] = asyncio.get_running_loop().create_task(bridge_sync(delay))
+
+    async def bridge_loop(_app) -> None:
+        async def loop():
+            while True:
+                bridge_kick(60)
+                await asyncio.sleep(15 * 60)
+        _app['bridge_loop'] = asyncio.get_running_loop().create_task(loop())
+    app.on_startup.append(bridge_loop)
+
     def relay_say(rid: int, line: str | None = None, stage: str | None = None, **fields) -> None:
         """Ход установки входа — в его запись: этап и строка журнала (страница входа показывает их сразу)."""
         rec = store.relay(rid)
@@ -1466,6 +1490,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             rec['log'] = ((rec.get('log') or []) + [time.strftime('%H:%M:%S ') + line])[-40:]
         rec.update(fields)
         store.save_relay(rec)
+        if 'status' in fields:
+            bridge_kick()
 
     async def relay_run(x: dict, p: dict, ip: str, closed: list[int] = (), wait: bool = False) -> dict:
         """Применить проброс на сервере и, если хостов ещё нет, создать их. Итог — в записи входа.
@@ -2035,6 +2061,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         drop_server = request.query.get('server') == '1' and x.get('server_id') and p
         if not x.get('ip'):  # сервер под мост ещё создаётся — проброса нигде нет
             store.delete_relay(x['id'])
+            bridge_kick()
             if drop_server:
                 try:
                     await bcloud_from(store, buyer_of(store, p)).delete(int(x['server_id']))
@@ -2046,6 +2073,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         if x.get('mode') in xb.ROUTED:
             async with lock:
                 store.delete_relay(x['id'])
+                bridge_kick()
                 try:
                     await xray_remove(x, p, lines.append)
                 except (engine.StepError, OSError) as e:
@@ -2067,6 +2095,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             return J({'ok': True, 'message': 'Мост убран' + (' и сервер удалён' if any('удалён в Bobr' in t for t in lines) else ''), 'log': lines})
         async with lock:
             store.delete_relay(x['id'])
+            bridge_kick()
             rest = [o for o in store.relays() if o['ip'] == x['ip']]
             try:
                 if rest:

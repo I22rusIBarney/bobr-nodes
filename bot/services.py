@@ -466,3 +466,66 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
         await runner.render(jid, force=True)
         runner.start(jid)
     return ids
+
+
+def bridge_marks(store: Store) -> dict[int, dict[int, tuple[str, list]]]:
+    """Какие серверы Bobr Cloud — мосты: покупатель → {id сервера: (роль, с чем связан)}.
+    Вход — сервер входа (связан с нодой-выходом по имени), выход — сервер ноды, на которую ведут входы
+    (связан со входами: их id в Bobr Cloud или IP своего сервера)."""
+    want: dict[int, dict[int, tuple[str, list]]] = {}
+    jobs = [j for j in store.jobs(5000) if j['status'] != 'failed' and not j['data'].get('removed')
+            and j['data'].get('kind') not in SERVICE_KINDS and j['data'].get('server_id')]
+    for x in store.relays():
+        p = store.profile(x['pid'])
+        if not p:
+            continue
+        entry = ('id', int(x['server_id'])) if x.get('server_id') else ('ip', x.get('ip') or '')
+        if x.get('server_id'):
+            want.setdefault(buyer_of(store, p), {})[int(x['server_id'])] = ('entry', [x.get('node_name') or x.get('target') or ''])
+        j = next((j for j in jobs if x.get('target') and x['target'] in (j['data'].get('domain'), j['data'].get('ip'))), None)
+        jp = j and store.profile(j['profile_id'])
+        if jp:
+            role, peers = want.setdefault(buyer_of(store, jp), {}).get(int(j['data']['server_id']), ('exit', []))
+            if role == 'exit' and entry[1] and entry not in peers:
+                peers.append(entry)
+            want[buyer_of(store, jp)][int(j['data']['server_id'])] = (role, peers)
+    return want
+
+
+async def sync_bridge_marks(store: Store) -> int:
+    """Отметки мостов в кабинете Bobr Cloud — как в Bobr Nodes. Меняет только то, что разошлось; старый
+    Bobr Cloud без отметок пропускается молча. Возвращает, сколько серверов поправлено."""
+    if not (store.get('bcloud_url') and store.get('bcloud_token')):
+        return 0
+    want = bridge_marks(store)
+    buyers = {buyer_of(store, p) for p in store.profiles()} | set(want)
+    lists: dict[int, list[dict]] = {}
+    for b in buyers:
+        if not b:
+            continue
+        try:
+            lists[b] = await bcloud_from(store, b).servers()
+        except BcloudError:
+            continue
+    names = {int(s['id']): s.get('name') or f'#{s["id"]}' for ss in lists.values() for s in ss}
+
+    def peer_text(role: str, peers: list) -> str:
+        if role == 'entry':
+            return ', '.join(p for p in peers if p)[:120]
+        return ', '.join(names.get(v, f'#{v}') if k == 'id' else v for k, v in peers)[:120]
+    fixed = 0
+    for b, ss in lists.items():
+        if ss and 'bridge_role' not in ss[0]:
+            continue  # Bobr Cloud ещё без отметок мостов
+        mine = want.get(b, {})
+        for s in ss:
+            role, peers = mine.get(int(s['id']), ('', []))
+            peer = peer_text(role, peers) if role else ''
+            if (s.get('bridge_role') or '', s.get('bridge_peer') or '') == (role, peer):
+                continue
+            try:
+                await bcloud_from(store, b).set_bridge(int(s['id']), role, peer)
+                fixed += 1
+            except BcloudError:
+                break  # Bobr Cloud не принимает отметки (старая версия) или недоступен — в другой раз
+    return fixed
