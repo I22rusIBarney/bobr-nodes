@@ -2693,6 +2693,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                     q = svc.quote(cat, loc, idx, period, n)
             except (TypeError, ValueError) as e:
                 raise ApiError(str(e) or 'не выбрана конфигурация') from None
+            except BcloudError as e:
+                raise ApiError(f'Bobr Cloud: {e}') from None
             plan.append((loc, idx, doms, custom, None))
             total += q['total_kop']
         q = {'total_kop': total}

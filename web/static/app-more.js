@@ -21,7 +21,7 @@ function openDeploy(pid) {
 }
 function wizLoad() {
   const w = UI.wiz, pid = w.pid;
-  Object.assign(w, { cat: null, catErr: '', zones: null, zone: '', own: null, ownErr: '', locs: [], offer: {}, count: {}, sel: new Set(), domains: {} });
+  Object.assign(w, { cat: null, catErr: '', zones: null, zone: '', own: null, ownErr: '', locs: [], offer: {}, spec: {}, cq: {}, count: {}, sel: new Set(), domains: {} });
   api('catalog?pid=' + pid).then(r => { if (w.pid === pid) { w.cat = r; w.period = (r.periods[0] || {}).code || '1m'; } }).catch(e => { w.catErr = e.message; }).then(() => render(true));
   api(`profiles/${pid}/zones`).then(r => { if (w.pid === pid) { w.zones = r; w.zone = r.default || ''; } }).catch(e => { w.zones = { zones: [], error: e.message }; }).then(() => render(true));
   // сквады панели: обязательны — без них пользователи не увидят новые ноды; по умолчанию — сквады группы
@@ -51,10 +51,20 @@ function wizItems(w) {  // [{loc, n}] — сколько нод в какой л
   if (w.src === 'own') { const by = {}; (w.own || []).filter(s => w.sel.has(s.id)).forEach(s => { by[s.location] = (by[s.location] || 0) + 1; }); return Object.entries(by).map(([loc, n]) => ({ loc, n })); }
   return w.locs.map(loc => ({ loc, n: w.count[loc] || 1 }));
 }
+// тариф страны: готовый или своя конфигурация (цена — из Bobr Cloud, когда посчитана)
+const wizOffer = (w, loc) => w.offer[loc] === 'custom' ? ((w.cq || {})[loc] || {}).o || null : L(loc).offers.find(x => x.idx === w.offer[loc]);
+function wizQuote(w, loc) {  // пересчитать цену своей конфигурации, если она поменялась
+  const sp = w.spec[loc], k = [w.pid, loc, sp.cpu, sp.ram, sp.disk].join('/'), cq = w.cq || (w.cq = {});
+  if (cq[loc] && cq[loc].k === k) return;
+  cq[loc] = { k, loading: true };
+  clearTimeout((w.cqt || (w.cqt = {}))[loc]);
+  w.cqt[loc] = setTimeout(() => api(`quote?pid=${w.pid}&location=${loc}&cpu=${sp.cpu}&ram=${sp.ram}&disk=${sp.disk}`)
+    .then(o => { if (cq[loc].k === k) cq[loc] = { k, o }; }).catch(e => { if (cq[loc].k === k) cq[loc] = { k, err: e.message }; }).then(() => render(true)), 400);
+}
 function wizCost(w) {
   if (w.src !== 'buy' || !w.cat) return 0;
   const per = w.cat.periods.find(p => p.code === w.period) || { months: 1, pct: 0 };
-  return w.locs.reduce((s, loc) => { const o = L(loc).offers.find(x => x.idx === w.offer[loc]); return s + (o ? periodPrice(o.price_kop, per.months, per.pct) * (w.count[loc] || 1) : 0); }, 0);
+  return w.locs.reduce((s, loc) => { const o = wizOffer(w, loc); return s + (o ? periodPrice(o.price_kop, per.months, per.pct) * (w.count[loc] || 1) : 0); }, 0);
 }
 async function wizNames(w) {  // автоимена для каждой локации, кроме уже введённых
   const items = wizItems(w), taken = [];
@@ -74,7 +84,7 @@ function wizard() {
   const bal = w.cat && w.cat.balance_kop;
   const ok = {
     where: w.src === 'ssh' ? sshReady(w) : own ? w.sel.size > 0 : w.locs.length > 0,
-    tariff: w.locs.every(l => w.offer[l] != null),
+    tariff: w.locs.every(l => w.offer[l] != null && (w.offer[l] !== 'custom' || !!wizOffer(w, l))),
     names: items.every(({ loc, n }) => (w.domains[loc] || []).filter(Boolean).length === n) && !w.namesBusy && w.squads && w.squads.size > 0 && !wizHostsBad(w, items),
     review: own || bal == null || bal >= cost,
   }[kind];
@@ -162,8 +172,27 @@ function wizSsh(w, cat) {
 function opt(on, t, s, onclick, extra) {
   return h('button', { type: 'button', class: 'opt', 'aria-pressed': String(on), onclick }, h('span', { class: 'ck' }, ic('check')), h('b', null, t), h('span', { class: 's' }, s), extra || null);
 }
+function wizCustomOpt(w, code, conf) {
+  const q = (w.cq || {})[code], on = w.offer[code] === 'custom';
+  return opt(on, 'Своя конфигурация', 'vCPU, память и диск — сколько нужно', () => {
+    w.offer[code] = 'custom'; w.spec[code] = w.spec[code] || { cpu: conf.cpu.min, ram: conf.ram.min, disk: conf.disk.min }; render(); },
+  on && q && q.o ? h('span', { class: 'price' }, rubK(q.o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес')) : null);
+}
+function wizCustomForm(w, code, conf) {
+  const sp = w.spec[code];
+  wizQuote(w, code);
+  const q = w.cq[code];
+  return h('div', { class: 'form', style: 'margin-top:12px' },
+    [['cpu', 'vCPU'], ['ram', 'Память, ГБ'], ['disk', 'Диск, ГБ']].map(([k, t]) => fld(t,
+      h('input', { class: 'inp mono', type: 'number', inputmode: 'numeric', min: conf[k].min, max: conf[k].max, step: conf[k].step || 1, value: String(sp[k]), style: 'max-width:140px',
+        onchange: e => { const v = Math.round(+e.target.value); sp[k] = Math.min(conf[k].max, Math.max(conf[k].min, isFinite(v) ? v : conf[k].min)); render(); } }),
+      `от ${conf[k].min} до ${conf[k].max}` + ((conf[k].step || 1) > 1 ? `, шаг ${conf[k].step}` : ''))),
+    h('div', { class: 'muted', style: 'font-size:13px' }, q.loading ? 'Считаю цену в Bobr Cloud…' : q.err ? 'Цена: ' + q.err
+      : q.o ? `${rubK(q.o.price_kop)} в месяц за сервер` + (q.o.speed ? ' · ' + q.o.speed : '') : ''));
+}
 function wizTariff(w) {
-  const per = w.cat.periods;
+  const per = w.cat.periods, conf = w.cat.configurator;
+  w.spec = w.spec || {};
   return [h('h3', null, 'Тариф и количество'), h('p', null, 'Тариф выбирается явно для каждой страны. ОС — ' + w.cat.os_label + '.'),
     w.locs.map(code => { const l = L(code);
       return h('div', { class: 'loc-card' },
@@ -173,7 +202,9 @@ function wizTariff(w) {
               h('span', { class: 'num', 'aria-live': 'polite' }, w.count[code] || 1),
               h('button', { type: 'button', 'aria-label': 'Больше', onclick: () => { w.count[code] = Math.min(20, (w.count[code] || 1) + 1); w.domains = {}; render(); } }, '+')))),
         h('div', { class: 'choice' }, l.offers.map(o => opt(w.offer[code] === o.idx, `${o.cpu} vCPU · ${o.ram} ГБ`, `диск ${o.disk} ГБ` + (o.speed ? ` · ${o.speed}` : ''),
-          () => { w.offer[code] = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес'))))),
+          () => { w.offer[code] = o.idx; render(); }, h('span', { class: 'price' }, rubK(o.price_kop), h('span', { class: 'faint', style: 'font:400 13px var(--font)' }, ' / мес'))))
+          .concat(conf ? [wizCustomOpt(w, code, conf)] : [])),
+        conf && w.offer[code] === 'custom' ? wizCustomForm(w, code, conf) : null,
         locAdvice(code) ? h('div', { style: 'margin-top:12px' }, adviceNote(locAdvice(code))) : null);
     }),
     per.length > 1 ? h('div', { class: 'block', style: 'margin-top:20px' }, h('h4', null, 'Срок аренды'),
@@ -263,7 +294,7 @@ function wizReview(w, items, cost) {
       : own ? 'Покупки нет: нода ставится поверх системы сервера.' : `Деньги спишутся с баланса: ${w.cat.buyer}. Если что-то пойдёт не так, повтор не купит сервер второй раз.`),
     h('div', { class: 'list', style: 'margin-bottom:16px' },
       row(h('span', null, 'Группа ', h('b', null, G(w.pid).name)), ''),
-      items.map(({ loc, n }) => { const o = !own && L(loc).offers.find(x => x.idx === w.offer[loc]);
+      items.map(({ loc, n }) => { const o = !own && wizOffer(w, loc);
         return row(h('span', null, L(loc).flag ? h('span', { class: 'flag' }, L(loc).flag) : null, ` ${L(loc).name} × ${n}` + (o ? ` · ${o.cpu} vCPU, ${o.ram} ГБ · ${per.months} мес` : '')),
           o ? rubK(periodPrice(o.price_kop, per.months, per.pct) * n) : 'свой сервер', o ? '' : 'faint'); }),
       own ? null : row(h('b', null, 'Итого'), h('b', null, rubK(cost)))),
@@ -284,7 +315,7 @@ async function wizSubmit(w, items) {
   const own = w.src === 'own';
   const payload = { pid: w.pid, period: w.period, port: w.port || null, squads: [...w.squads],
     items: items.map(({ loc }) => ({ location: loc, domains: w.domains[loc],
-      ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : { idx: w.offer[loc] }) })),
+      ...(own ? { servers: (w.own || []).filter(s => w.sel.has(s.id) && s.location === loc).map(s => s.id) } : w.offer[loc] === 'custom' ? { idx: null, spec: { ...w.spec[loc] } } : { idx: w.offer[loc] }) })),
     psiphon: w.extras.psi ? { enabled: true, region: '', domains: '' } : undefined, warp: w.extras.warp ? { enabled: true, domains: '' } : undefined,
     xhttp: w.extras.xh ? { enabled: true, mode: 'direct' } : undefined, hy2: w.extras.hy ? { enabled: true } : undefined, stealth: !!w.stealth,
     ...wizHostsPayload(w, items) };
