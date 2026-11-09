@@ -75,3 +75,9 @@ def test_reinstalled_server_is_free_and_old_node_dropped(tmp_path, monkeypatch):
     asyncio.run(svc.drop_stale(store, out[20]['stale'], lambda t: None))
     assert removed == [('192.0.2.7', 'old.example')]
     assert store.job(jid)['data']['removed'] and store.job(jid)['data']['os_reinstalled']
+
+
+def test_bridge_remark_uses_exit_country():
+    assert svc.bridge_remark({'name': 'Germany test', 'countryCode': 'DE'}) == '🇩🇪 Germany ⇄'
+    assert svc.bridge_remark({'name': 'swe', 'country': 'se'}) == '🇸🇪 Sweden ⇄'
+    assert svc.bridge_remark({'name': 'Somewhere', 'countryCode': 'XX'}) == 'Somewhere ⇄'
