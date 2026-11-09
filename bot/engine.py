@@ -1361,8 +1361,12 @@ class Remote:
 
 
 def wait_ssh(r: Remote, log, timeout=600):
+    """Ждёт SSH перед установкой. Сменившийся ключ сервера установщик забывает сам (один раз за вход):
+    на установку идут только что купленные/переустановленные серверы или серверы, данные пользователем.
+    Если ключ сменится ещё раз сразу после этого — это уже не переустановка, останавливаемся."""
     end = time.time() + timeout
     last = ''
+    forgot = False
     while time.time() < end:
         try:
             rc, out = r.run('id -u', 30)
@@ -1374,6 +1378,12 @@ def wait_ssh(r: Remote, log, timeout=600):
                 break
         except StepError as e:
             last = str(e)
+            if last == HOSTKEY_CHANGED and not forgot and r.n.get('known_hosts'):
+                forget_host(r.n['known_hosts'], r.n['ip'], int(r.n.get('ssh_port') or 22))
+                forgot = True
+                log(f'ключ SSH сервера {r.n["ip"]} сменился (переустановка или новый сервер на этом IP) — '
+                    'старый ключ забыт, вхожу заново')
+                continue
             if 'не принял пароль' in last or last == HOSTKEY_CHANGED:
                 raise StepError(last if last == HOSTKEY_CHANGED else f'не удалось войти по SSH под root: {last}') from None
         time.sleep(15)
