@@ -1275,6 +1275,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except (TypeError, ValueError):
             raise ApiError('Порт ноды: число') from None
         extra: dict = {'source': source}
+        stale = None
         if source == 'ssh':
             ip = str(b.get('ip') or '').strip()
             if not engine.is_ip(ip) or ':' in ip:
@@ -1304,6 +1305,9 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 raise ApiError('Сервер ещё не готов в Bobr Cloud — подождите, пока он станет активным')
             ip = srv['ip']
             extra.update(server_id=sid, loc=srv.get('location') or '', flag=srv.get('flag') or '')
+            st = srv.get('stale')  # систему переустанавливали — от прежней ноды остались хосты в панели и A-запись
+            if st and store.profile(int(st['pid'])) and can(request, store.profile(int(st['pid']))):
+                stale = st
             if srv.get('root_password') and not any(str(b.get(k) or '').strip() for k in ('password', 'key_text')):
                 b = {**b, 'user': 'root', 'port': 22, 'password': srv['root_password'], 'key': b.get('key') or ''}
         else:
@@ -1369,6 +1373,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         x = {'pid': p['id'], 'node_uuid': uuid, 'node_name': n['name'], 'ip': ip, 'address': address, 'listen': listen,
              'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
              'created_by': uid_of(request), 'created_at': int(time.time()), **extra}
+        if stale:
+            await svc.drop_stale(store, stale, lambda t: None)
         if source != 'buy':
             x['id'] = store.save_relay({**x, 'status': 'installing', 'stage': 'convert' if extra.get('convert') else 'ssh', 'log': []})
             if b.get('background'):

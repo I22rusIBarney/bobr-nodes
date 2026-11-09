@@ -7,6 +7,7 @@ import math
 import re
 import secrets
 import string
+import time
 
 from . import engine, naming
 from .bcloud import BcloudError
@@ -198,13 +199,23 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
     В ответе есть root_password — наружу (в админку) его не отдавать."""
     bc = bcloud_from(store, buyer_of(store, prof))
     bc.RETRY_FOR = 8
+    servers = await bc.servers()
+    # систему переустановили в Bobr Cloud после установки ноды — ноды там больше нет, сервер свободен
+    wiped = {int(x['id']): reinstalled_ts(x) for x in servers if reinstalled_ts(x)}
+    wiped_ip = {x['ip']: wiped[int(x['id'])] for x in servers if x.get('ip') and int(x['id']) in wiped}
     used_ids, used_ips = set(), set()
     node_of: dict = {}  # сервер → нода на нём (для переделки в мост)
+    stale_of: dict = {}  # сервер → нода, которой нет после переустановки системы (её хвосты в панели и DNS)
     for j in store.jobs(5000):
         d = j['data']
         if d.get('kind') in SERVICE_KINDS or d.get('removed') or j['status'] == 'failed':  # с ошибкой — сервер свободен
             continue
         info = {'job': j['id'], 'pid': j['profile_id'], 'domain': d.get('domain') or '', 'ip': d.get('ip') or ''}
+        t = wiped.get(int(d['server_id'])) if d.get('server_id') else wiped_ip.get(d.get('ip') or '')
+        if t and j['created_at'] < t:
+            for k in ([('id', int(d['server_id']))] if d.get('server_id') else []) + ([('ip', d['ip'])] if d.get('ip') else []):
+                stale_of[k] = info
+            continue
         if d.get('server_id'):
             used_ids.add(int(d['server_id']))
             node_of[('id', int(d['server_id']))] = info
@@ -214,7 +225,7 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
     relay_ids = {int(r['server_id']) for r in store.relays() if r.get('server_id')}
     relay_ips = {r['ip'] for r in store.relays() if r.get('ip')}
     out = []
-    for x in await bc.servers():
+    for x in servers:
         os_ok = any(str(x.get('os') or '').lower().startswith(o) for o in OS_OK)
         relay = int(x['id']) in relay_ids or (x.get('ip') or '') in relay_ips  # вход (мост) — под ноду не предлагать
         used = int(x['id']) in used_ids or (x.get('ip') or '') in used_ips or relay
@@ -225,8 +236,35 @@ async def own_servers(store: Store, prof: dict) -> list[dict]:
         out.append({**{k: x.get(k) for k in ('id', 'name', 'status', 'ip', 'location', 'loc_name', 'flag', 'cpu', 'ram', 'disk',
                                               'os', 'expires_at', 'root_password')},
                     'os_label': naming_os_label(x.get('os') or ''), 'used': used, 'relay': relay, 'ready': not why, 'why': why,
-                    'node': None if relay else node_of.get(('id', int(x['id']))) or node_of.get(('ip', x.get('ip') or ''))})
+                    'node': None if relay else node_of.get(('id', int(x['id']))) or node_of.get(('ip', x.get('ip') or '')),
+                    'stale': None if used else stale_of.get(('id', int(x['id']))) or stale_of.get(('ip', x.get('ip') or ''))})
     return out
+
+
+def reinstalled_ts(srv: dict) -> float:
+    """Когда в Bobr Cloud последний раз переустанавливали систему (0 — не переустанавливали или старый Bobr Cloud)."""
+    v = srv.get('reinstalled_at')
+    if not v:
+        return 0.0
+    try:
+        from datetime import datetime, timezone
+        d = datetime.fromisoformat(str(v).replace('Z', '+00:00'))
+        return (d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp()
+    except ValueError:
+        return 0.0
+
+
+async def drop_stale(store: Store, stale: dict, log) -> None:
+    """Нода, которой нет после переустановки системы: убрать её из панели и DNS и пометить задачу удалённой.
+    На сервер не заходим — там уже чистая система."""
+    prof = store.profile(int(stale['pid']))
+    if prof:
+        pconf = {**prof, 'cf_token': cf_token_of(store, prof)}
+        try:
+            await asyncio.to_thread(engine.remove_node, pconf, stale.get('ip') or '', stale.get('domain') or '', log)
+        except engine.StepError as e:
+            log(f'панель: {e} — уберите старую ноду из панели вручную')
+    store.patch_job_data(int(stale['job']), removed=True, removed_at=int(time.time()), os_reinstalled=True)
 
 
 def naming_os_label(code: str) -> str:
@@ -439,6 +477,9 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
     else:
         q = quote(cat, location, idx, period, len(domains), custom)
     loc = q['loc']
+    for srv in servers or []:  # систему переустанавливали: прежняя нода живёт только в панели и DNS — убираем
+        if srv.get('stale'):
+            await drop_stale(store, srv['stale'], lambda t: None)
     batch = secrets.token_hex(4)
     cc = location.upper() if re.fullmatch(r'[a-z]{2}', location) else ''
     ids = []
@@ -468,11 +509,12 @@ async def create_jobs(store: Store, runner: Runner, chat_id: int, pid: int, cat:
     return ids
 
 
-def bridge_marks(store: Store) -> dict[int, dict[int, tuple[str, list]]]:
-    """Какие серверы Bobr Cloud — мосты: покупатель → {id сервера: (роль, с чем связан)}.
+def bridge_marks(store: Store) -> dict[int, dict[int, dict]]:
+    """Какие серверы Bobr Cloud — мосты: покупатель → {id сервера: {role, peers, link}}.
     Вход — сервер входа (связан с нодой-выходом по имени), выход — сервер ноды, на которую ведут входы
-    (связан со входами: их id в Bobr Cloud или IP своего сервера)."""
-    want: dict[int, dict[int, tuple[str, list]]] = {}
+    (связан со входами: их id в Bobr Cloud или IP своего сервера). link — id связанных серверов того же
+    покупателя: в кабинете Bobr Cloud они стоят рядом."""
+    want: dict[int, dict[int, dict]] = {}
     jobs = [j for j in store.jobs(5000) if j['status'] != 'failed' and not j['data'].get('removed')
             and j['data'].get('kind') not in SERVICE_KINDS and j['data'].get('server_id')]
     for x in store.relays():
@@ -480,15 +522,24 @@ def bridge_marks(store: Store) -> dict[int, dict[int, tuple[str, list]]]:
         if not p:
             continue
         entry = ('id', int(x['server_id'])) if x.get('server_id') else ('ip', x.get('ip') or '')
+        eb = buyer_of(store, p)
+        e = None
         if x.get('server_id'):
-            want.setdefault(buyer_of(store, p), {})[int(x['server_id'])] = ('entry', [x.get('node_name') or x.get('target') or ''])
+            e = want.setdefault(eb, {}).setdefault(int(x['server_id']), {'role': 'entry', 'peers': [], 'link': []})
+            if e['role'] == 'entry' and (x.get('node_name') or x.get('target')) not in e['peers']:
+                e['peers'].append(x.get('node_name') or x.get('target') or '')
         j = next((j for j in jobs if x.get('target') and x['target'] in (j['data'].get('domain'), j['data'].get('ip'))), None)
         jp = j and store.profile(j['profile_id'])
         if jp:
-            role, peers = want.setdefault(buyer_of(store, jp), {}).get(int(j['data']['server_id']), ('exit', []))
-            if role == 'exit' and entry[1] and entry not in peers:
-                peers.append(entry)
-            want[buyer_of(store, jp)][int(j['data']['server_id'])] = (role, peers)
+            xb_, xid = buyer_of(store, jp), int(j['data']['server_id'])
+            ex = want.setdefault(xb_, {}).setdefault(xid, {'role': 'exit', 'peers': [], 'link': []})
+            if ex['role'] == 'exit' and entry[1] and entry not in ex['peers']:
+                ex['peers'].append(entry)
+            if e is not None and xb_ == eb and ex['role'] == 'exit' and e['role'] == 'entry':
+                if entry[1] not in ex['link']:
+                    ex['link'].append(entry[1])
+                if xid not in e['link']:
+                    e['link'].append(xid)
     return want
 
 
@@ -518,13 +569,17 @@ async def sync_bridge_marks(store: Store) -> int:
         if ss and 'bridge_role' not in ss[0]:
             continue  # Bobr Cloud ещё без отметок мостов
         mine = want.get(b, {})
+        has_link = bool(ss) and 'bridge_link' in ss[0]
         for s in ss:
-            role, peers = mine.get(int(s['id']), ('', []))
-            peer = peer_text(role, peers) if role else ''
-            if (s.get('bridge_role') or '', s.get('bridge_peer') or '') == (role, peer):
+            w = mine.get(int(s['id'])) or {'role': '', 'peers': [], 'link': []}
+            role = w['role']
+            peer = peer_text(role, w['peers']) if role else ''
+            link = sorted(w['link']) if role else []
+            cur = (s.get('bridge_role') or '', s.get('bridge_peer') or '', sorted(s.get('bridge_link') or []) if has_link else link)
+            if cur == (role, peer, link):
                 continue
             try:
-                await bcloud_from(store, b).set_bridge(int(s['id']), role, peer)
+                await bcloud_from(store, b).set_bridge(int(s['id']), role, peer, link)
                 fixed += 1
             except BcloudError:
                 break  # Bobr Cloud не принимает отметки (старая версия) или недоступен — в другой раз
