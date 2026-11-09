@@ -5,6 +5,13 @@ const RL_ST = { new: ['run', 'создаётся'], buying: ['run', 'покуп�
 const RL_MODE = { egames: 'роутинг, как в eGames', vision: 'роутинг, Vision TLS', xray: 'роутинг, REALITY', haproxy: 'проброс (HAProxy)' };
 const MASK_DEF = JSON.stringify({ tcp: [{ type: 'fragment', settings: { length: '10-20', packets: 'tlshello', interval: '10-20' } }] });
 // обновление во время установки: прежние данные остаются на экране, пока грузятся свежие (без мигания заглушкой)
+// название входа по умолчанию — как его задаст бот: флаг и страна ноды-выхода по-английски, «🇩🇪 Germany ⇄»
+const bridgeName = n => {
+  const cc = String(n.country || '').toUpperCase();
+  if (!/^[A-Z]{2}$/.test(cc) || ['XX', 'ZZ', 'EU', 'UN'].includes(cc)) return n.name + ' ⇄';
+  let name = cc; try { name = new Intl.DisplayNames(['en'], { type: 'region' }).of(cc) || cc; } catch (e) { /* старый браузер */ }
+  return String.fromCodePoint(...[...cc].map(c => 0x1F1E6 + c.charCodeAt(0) - 65)) + ' ' + name + ' ⇄';
+};
 const reloadDetail = n => { const c = D.detail[n.id]; D.detail[n.id] = c && c.d ? { d: c.d, at: 0 } : null; render(true); };
 // один таймер на ноду: каждая перерисовка ставила свой, и обновления множились
 const RL_POLL = {};
@@ -96,7 +103,7 @@ function relayAdd(n, d) {
       R.custom ? fld('Порт', h('input', { class: 'inp mono', inputmode: 'numeric', style: 'max-width:140px', value: R.port, oninput: e => { R.port = e.target.value.replace(/\D/g, ''); } })) : null,
       fld('Сервер входа', seg([{ v: 'buy', l: 'Купить' }, { v: 'server', l: 'Уже купленный' }, { v: 'ssh', l: 'Свой сервер' }], R.src, v => { R.src = v; R.sid = null; R.convert = false; render(); }, 'Сервер входа'))),
     h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:14px' }, body),
-    h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:14px' }, fld('Название хоста в подписке', h('input', { class: 'inp', 'data-k': 'rlrem', value: R.remark, placeholder: n.name + ' ⇄', oninput: e => { R.remark = e.target.value; } }), 'Необязательно.')),
+    h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:14px' }, fld('Название хоста в подписке', h('input', { class: 'inp', 'data-k': 'rlrem', value: R.remark, placeholder: bridgeName(n), oninput: e => { R.remark = e.target.value; } }), 'Необязательно.')),
     btn(R.src === 'buy' ? (pick ? `Купить за ${rubK(pick.price_kop)}/мес и поставить` : 'Выберите тариф') : conv ? 'Убрать ноду и поставить мост' : 'Поставить мост', go, conv ? 'danger solid' : 'primary', null, { disabled: !ready })];
 }
 

@@ -1369,7 +1369,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
                 raise ApiError('Серверному роутингу нужен root или пользователь с sudo — бот ставит Docker')
         elif any(o.get('mode') in xb.ROUTED for o in others):
             raise ApiError('На этом сервере стоит мост с серверным роутингом — проброс туда не добавить')
-        remark = str(b.get('remark') or '').strip()[:90] or (f'🇷🇺 {n["name"]}' if source == 'ssh' and mode == 'haproxy' else f'{n["name"]} ⇄')
+        remark = str(b.get('remark') or '').strip()[:90] or (f'🇷🇺 {n["name"]}' if source == 'ssh' and mode == 'haproxy' else svc.bridge_remark(n))
         x = {'pid': p['id'], 'node_uuid': uuid, 'node_name': n['name'], 'ip': ip, 'address': address, 'listen': listen,
              'target': target, 'target_port': tport, 'remark': remark, 'ssh': acc, 'status': 'new', 'hosts': [],
              'created_by': uid_of(request), 'created_at': int(time.time()), **extra}

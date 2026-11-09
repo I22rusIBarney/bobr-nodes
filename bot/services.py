@@ -400,6 +400,23 @@ def country_name(loc: dict, lang: str = 'ru') -> str:
     return _EN.get(code) or loc.get('name', '')
 
 
+def flag_of(cc: str) -> str:
+    """Флаг страны по ISO-коду (DE → 🇩🇪); пусто, если код не страна."""
+    cc = (cc or '').strip().upper()
+    if not re.fullmatch(r'[A-Z]{2}', cc) or cc in ('XX', 'ZZ', 'EU', 'UN'):
+        return ''
+    return ''.join(chr(0x1F1E6 + ord(c) - ord('A')) for c in cc)
+
+
+def bridge_remark(node: dict) -> str:
+    """Название входа моста по стране ноды-выхода: «🇩🇪 Germany ⇄». Страна не задана — имя ноды-выхода."""
+    cc = (node.get('countryCode') or node.get('country') or '').strip()
+    flag = flag_of(cc)
+    if flag:
+        return f'{flag} {country_name({"code": cc.lower(), "name": node.get("name") or ""}, "en")} ⇄'
+    return f'{node.get("name") or ""} ⇄'
+
+
 def render_remark(tpl: str, loc: dict, name: str, domain: str, i: int, lang: str = 'ru') -> str:
     m = re.search(r'(\d+)$', name)
     n = m.group(1) if m else str(i)
