@@ -32,3 +32,35 @@ def test_hostkey_change_stops_login(monkeypatch):
         assert str(e) == engine.HOSTKEY_CHANGED and not Child.sent  # пароль не отправлен
     else:
         raise AssertionError('смена ключа не остановила вход')
+
+
+def test_installer_forgets_changed_hostkey_once(monkeypatch):
+    calls, forgot, logs = [], [], []
+
+    def run(self, cmd, timeout=120):
+        calls.append(cmd)
+        if len(calls) == 1:
+            raise engine.StepError(engine.HOSTKEY_CHANGED)
+        return 0, '0\n'
+    monkeypatch.setattr(engine.Remote, 'run', run)
+    monkeypatch.setattr(engine, 'forget_host', lambda kh, h, p=22: forgot.append((kh, h, p)))
+    r = engine.Remote({'ip': '192.0.2.1', 'known_hosts': '/tmp/kh', 'ssh_port': 2222}, None)
+    engine.wait_ssh(r, logs.append, timeout=60)
+    assert forgot == [('/tmp/kh', '192.0.2.1', 2222)] and len(calls) == 2
+    assert any('забыт' in x for x in logs)
+
+
+def test_installer_stops_if_hostkey_changes_again(monkeypatch):
+    forgot = []
+
+    def run(self, cmd, timeout=120):
+        raise engine.StepError(engine.HOSTKEY_CHANGED)
+    monkeypatch.setattr(engine.Remote, 'run', run)
+    monkeypatch.setattr(engine, 'forget_host', lambda kh, h, p=22: forgot.append(h))
+    r = engine.Remote({'ip': '192.0.2.1', 'known_hosts': '/tmp/kh'}, None)
+    try:
+        engine.wait_ssh(r, lambda m: None, timeout=60)
+    except engine.StepError as e:
+        assert str(e) == engine.HOSTKEY_CHANGED and forgot == ['192.0.2.1']
+    else:
+        raise AssertionError('повторная смена ключа не остановила установку')
