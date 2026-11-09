@@ -151,13 +151,19 @@ function render(soft) {
   if (!(r.name in OVERLAYS) && !VIEWS[r.name]) return go('overview');
   if (r.name in OVERLAYS) { if (!UI.base) UI.base = { name: OVERLAYS[r.name] }; } else UI.base = r;
   const a = document.activeElement, fk = a && a.dataset && a.dataset.k, sel = fk && a.selectionStart != null ? [a.selectionStart, a.selectionEnd] : null;
-  const scrolls = {}; document.querySelectorAll('[data-keep]').forEach(e => { scrolls[e.dataset.keep] = e.scrollTop; });
+  // прокрутка переживает перерисовку: и вертикальная, и горизонтальная; журнал с data-tail, прокрученный до конца, — едет за новыми строками
+  const scrolls = {}; document.querySelectorAll('[data-keep]').forEach(e => {
+    scrolls[e.dataset.keep] = { t: e.scrollTop, l: e.scrollLeft, end: e.scrollHeight - e.scrollTop - e.clientHeight < 24 }; });
   const key = keyOf(UI.base), changed = key !== UI.lastKey;
   UI.lastKey = key;
   $('#app').replaceChildren(shell(UI.base, changed));
   renderOverlay(r);
   if (fk) { const e = document.querySelector(`[data-k="${fk}"]`); if (e) { e.focus({ preventScroll: true }); if (sel && e.setSelectionRange) try { e.setSelectionRange(...sel); } catch (_) { /* не текст */ } } }
-  document.querySelectorAll('[data-keep]').forEach(e => { if (scrolls[e.dataset.keep] != null) e.scrollTop = scrolls[e.dataset.keep]; });
+  document.querySelectorAll('[data-keep]').forEach(e => {
+    const v = scrolls[e.dataset.keep];
+    if (!v) { if (e.dataset.tail != null) e.scrollTop = e.scrollHeight; return; }  // журнал впервые на экране — сразу его конец
+    e.scrollTop = e.dataset.tail != null && v.end ? e.scrollHeight : v.t; e.scrollLeft = v.l;
+  });
   if (changed && !(r.name in OVERLAYS)) window.scrollTo(0, 0);
 }
 function parentOf(r) {
@@ -752,7 +758,7 @@ function drawerTask(id) {
           x === 'now' ? h('span', { class: 'st run' }, 'сейчас') : null);
       })),
       j.log ? [h('div', { class: 'section-h' }, h('h2', null, 'Журнал'), btn('Скопировать', () => copy(j.log, 'Журнал'), 'ghost s more')),
-        h('div', { class: 'log', tabindex: '0' }, j.log.slice(-8000).replace(/^#{2,}\s*/gm, ''))] : null,
+        h('div', { class: 'log', tabindex: '0', 'data-keep': 'tasklog' + j.id, 'data-tail': '' }, j.log.slice(-8000).replace(/^#{2,}\s*/gm, ''))] : null,
       h('div', { class: 'chips', style: 'margin-top:16px' },
         j.status === 'done' || j.status === 'failed' ? btn('Скрыть из списка', async () => { try { await api(`jobs/${j.id}/hide`, 'POST'); D.jobs = D.jobs.filter(x => x.id !== j.id); closeOverlay(); } catch (x) { toast('Не получилось', x.message, 'bad'); } }, 'ghost') : null)));
 }
