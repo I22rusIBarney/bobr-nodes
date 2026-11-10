@@ -51,6 +51,26 @@ SERVER_UA = re.compile(r'3x-?ui|x-ui|xray|v2ray-?core|sing-?box-?server|marzban|
                        r'go-http|okhttp|node-fetch|axios|java/|postman|insomnia|libwww|scrapy|headless', re.I)
 CLIENT_UA = re.compile(r'happ|incy|v2raytun|v2rayng|hiddify|streisand|shadowrocket|stash|clash|mihomo|flclash|karing|'
                        r'nekobox|nekoray|singbox|sfa|sfi|sfm|foxray|v2box|throne|koala|prizrak|ssclash', re.I)
+# модели, которые есть у тысяч людей: по ним «то же устройство» не определить
+GENERIC_MODEL = re.compile(r'^(iphone|ipad|ipod|sm-|samsung|galaxy|pixel|redmi|xiaomi|mi |poco|huawei|honor|oneplus|oppo|vivo|realme|'
+                           r'motorola|moto |nokia|sony|xperia|tecno|infinix|itel|zte|nothing|asus|lenovo|google|apple|'
+                           r'macbook|imac|mac ?mini|mac ?pro|mac ?studio|system product name|to be filled|o\.e\.m|virtual|vmware|'
+                           r'kvm|standard pc)', re.I)
+GENERIC_WORD = re.compile(r'(mac|pc|computer|desktop|laptop|windows|linux|ubuntu|android|unknown|default|user|admin|home)'
+                          r'(-pc)?', re.I)  # имя целиком из общего слова
+DESKTOP = re.compile(r'windows|win32|win64|mac ?os|macos|darwin|linux', re.I)
+
+
+def pc_name(d: dict) -> str:
+    """Имя компьютера, если оно похоже на уникальное (DESKTOP-7F3K2LQ, VASYA-PC); у телефонов и типовых моделей — ''."""
+    m = (d.get('model') or '').strip()
+    if len(m) < 5 or GENERIC_MODEL.match(m) or GENERIC_WORD.fullmatch(m) or re.fullmatch(r'[\w ]+\d+,\d+', m):  # MacBookPro18,1 — модель, а не имя
+        return ''
+    if DESKTOP.search(d.get('platform') or '') or re.match(r'(desktop|laptop|win)-[a-z0-9]{5,}$', m, re.I):
+        return m.lower()
+    return ''
+
+
 HOSTING = re.compile(r'hetzner|\bovh|digitalocean|amazon|\baws\b|google|microsoft|azure|oracle|linode|akamai|vultr|choopa|'
                      r'contabo|leaseweb|m247|aeza|timeweb|selectel|beget|vdsina|firstbyte|stark|hostinger|hostkey|serverius|'
                      r'scaleway|ionos|netcup|kamatera|g-?core|cloudflare|datacamp|cdn77|psychz|hivelocity|quadranet|'
@@ -303,13 +323,15 @@ def index(data: dict) -> dict:
     users = {u['key']: u for u in data['users'] if not u['name'].startswith('bridge_')}  # служебные пользователи мостов
     alias = {i: u['key'] for u in users.values() for i in u['ids']}
     own = data.get('own') or set()
-    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'ip': {}, 'own': own,
+    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'pc': {}, 'ip': {}, 'own': own,
           'banned': {k for k, u in users.items() if u['status'] == 'DISABLED'}}
     for d in data.get('devices') or []:
         k = alias.get(d['owner'])
         if k:
             ix['dev'].setdefault(k, []).append(d)
             ix['hwid'].setdefault(d['hwid'], set()).add(k)
+            if pc_name(d):
+                ix['pc'].setdefault(pc_name(d), {}).setdefault(k, set()).add(d['hwid'])
             if d['ip'] and d['ip'] not in own:
                 ix['ip'].setdefault(d['ip'], set()).add(k)
     for c in data.get('conn') or []:
@@ -362,12 +384,30 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
         fresh_d = [d for d in devs if d['created'] and now - d['created'] < 86400]
         if len(fresh_d) >= conf['burst']:
             add('burst', 30, f'{len(fresh_d)} новых устройств за сутки')
+    # то же устройство: совпадает HWID — его выдаёт приложение (Happ, Incy…) на конкретном устройстве, по модели
+    # («iPhone 15») не сравниваем. Общий HWID — подписки двух аккаунтов в одном приложении на одном устройстве:
+    # один аккаунт рядом — бывает (две подписки у одного человека), два и больше — повод посмотреть
+    twins = set()
     for d in devs:
-        for o in sorted(ix['hwid'].get(d['hwid'], set()) - {k})[:2]:
+        for o in ix['hwid'].get(d['hwid'], set()) - {k}:
             if o in banned:
-                add('ban-hwid:' + o, CRIT, f'то же устройство, что у отключённого {ix["users"][o]["name"]}', True)
+                add('ban-hwid:' + o, CRIT, f'то же устройство (HWID), что у отключённого {ix["users"][o]["name"]}', True)
             else:
-                add('twin:' + o, 40, f'то же устройство, что у {ix["users"][o]["name"]}')
+                twins.add(o)
+    if twins:
+        names = ', '.join(ix['users'][o]['name'] for o in sorted(twins)[:3]) + (f' и ещё {len(twins) - 3}' if len(twins) > 3 else '')
+        add('twin:' + ','.join(sorted(twins)[:5]), 30 if len(twins) == 1 else 50,
+            f'то же устройство (HWID) у других аккаунтов: {names}')
+    # тот же компьютер под другим HWID (другое приложение или переустановка): уникальное имя ПК вроде DESKTOP-7F3K2LQ
+    for d in devs:
+        name = pc_name(d)
+        for o, hw in sorted((ix['pc'].get(name) or {}).items()) if name else ():
+            if o == k or d['hwid'] in hw:
+                continue
+            if o in banned:
+                add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}')
+            else:
+                add('pc:' + o, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {ix["users"][o]["name"]}')
     mine_ips = {d['ip'] for d in devs if d['ip']} | set(ix['conn'].get(k) or {})
     for ip in sorted(mine_ips - own):
         for o in sorted((ix['ip'].get(ip, set()) & banned) - {k})[:2]:
@@ -503,14 +543,14 @@ def _scrub(text: str, secrets_: list[str]) -> str:
 def ai_input(card: dict, now: float) -> str:
     """Сводка карточки без имени, TG ID, HWID и полных IP."""
     hide = [card['name'], str(card.get('tg') or '')] + [x['name'] for x in card['links']] + [d['hwid'] for d in card['device_list']]
-    hide += [d['hwid'][:40] for d in card['device_list']]
+    hide += [d['hwid'][:40] for d in card['device_list']] + [d['model'] for d in card['device_list'] if pc_name(d)]
     days = lambda t: None if not t else round((now - t) / 86400, 1)  # noqa: E731
     net = lambda x: {k: x[k] for k in ('holder', 'hosting', 'own') if k in x} if x else None  # noqa: E731
     out = {
         'score': card['score'], 'level': card['level'] or 'clean', 'status': card['status'],
         'device_limit': card['limit'], 'devices': card['devices'], 'live_ips': card['ips'],
         'reasons': [{'text': _scrub(r['text'], hide), 'points': r['w'], 'critical': r['crit']} for r in card['reasons']],
-        'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': d['model'],
+        'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': 'уникальное имя ПК' if pc_name(d) else d['model'],
                          'server_like': d['server'], 'client': _scrub(d['ua'], hide), 'added_days_ago': days(d['created']), 'ip': _mask(d['ip']) if d['ip'] else None,
                          'net': net(d.get('net'))} for d in card['device_list'][:20]],
         'connections': [{'ip': _mask(c['ip']), 'net': net(c.get('net')), 'nodes': c['nodes'], 'live': c['live'],
@@ -519,7 +559,8 @@ def ai_input(card: dict, now: float) -> str:
                                    'hours_ago': round((now - r['at']) / 3600, 1) if r['at'] else None, 'net': net(r.get('net'))}
                                   for r in card['subs'][:10]],
         'traffic_gb_by_day': {t['day']: round(t['bytes'] / 2**30, 2) for t in card['traffic']},
-        'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'ip' for v in x['via']]}
+        'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'pc_name' if v.startswith('имя ПК') else 'ip'
+                                                               for v in x['via']]}
                             for x in card['links'][:10]],
     }
     if card.get('conn_err'):
@@ -758,6 +799,9 @@ class Guard:
         for d in ix['dev'].get(key, []):
             for o in ix['hwid'].get(d['hwid'], set()) - {key}:
                 links.setdefault(o, set()).add('устройство')
+            for o in (ix['pc'].get(pc_name(d)) or {}) if pc_name(d) else ():
+                if o != key:
+                    links.setdefault(o, set()).add(f'имя ПК {d["model"]}')
         for ip in ips:
             for o in ix['ip'].get(ip, set()) - {key}:
                 links.setdefault(o, set()).add(f'IP {ip}')
