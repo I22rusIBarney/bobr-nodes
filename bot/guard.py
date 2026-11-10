@@ -36,6 +36,8 @@ TOKEN_TTL = 14 * 86400    # сколько живут кнопки в сообщ
 REMIND = 7 * 86400        # тот же набор признаков — не чаще раза в неделю
 HISTORY_DAYS = 9          # сколько дней храним отметки трафика
 IP_LOOKUPS = 150          # новых IP на разбор сети за один проход (RIPEstat не любит частых запросов)
+IP_BUDGET = 60            # секунд на разбор новых IP за проход: не успели — узнаем в следующий
+ALERTS_EACH = 5           # столько самых серьёзных — отдельными сообщениями, остальных — одной сводкой
 PAGE = 500
 MAX_USERS = 50_000
 CONN_ACTIVE = 3600        # IP подключения считается живым, если был виден не раньше часа назад
@@ -49,6 +51,27 @@ SERVER_UA = re.compile(r'3x-?ui|x-ui|xray|v2ray-?core|sing-?box-?server|marzban|
                        r'go-http|okhttp|node-fetch|axios|java/|postman|insomnia|libwww|scrapy|headless', re.I)
 CLIENT_UA = re.compile(r'happ|incy|v2raytun|v2rayng|hiddify|streisand|shadowrocket|stash|clash|mihomo|flclash|karing|'
                        r'nekobox|nekoray|singbox|sfa|sfi|sfm|foxray|v2box|throne|koala|prizrak|ssclash', re.I)
+# модели, которые есть у тысяч людей: по ним «то же устройство» не определить
+GENERIC_MODEL = re.compile(r'^(iphone|ipad|ipod|sm-|samsung|galaxy|pixel|redmi|xiaomi|mi |poco|huawei|honor|oneplus|oppo|vivo|realme|'
+                           r'motorola|moto |nokia|sony|xperia|tecno|infinix|itel|zte|nothing|asus|lenovo|google|apple|'
+                           r'macbook|imac|mac ?mini|mac ?pro|mac ?studio|system product name|to be filled|o\.e\.m|virtual|vmware|'
+                           r'kvm|standard pc)', re.I)
+GENERIC_WORD = re.compile(r'(mac|pc|computer|desktop|laptop|windows|linux|ubuntu|android|unknown|default|user|admin|home)'
+                          r'(-pc)?', re.I)  # имя целиком из общего слова
+ARCH = re.compile(r'[_ ](x86_64|amd64|x64|x86|i[3-6]86|arm64|aarch64|armv\d\w*)$', re.I)
+DESKTOP = re.compile(r'windows|win32|win64|mac ?os|macos|darwin|linux', re.I)
+
+
+def pc_name(d: dict) -> str:
+    """Имя компьютера, если оно похоже на уникальное (DESKTOP-7F3K2LQ, VASYA-PC); у телефонов и типовых моделей — ''."""
+    m = ARCH.sub('', (d.get('model') or '').strip())  # Happ на Windows: DESKTOP-FR15BBH_x86_64 — архитектура не часть имени
+    if len(m) < 5 or GENERIC_MODEL.match(m) or GENERIC_WORD.fullmatch(m) or re.fullmatch(r'[\w ]+\d+,\d+', m):  # MacBookPro18,1 — модель, а не имя
+        return ''
+    if DESKTOP.search(d.get('platform') or '') or re.match(r'(desktop|laptop|win)-[a-z0-9]{5,}$', m, re.I):
+        return m.lower()
+    return ''
+
+
 HOSTING = re.compile(r'hetzner|\bovh|digitalocean|amazon|\baws\b|google|microsoft|azure|oracle|linode|akamai|vultr|choopa|'
                      r'contabo|leaseweb|m247|aeza|timeweb|selectel|beget|vdsina|firstbyte|stark|hostinger|hostkey|serverius|'
                      r'scaleway|ionos|netcup|kamatera|g-?core|cloudflare|datacamp|cdn77|psychz|hivelocity|quadranet|'
@@ -210,9 +233,10 @@ def node_connections(panel, node: dict, api: list | None = None, sleep=time.slee
     raise err or ValueError('панель не отдаёт IP подключений')
 
 
-def collect(panel, extra_own: set | None = None, conns: bool = True) -> dict:
+def collect(panel, extra_own: set | None = None, conns: bool = True, stage=lambda s: None) -> dict:
     """Пользователи, устройства, IP подключений, история запросов подписки и адреса своих нод из панели (в потоке)."""
     from concurrent.futures import ThreadPoolExecutor
+    stage('Скачиваю подписчиков и устройства из панели')
     users = [x for x in (norm_user(u) for u in pages(panel.call, '/api/users', 'users')) if x]
     devices, dev_err = [], ''
     try:
@@ -237,6 +261,7 @@ def collect(panel, extra_own: set | None = None, conns: bool = True) -> dict:
     except Exception:  # noqa: BLE001 — без адресов нод просто не отличим «обновил через наш VPN»
         pass
     conn, conn_err = [], ''
+    stage('Спрашиваю ноды, кто с каких IP подключён')
     live = [n for n in nodes if n.get('uuid') and n.get('isConnected') and not n.get('isDisabled')]
     if conns and live:
         errs = []
@@ -299,13 +324,15 @@ def index(data: dict) -> dict:
     users = {u['key']: u for u in data['users'] if not u['name'].startswith('bridge_')}  # служебные пользователи мостов
     alias = {i: u['key'] for u in users.values() for i in u['ids']}
     own = data.get('own') or set()
-    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'ip': {}, 'own': own,
+    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'pc': {}, 'ip': {}, 'own': own,
           'banned': {k for k, u in users.items() if u['status'] == 'DISABLED'}}
     for d in data.get('devices') or []:
         k = alias.get(d['owner'])
         if k:
             ix['dev'].setdefault(k, []).append(d)
             ix['hwid'].setdefault(d['hwid'], set()).add(k)
+            if pc_name(d):
+                ix['pc'].setdefault(pc_name(d), {}).setdefault(k, set()).add(d['hwid'])
             if d['ip'] and d['ip'] not in own:
                 ix['ip'].setdefault(d['ip'], set()).add(k)
     for c in data.get('conn') or []:
@@ -358,12 +385,30 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
         fresh_d = [d for d in devs if d['created'] and now - d['created'] < 86400]
         if len(fresh_d) >= conf['burst']:
             add('burst', 30, f'{len(fresh_d)} новых устройств за сутки')
+    # то же устройство: совпадает HWID — его выдаёт приложение (Happ, Incy…) на конкретном устройстве, по модели
+    # («iPhone 15») не сравниваем. Общий HWID — подписки двух аккаунтов в одном приложении на одном устройстве:
+    # один аккаунт рядом — бывает (две подписки у одного человека), два и больше — повод посмотреть
+    twins = set()
     for d in devs:
-        for o in sorted(ix['hwid'].get(d['hwid'], set()) - {k})[:2]:
+        for o in ix['hwid'].get(d['hwid'], set()) - {k}:
             if o in banned:
-                add('ban-hwid:' + o, CRIT, f'то же устройство, что у отключённого {ix["users"][o]["name"]}', True)
+                add('ban-hwid:' + o, CRIT, f'то же устройство (HWID), что у отключённого {ix["users"][o]["name"]}', True)
             else:
-                add('twin:' + o, 40, f'то же устройство, что у {ix["users"][o]["name"]}')
+                twins.add(o)
+    if twins:
+        names = ', '.join(ix['users'][o]['name'] for o in sorted(twins)[:3]) + (f' и ещё {len(twins) - 3}' if len(twins) > 3 else '')
+        add('twin:' + ','.join(sorted(twins)[:5]), 30 if len(twins) == 1 else 50,
+            f'то же устройство (HWID) у других аккаунтов: {names}')
+    # тот же компьютер под другим HWID (другое приложение или переустановка): уникальное имя ПК вроде DESKTOP-7F3K2LQ
+    for d in devs:
+        name = pc_name(d)
+        for o, hw in sorted((ix['pc'].get(name) or {}).items()) if name else ():
+            if o == k or d['hwid'] in hw:
+                continue
+            if o in banned:
+                add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}')
+            else:
+                add('pc:' + o, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {ix["users"][o]["name"]}')
     mine_ips = {d['ip'] for d in devs if d['ip']} | set(ix['conn'].get(k) or {})
     for ip in sorted(mine_ips - own):
         for o in sorted((ix['ip'].get(ip, set()) & banned) - {k})[:2]:
@@ -499,14 +544,14 @@ def _scrub(text: str, secrets_: list[str]) -> str:
 def ai_input(card: dict, now: float) -> str:
     """Сводка карточки без имени, TG ID, HWID и полных IP."""
     hide = [card['name'], str(card.get('tg') or '')] + [x['name'] for x in card['links']] + [d['hwid'] for d in card['device_list']]
-    hide += [d['hwid'][:40] for d in card['device_list']]
+    hide += [d['hwid'][:40] for d in card['device_list']] + [d['model'] for d in card['device_list'] if pc_name(d)]
     days = lambda t: None if not t else round((now - t) / 86400, 1)  # noqa: E731
     net = lambda x: {k: x[k] for k in ('holder', 'hosting', 'own') if k in x} if x else None  # noqa: E731
     out = {
         'score': card['score'], 'level': card['level'] or 'clean', 'status': card['status'],
         'device_limit': card['limit'], 'devices': card['devices'], 'live_ips': card['ips'],
         'reasons': [{'text': _scrub(r['text'], hide), 'points': r['w'], 'critical': r['crit']} for r in card['reasons']],
-        'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': d['model'],
+        'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': 'уникальное имя ПК' if pc_name(d) else d['model'],
                          'server_like': d['server'], 'client': _scrub(d['ua'], hide), 'added_days_ago': days(d['created']), 'ip': _mask(d['ip']) if d['ip'] else None,
                          'net': net(d.get('net'))} for d in card['device_list'][:20]],
         'connections': [{'ip': _mask(c['ip']), 'net': net(c.get('net')), 'nodes': c['nodes'], 'live': c['live'],
@@ -515,7 +560,8 @@ def ai_input(card: dict, now: float) -> str:
                                    'hours_ago': round((now - r['at']) / 3600, 1) if r['at'] else None, 'net': net(r.get('net'))}
                                   for r in card['subs'][:10]],
         'traffic_gb_by_day': {t['day']: round(t['bytes'] / 2**30, 2) for t in card['traffic']},
-        'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'ip' for v in x['via']]}
+        'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'pc_name' if v.startswith('имя ПК') else 'ip'
+                                                               for v in x['via']]}
                             for x in card['links'][:10]],
     }
     if card.get('conn_err'):
@@ -567,6 +613,9 @@ class Guard:
         self._gemini = gemini  # для тестов: свой Gemini
         self._at: dict[int, float] = {}
         self._lock = asyncio.Lock()
+        self.running: dict[int, dict] = {}   # идущие проверки: {pid: {started, stage}}
+        self._tasks: set = set()
+        self.panel_button = None             # кнопка «Панель управления» (задаёт автопилот)
 
     def get(self, key: str, default):
         try:
@@ -583,19 +632,32 @@ class Guard:
         from . import engine
         return engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
 
-    def lookup(self, ips: list[str]) -> dict:
-        """Сеть IP (держатель ASN): из кэша, новые — понемногу за проход."""
-        out, asked = {}, 0
+    def lookup(self, ips: list[str], budget: float = IP_BUDGET) -> dict:
+        """Сеть IP (держатель ASN): из кэша, новые — параллельно, не больше IP_LOOKUPS и budget секунд за проход
+        (что не успели — останется в кэше к следующей проверке)."""
         if self._ipinfo is not None:
             return {ip: self._ipinfo(ip) or {} for ip in ips}
+        from concurrent.futures import ThreadPoolExecutor, wait
         from . import banlab
+        out, new = {}, []
         for ip in ips:
             hit = banlab.cached_info(self.store, ip, fetch=False)
-            if not hit and asked < IP_LOOKUPS:
-                asked += 1
-                hit = banlab.cached_info(self.store, ip)
             if hit:
                 out[ip] = hit
+            elif len(new) < IP_LOOKUPS:
+                new.append(ip)
+        if new:
+            ex = ThreadPoolExecutor(max_workers=8, thread_name_prefix='guard-ip')
+            futs = {ex.submit(banlab.cached_info, self.store, ip): ip for ip in new}
+            done, _ = wait(futs, timeout=budget)
+            ex.shutdown(wait=False, cancel_futures=True)
+            for f in done:
+                try:
+                    hit = f.result()
+                except Exception:  # noqa: BLE001
+                    hit = None
+                if hit:
+                    out[futs[f]] = hit
         return out
 
     async def tick(self, profiles: list[dict], now: float | None = None) -> None:
@@ -604,15 +666,37 @@ class Guard:
             return
         async with self._lock:
             for prof in profiles:
-                if not cfg(prof)['on'] or now - self._at.get(prof['id'], 0) < EVERY - 60:
+                if not cfg(prof)['on'] or now - self._at.get(prof['id'], 0) < EVERY - 60 or prof['id'] in self.running:
                     continue
                 self._at[prof['id']] = now
-                try:
-                    await self.check(prof, now)
-                except Exception as e:  # noqa: BLE001 — одна группа не должна мешать остальным
-                    log.info('guard %s: %s', prof.get('id'), e)
-                    last = self.get(f'guard:last:{prof["id"]}', {})
-                    self.put(f'guard:last:{prof["id"]}', {**last, 'at': now, 'error': str(e)[:300]})
+                await self.run(prof, now)
+
+    async def run(self, prof: dict, now: float | None = None) -> None:
+        """Проверка группы с отметкой «идёт» (её видно в разделе) и записью ошибки в итог."""
+        pid, now = prof['id'], now if now is not None else time.time()
+        self.running[pid] = {'started': now, 'stage': 'Начинаю'}
+        try:
+            await self.check(prof, now)
+        except Exception as e:  # noqa: BLE001 — одна группа не должна мешать остальным
+            log.info('guard %s: %s', pid, e)
+            last = self.get(f'guard:last:{pid}', {})
+            self.put(f'guard:last:{pid}', {**last, 'at': now, 'error': str(e)[:300]})
+        finally:
+            self.running.pop(pid, None)
+
+    def start(self, prof: dict) -> dict:
+        """«Проверить сейчас»: в фоне, сразу возвращает состояние; уже идёт — вторую не запускаем."""
+        pid = prof['id']
+        if pid not in self.running:
+            self.running[pid] = {'started': time.time(), 'stage': 'Начинаю'}
+            t = asyncio.create_task(self.run(prof))
+            self._tasks.add(t)
+            t.add_done_callback(self._tasks.discard)
+        return dict(self.running.get(pid) or {})
+
+    def stage(self, pid: int, text_: str) -> None:
+        if pid in self.running:
+            self.running[pid]['stage'] = text_
 
     def own_ips(self, prof: dict) -> set[str]:
         """Свои серверы группы, через которые идут пользователи: входы мостов и проброса (их IP — не «хостинг клиента»)."""
@@ -621,28 +705,45 @@ class Guard:
         except Exception:  # noqa: BLE001
             return set()
 
-    async def check(self, prof: dict, now: float, data: dict | None = None) -> list[dict]:
+    def crunch(self, prof: dict, data: dict, now: float) -> tuple[list[dict], dict, set]:
+        """Тяжёлая часть проверки (в потоке, чтобы не задерживать бота): трафик, сети IP, разбор, срез для карточек."""
         conf, pid = cfg(prof), prof['id']
-        if data is None:
-            data = await asyncio.to_thread(collect, self.panel(prof), self.own_ips(prof))
         hist = remember_traffic(self.get(f'guard:traf:{pid}', {}), data['users'], now, conf['tz'])
         self.put(f'guard:traf:{pid}', hist)
         ix = index(data)
         conn_ips = {c['ip'] for k in ix['conn'] for c in live_ips(ix, k, now)}
         dev_ips = {d['ip'] for d in data['devices'] if d['ip'] and d['ip'] not in data['own']}
-        info = await asyncio.to_thread(self.lookup, sorted(conn_ips | dev_ips))
+        self.stage(pid, 'Узнаю, чьи сети у IP')
+        info = self.lookup(sorted(conn_ips | dev_ips))
+        self.stage(pid, 'Разбираю признаки')
         found = analyze(data, conf, hist, info, now, ix)
+        self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
+        return found, ix, conn_ips
+
+    async def check(self, prof: dict, now: float, data: dict | None = None) -> list[dict]:
+        conf, pid = cfg(prof), prof['id']
+        if data is None:
+            data = await asyncio.to_thread(collect, self.panel(prof), self.own_ips(prof), True, lambda t: self.stage(pid, t))
+        found, ix, conn_ips = await asyncio.to_thread(self.crunch, prof, data, now)
         seen = self.get(f'guard:seen:{pid}', {})
         ok = set(self.get(f'guard:ok:{pid}', []))
         acted = {'revoke': 0, 'disable': 0}
-        self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
-        for f in fresh(found, seen, ok, now):
+        todo = fresh(found, seen, ok, now)
+        if todo:
+            self.stage(pid, f'Отправляю сообщения: {len(todo)}')
+        rest = []
+        for i, f in enumerate(todo):
             seen[f['key']] = {'sig': signature(f), 'ts': now, 'codes': [r['code'] for r in f['reasons']]}
             done = ''
             if f['crit'] and conf['auto'] != 'off' and f['key'] not in ok:
                 done = await self.act(prof, f['key'], conf['auto'])
                 acted[conf['auto']] += not done.startswith('❌')
-            await self.alert(prof, f, done, await self.ai_auto(prof, f['key'], now) if conf['ai'] else None)
+            if i < ALERTS_EACH or done:
+                await self.alert(prof, f, done, await self.ai_auto(prof, f['key'], now) if conf['ai'] else None)
+            else:
+                rest.append(f)
+        if rest:  # первая проверка большой панели — не заваливать сообщениями
+            await self.digest(prof, rest)
         live = {f['key'] for f in found}
         seen = {k: v for k, v in seen.items() if k in live or now - v.get('ts', 0) < REMIND}
         self.put(f'guard:seen:{pid}', seen)
@@ -656,6 +757,18 @@ class Guard:
                                                  | {'reasons': [r['text'] for r in f['reasons']], 'ok': f['key'] in ok}
                                                  for f in found[:100]]})
         return found
+
+    async def digest(self, prof: dict, rest: list[dict]) -> None:
+        """Одно сообщение вместо пачки: остальные подозрительные списком, подробности — в разделе."""
+        e = html.escape
+        crit = sum(f['level'] == 'crit' for f in rest)
+        lines = [f'🛡 <b>Страж: ещё {len(rest)} подозрительных</b> · {e(prof["name"])}' + (f' (критично: {crit})' if crit else ''), '']
+        lines += [f'{LEVELS[f["level"]]} {e(f["name"])} — {e(f["reasons"][0]["text"][:120])}' for f in rest[:15]]
+        if len(rest) > 15:
+            lines.append(f'… и ещё {len(rest) - 15}')
+        lines += ['', 'Подробности и кнопки — в разделе «Страж» панели управления.']
+        mk = self.panel_button() if callable(self.panel_button) else None
+        await self.notify.emit('security.guard', '\n'.join(lines)[:3900], prof, mk)
 
     def count(self, pid: int, now: float, tz: int, **vals) -> None:
         """Сводка по дням за 30 дней: сколько подозрительных (максимум за день) и сколько действий."""
@@ -687,6 +800,9 @@ class Guard:
         for d in ix['dev'].get(key, []):
             for o in ix['hwid'].get(d['hwid'], set()) - {key}:
                 links.setdefault(o, set()).add('устройство')
+            for o in (ix['pc'].get(pc_name(d)) or {}) if pc_name(d) else ():
+                if o != key:
+                    links.setdefault(o, set()).add(f'имя ПК {d["model"]}')
         for ip in ips:
             for o in ix['ip'].get(ip, set()) - {key}:
                 links.setdefault(o, set()).add(f'IP {ip}')

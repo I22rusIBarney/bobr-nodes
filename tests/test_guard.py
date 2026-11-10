@@ -309,3 +309,75 @@ def test_ai_errors_and_daily_cap(tmp_path, monkeypatch):
 def test_scrub_hides_names_and_ips():
     t = gd._scrub('то же устройство, что у vasya_99 · IP 31.173.5.6 · h-123456789', ['vasya_99', 'h-123456789', 'ab'])
     assert t == 'то же устройство, что у «скрыто» · IP 31.173.x.x · «скрыто»'
+
+
+# ───────── «Проверить сейчас» в фоне и сводка вместо пачки сообщений ─────────
+def test_start_runs_in_background_and_reports_errors(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    prof = store.profile(pid)
+    g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {})
+    gate = asyncio.Event()
+
+    async def slow_check(p, now, data=None):
+        g.stage(pid, 'Спрашиваю ноды')
+        await gate.wait()
+        raise RuntimeError('панель упала')
+    monkeypatch.setattr(g, 'check', slow_check)
+
+    async def scenario():
+        st = g.start(prof)
+        assert st['stage'] == 'Начинаю'
+        await asyncio.sleep(0)
+        assert g.running[pid]['stage'] == 'Спрашиваю ноды'
+        assert g.start(prof)['stage'] == 'Спрашиваю ноды'   # вторая не запускается
+        assert len(g._tasks) == 1
+        gate.set()
+        await asyncio.gather(*list(g._tasks))
+        assert pid not in g.running
+        assert g.get(f'guard:last:{pid}', {})['error'] == 'панель упала'
+    asyncio.run(scenario())
+
+
+def test_many_suspects_become_one_digest(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    n = FakeNotify()
+    g = gd.Guard(store, n, ipinfo=lambda ip: {})
+    users = [user(f'u{i}', f'name{i}') for i in range(12)]
+    devs = [device(f'3x-ui-server-{i:04d}', f'u{i}', ua='3x-ui-outbound-sub/1.0', platform='', model='') for i in range(12)]
+    asyncio.run(g.check(store.profile(pid), NOW, data(users, devs)))
+    assert len(n.sent) == gd.ALERTS_EACH + 1
+    assert 'ещё 7 подозрительных' in n.sent[-1][1] and 'критично: 7' in n.sent[-1][1]
+
+
+# ───────── то же устройство: HWID и имя компьютера ─────────
+def test_pc_name_only_for_unique_computer_names():
+    assert gd.pc_name({'platform': 'Windows', 'model': 'DESKTOP-7F3K2LQ'}) == 'desktop-7f3k2lq'
+    assert gd.pc_name({'platform': 'windows', 'model': 'VASYA-PC'}) == 'vasya-pc'
+    assert gd.pc_name({'platform': '', 'model': 'LAPTOP-AB12CD3'}) == 'laptop-ab12cd3'
+    for model, plat in (('iPhone 15', 'iOS'), ('SM-S918B', 'Android'), ('MacBookPro18,1', 'macOS'), ('PC', 'Windows'),
+                        ('System Product Name', 'Windows'), ('Pixel 8', 'Android'), ('MyPhone123', 'Android')):
+        assert gd.pc_name({'platform': plat, 'model': model}) == '', model
+
+
+def test_twin_by_hwid_not_by_model_and_pc_name_link():
+    users = [user(f'u{i}', f'n{i}') for i in range(4)] + [user('b', 'banned', status='DISABLED')]
+    devs = [device('samehwid0001', 'u0'), device('samehwid0001', 'u1'),               # одно приложение на одном телефоне
+            device('iphone000001', 'u2'), device('iphone000002', 'u3'),               # просто два iPhone 15 — не связь
+            device('pchwid000001', 'u3', platform='Windows', model='DESKTOP-7F3K2LQ'),
+            device('pchwid000002', 'b', platform='Windows', model='DESKTOP-7F3K2LQ')]  # тот же ПК, другой HWID
+    ix = gd.index(data(users, devs))
+    j = {k: gd.judge(ix, k, CONF, {}, {}, NOW) for k in ('u0', 'u2', 'u3')}
+    assert [r['w'] for r in j['u0']['reasons']] == [30] and j['u0']['level'] == ''   # одна пара — не тревога
+    assert j['u2']['reasons'] == []
+    assert [r['code'] for r in j['u3']['reasons']] == ['ban-pc:b'] and j['u3']['level'] == 'warn'
+    devs.append(device('samehwid0001', 'u2'))
+    j = gd.judge(gd.index(data(users, devs)), 'u0', CONF, {}, {}, NOW)
+    assert j['reasons'][0]['w'] == 50 and 'n1, n2' in j['reasons'][0]['text']
+
+
+def test_pc_name_ignores_architecture_suffix():
+    happ = {'platform': 'Windows', 'model': 'DESKTOP-FR15BBH_x86_64'}  # так присылает Happ 4.3 на Windows
+    assert gd.pc_name(happ) == gd.pc_name({'platform': 'windows', 'model': 'DESKTOP-FR15BBH'}) == 'desktop-fr15bbh'
+    assert gd.pc_name({'platform': 'Windows', 'model': 'PC_x86_64'}) == ''
