@@ -111,6 +111,7 @@ ADMIN_ONLY = [
     (r'.*', r'/api/audit'),
     (r'POST', r'/api/stats/ask'),  # нейросеть — на ключе администратора
     (r'POST', r'/api/profiles/\d+/guard/users/[^/]+/ai'),
+    (r'POST', r'/api/profiles/\d+/guard/night'),
 ]
 
 
@@ -3280,7 +3281,8 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         last = guard_of().get(f'guard:last:{p["id"]}', {})
         admin = request is not None and is_admin(request)
         return {**gd.cfg(p), 'actions': gd.ACTIONS, 'last': last, 'admin': admin,
-                'ai_ready': admin and bool(store.get('gemini_key')), 'running': guard_of().running.get(p['id'])}
+                'ai_ready': admin and bool(store.get('gemini_key')), 'running': guard_of().running.get(p['id']),
+                'nights': guard_of().get(f'guard:nights:{p["id"]}', [])[:7], 'night_running': p['id'] in guard_of().nightly}
 
     @r.get('/api/profiles/{pid}/guard')
     async def guard_get(request):
@@ -3293,6 +3295,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         b = await body(request)
         if not is_admin(request):
             b.pop('ai', None)  # нейросеть — на ключе администратора
+            b.pop('night', None)
         try:
             g = gd.clean(b, p)
         except ValueError as e:
@@ -3304,6 +3307,16 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def guard_check(request):
         p = profile_or_404(request.match_info['pid'], request)
         guard_of().start(p)  # в фоне: большая панель проверяется минуты, а запрос ждать столько не может
+        return J(guard_view(p, request))
+
+    @r.post('/api/profiles/{pid}/guard/night')
+    async def guard_night(request):
+        """Итог дня сейчас (администратор): в фоне — нейросеть думает до минуты; придёт в Telegram и появится в разделе."""
+        p = profile_or_404(request.match_info['pid'], request)
+        g = guard_of()
+        if g.gemini() is None:
+            raise ApiError('Нейросеть не подключена: задайте ключ Gemini в «Подключениях»')
+        g.start_night(p)
         return J(guard_view(p, request))
 
     @r.get('/api/guard')

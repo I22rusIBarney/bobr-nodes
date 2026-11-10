@@ -62,6 +62,8 @@ HOURLY_KEEP = 27 * 3600   # почасовой трафик: последние 
 ACTIVE_HOUR = 50 * 2**20  # час «с трафиком» — от 50 МБ
 SUBS_PAGES = 20           # страниц истории запросов подписки за проход (по 500)
 AI_DAY = 30               # разборов нейросетью в уведомлениях на группу в сутки (по кнопке — без ограничения)
+NIGHT_MAX = 30            # подписчиков в ночном разборе группы (самые подозрительные за сутки)
+NIGHT_KEEP = 14           # сколько ночных итогов помним для раздела
 AI_TTL = 24 * 3600        # разбор с тем же набором признаков — из кэша
 
 SERVER_UA = re.compile(r'3x-?ui|x-ui|xray|v2ray-?core|sing-?box-?server|marzban|remnawave|curl|wget|python|aiohttp|httpx|'
@@ -123,6 +125,7 @@ def cfg(prof: dict) -> dict:
             'spike': int(g.get('spike', 5)),          # во сколько раз выше обычного (0 — не смотреть)
             'burst': int(g.get('burst', 4)),          # столько новых устройств за сутки (0 — не смотреть)
             'ai': bool(g.get('ai')),
+            'night': bool(g.get('night')),            # итог дня от нейросети в полночь (ключ Gemini администратора)
             # какие подписки проверять ('' — все); прежний шаблон по умолчанию (с $) — на новый
             'names': NAMES_DEF if g.get('names') in (None, NAMES_DEF + '$') or not isinstance(g.get('names'), str) else g['names'],                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
             'tz': int(g.get('tz', (prof.get('auto') or {}).get('tz', 0)))}
@@ -134,6 +137,8 @@ def clean(raw: dict, prof: dict) -> dict:
         g['on'] = bool(raw['on'])
     if 'ai' in raw:
         g['ai'] = bool(raw['ai'])
+    if 'night' in raw:
+        g['night'] = bool(raw['night'])
     if 'names' in raw:
         v = str(raw['names'] or '').strip()
         if len(v) > 200:
@@ -740,6 +745,81 @@ def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
     return out
 
 
+# ───────── итог дня ─────────
+NIGHT_SYSTEM = """Ты — аналитик VPN-сервиса (панель Remnawave). Раз в сутки тебе дают обезличенные сводки по подписчикам,
+которых бот-страж за день счёл подозрительными (у каждого id вида S1, S2…). Твоя задача — разобрать каждого и сказать
+владельцу, с кем действительно надо что-то делать, а где ложная тревога.
+
+Правило сервиса: делиться подпиской в пределах лимита устройств разрешено — близкие и друзья в разных городах и сетях
+со своими устройствами это нормально. Нарушение — выйти за лимит обходными путями (ключи мимо подписки, смена устройств,
+раздача ссылки), перепродажа, сервер-посредник, обход бана, сбор пробных периодов.
+
+Число IP само по себе не признак: телефон меняет IP от вышки к вышке, оператор выпускает одно устройство с нескольких
+адресов, дома Wi-Fi. Значимо, из скольких разных сетей (операторов) подписчик подключён одновременно — одно устройство
+не бывает в двух сетях сразу — и повторяется ли это от проверки к проверке
+(checks_last_24h_with_more_networks_than_limit). Обычное приложение, забравшее подписку с IP хостинга, — чаще всего
+человек с включённым вторым VPN. Устройство-сервер (3x-ui, xray, curl) или устройство отключённого — сильные факты.
+Не выдумывай фактов, которых нет в сводке.
+
+Ответ — строго JSON на русском:
+{"summary": "3–5 предложений: что за день видно в целом, на кого обратить внимание в первую очередь",
+ "users": [{"id": "S1",
+            "verdict": "honest"|"family"|"sharing"|"reselling"|"relay"|"evasion"|"unclear",
+            "confidence": 0-100,
+            "action": "none"|"watch"|"message"|"revoke"|"disable",
+            "why": "1–2 предложения: главные факты за вывод и, если есть, против"}]}
+Разбери всех из списка, по одному элементу на каждый id."""
+
+NIGHT_ACT = {'revoke', 'disable', 'message'}
+
+
+def night_clean(raw: dict, ids: dict) -> dict:
+    """Ответ нейросети → {summary, users: [{key, verdict, confidence, action, why}]}; чужие id отбрасываем."""
+    raw = raw if isinstance(raw, dict) else {}
+    users, seen = [], set()
+    for x in raw.get('users') or []:
+        if not isinstance(x, dict) or x.get('id') not in ids or x['id'] in seen:
+            continue
+        seen.add(x['id'])
+        a = ai_clean({**x, 'summary': x.get('why')})
+        users.append({'key': ids[x['id']], 'verdict': a['verdict'], 'confidence': a['confidence'], 'action': a['action'],
+                      'why': a['summary'][:400]})
+    return {'summary': str(raw.get('summary') or '')[:1500], 'users': users}
+
+
+def night_text(prof: dict, rep_: dict) -> str:
+    """Итог дня для Telegram: кого проверить и что сделать, кого наблюдать, где ложная тревога."""
+    e = html.escape
+    day = '.'.join(reversed(rep_['day'].split('-')[1:]))
+    who = lambda u: f'<code>{e(u["name"])}</code>' + (f' · <code>{e(u["handle"])}</code>' if u.get('handle') else '')  # noqa: E731
+    act = [u for u in rep_['users'] if u['action'] in NIGHT_ACT]
+    watch = [u for u in rep_['users'] if u['action'] == 'watch']
+    calm = [u for u in rep_['users'] if u['action'] == 'none']
+    lines = [f'🌙 <b>Итог дня стража</b> · {e(prof["name"])} · {day}', '', e(rep_['summary']) if rep_['summary'] else '']
+    if act:
+        lines += ['', f'<b>Действовать ({len(act)}):</b>']
+        for u in act[:12]:
+            lines.append(f'{"🔴" if u["action"] == "disable" else "🟠"} {who(u)} — {e(VERDICTS[u["verdict"]])} ({u["confidence"]}%), '
+                         f'совет: {e(AI_ACTIONS[u["action"]])}\n   <i>{e(u["why"])}</i>')
+    if watch:
+        lines += ['', f'<b>Понаблюдать ({len(watch)}):</b>']
+        lines += [f'🟡 {who(u)} — {e(VERDICTS[u["verdict"]])}: <i>{e(u["why"][:160])}</i>' for u in watch[:10]]
+    if calm:
+        lines += ['', f'<b>Похоже, ложная тревога ({len(calm)}):</b> ' + ', '.join(f'<code>{e(u["name"])}</code>' for u in calm[:15])
+                  + (f' и ещё {len(calm) - 15}' if len(calm) > 15 else '')]
+    if not rep_['users']:
+        lines += ['', 'За сутки подозрительных не было.']
+    lines += ['', 'Карточки и кнопки — в разделе «Страж» панели управления. Нейросеть может ошибаться: решение за вами.']
+    out, n = [], 0
+    for line in lines:
+        if n + len(line) > 3800:
+            out.append('…')
+            break
+        out.append(line)
+        n += len(line) + 1
+    return '\n'.join(out)
+
+
 # ───────── память между проверками ─────────
 def remember_devices(hw: dict, ix: dict, now: float) -> dict:
     """Какие HWID были у подписчика за HW_DAYS: {ключ: {hwid: [впервые, последний раз]}}."""
@@ -956,6 +1036,7 @@ class Guard:
         self._at: dict[int, float] = {}
         self._lock = asyncio.Lock()
         self.running: dict[int, dict] = {}   # идущие проверки: {pid: {started, stage}}
+        self.nightly: set[int] = set()       # идущие итоги дня по кнопке
         self._tasks: set = set()
         self.panel_button = None             # кнопка «Панель управления» (задаёт автопилот)
 
@@ -1012,6 +1093,27 @@ class Guard:
                     continue
                 self._at[prof['id']] = now
                 await self.run(prof, now)
+            for prof in profiles:
+                await self.night_due(prof, now)
+
+    async def night_due(self, prof: dict, now: float) -> None:
+        """Итог дня — один раз после полуночи по времени группы; включили днём — первый итог в ближайшую полночь."""
+        conf = cfg(prof)
+        if not (conf['on'] and conf['night']):
+            return
+        key, today = f'guard:night_day:{prof["id"]}', day_of(now, conf['tz'])
+        done = self.store.get(key)
+        if done == today:
+            return
+        self.store.set(key, today)
+        if not done:
+            return  # только что включили: ночь ещё не наступила
+        try:
+            await self.night(prof, now)
+        except Exception as e:  # noqa: BLE001
+            log.info('guard night %s: %s', prof.get('id'), e)
+            await self.notify.emit('security.guard', f'🌙 Итог дня стража · {html.escape(prof["name"])}: '
+                                                                     f'нейросеть не ответила — {html.escape(str(e)[:200])}', prof)
 
     async def run(self, prof: dict, now: float | None = None) -> None:
         """Проверка группы с отметкой «идёт» (её видно в разделе) и записью ошибки в итог."""
@@ -1035,6 +1137,25 @@ class Guard:
             self._tasks.add(t)
             t.add_done_callback(self._tasks.discard)
         return dict(self.running.get(pid) or {})
+
+    def start_night(self, prof: dict) -> None:
+        """«Итог дня сейчас»: в фоне; ошибка — сообщением в Telegram."""
+        pid = prof['id']
+        if pid in self.nightly:
+            return
+        self.nightly.add(pid)
+
+        async def go():
+            try:
+                await self.night(prof)
+            except Exception as e:  # noqa: BLE001
+                await self.notify.emit('security.guard', f'🌙 Итог дня стража · {html.escape(prof["name"])}: '
+                                                         f'не получилось — {html.escape(str(e)[:200])}', prof)
+            finally:
+                self.nightly.discard(pid)
+        t = asyncio.create_task(go())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
 
     def stage(self, pid: int, text_: str) -> None:
         if pid in self.running:
@@ -1265,6 +1386,50 @@ class Guard:
         out = {**ai_clean(raw), 'sig': sig, 'at': now}
         self.put(f'guard:ai:{prof["id"]}:{key}', out)
         return out
+
+    def night_candidates(self, prof: dict, now: float) -> list[dict]:
+        """Кого разбирать ночью: подозрительные последней проверки и все, о ком страж писал за сутки, — по баллам."""
+        pid = prof['id']
+        keys = {f['key'] for f in self.get(f'guard:last:{pid}', {}).get('found') or []}
+        keys |= {k for k, v in self.get(f'guard:seen:{pid}', {}).items() if now - v.get('ts', 0) < 86400}
+        cards = [c for c in (self.detail(prof, k, now) for k in keys) if c]
+        return sorted(cards, key=lambda c: -c['score'])[:NIGHT_MAX]
+
+    async def night(self, prof: dict, now: float | None = None) -> dict:
+        """Итог дня: одна просьба к нейросети по всем подозрительным группы; ответ — в Telegram и в раздел «Страж».
+        Нейросеть не видит имён, TG ID, HWID и полных IP. Ошибки — ValueError."""
+        now = now if now is not None else time.time()
+        pid, conf = prof['id'], cfg(prof)
+        g = self.gemini()
+        if g is None:
+            raise ValueError('Нейросеть не подключена: задайте ключ Gemini в «Подключениях»')
+        cards = await asyncio.to_thread(self.night_candidates, prof, now)
+        day = day_of(now - 3600, conf['tz'])  # в полночь подводим итог прошедших суток
+        report = {'day': day, 'at': now, 'summary': '', 'users': []}
+        if cards:
+            ids = {f'S{i + 1}': c['key'] for i, c in enumerate(cards)}
+            body = [{'id': f'S{i + 1}', **json.loads(ai_input(c, c.get('at') or now))} for i, c in enumerate(cards)]
+            from . import scripts as sc
+            try:
+                raw = await g.ask(NIGHT_SYSTEM, [{'role': 'user', 'text': json.dumps(body, ensure_ascii=False)}])
+            except sc.ScriptError as e:
+                raise ValueError(str(e)) from None
+            report.update(night_clean(raw, ids))
+            by_key = {c['key']: c for c in cards}
+            for u in report['users']:
+                c = by_key[u['key']]
+                u.update({'name': c['name'], 'handle': c.get('handle', ''), 'score': c['score'], 'level': c['level']})
+                if not self.ai_cached(pid, u['key']) or self.ai_cached(pid, u['key']).get('at', 0) < now - AI_TTL:
+                    self.put(f'guard:ai:{pid}:{u["key"]}', {'verdict': u['verdict'], 'confidence': u['confidence'], 'summary': u['why'],
+                                                           'evidence': [], 'doubts': [], 'action': u['action'], 'check': [],
+                                                           'sig': '', 'at': now, 'night': True})
+            order = {'disable': 0, 'revoke': 1, 'message': 2, 'watch': 3, 'none': 4}
+            report['users'].sort(key=lambda u: (order.get(u['action'], 5), -u['confidence']))
+        hist = [r for r in self.get(f'guard:nights:{pid}', []) if r.get('day') != day]
+        self.put(f'guard:nights:{pid}', ([report] + hist)[:NIGHT_KEEP])
+        mk = self.panel_button() if callable(self.panel_button) else None
+        await self.notify.emit('security.guard_night', night_text(prof, report), prof, mk)
+        return report
 
     async def ai_auto(self, prof: dict, key: str, now: float) -> dict | None:
         """Разбор для сообщения: не больше AI_DAY в сутки на группу; не вышло — сообщение уйдёт без него."""
