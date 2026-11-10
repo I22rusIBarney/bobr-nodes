@@ -375,3 +375,9 @@ def test_twin_by_hwid_not_by_model_and_pc_name_link():
     devs.append(device('samehwid0001', 'u2'))
     j = gd.judge(gd.index(data(users, devs)), 'u0', CONF, {}, {}, NOW)
     assert j['reasons'][0]['w'] == 50 and 'n1, n2' in j['reasons'][0]['text']
+
+
+def test_pc_name_ignores_architecture_suffix():
+    happ = {'platform': 'Windows', 'model': 'DESKTOP-FR15BBH_x86_64'}  # так присылает Happ 4.3 на Windows
+    assert gd.pc_name(happ) == gd.pc_name({'platform': 'windows', 'model': 'DESKTOP-FR15BBH'}) == 'desktop-fr15bbh'
+    assert gd.pc_name({'platform': 'Windows', 'model': 'PC_x86_64'}) == ''

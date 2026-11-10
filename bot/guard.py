@@ -58,12 +58,13 @@ GENERIC_MODEL = re.compile(r'^(iphone|ipad|ipod|sm-|samsung|galaxy|pixel|redmi|x
                            r'kvm|standard pc)', re.I)
 GENERIC_WORD = re.compile(r'(mac|pc|computer|desktop|laptop|windows|linux|ubuntu|android|unknown|default|user|admin|home)'
                           r'(-pc)?', re.I)  # имя целиком из общего слова
+ARCH = re.compile(r'[_ ](x86_64|amd64|x64|x86|i[3-6]86|arm64|aarch64|armv\d\w*)$', re.I)
 DESKTOP = re.compile(r'windows|win32|win64|mac ?os|macos|darwin|linux', re.I)
 
 
 def pc_name(d: dict) -> str:
     """Имя компьютера, если оно похоже на уникальное (DESKTOP-7F3K2LQ, VASYA-PC); у телефонов и типовых моделей — ''."""
-    m = (d.get('model') or '').strip()
+    m = ARCH.sub('', (d.get('model') or '').strip())  # Happ на Windows: DESKTOP-FR15BBH_x86_64 — архитектура не часть имени
     if len(m) < 5 or GENERIC_MODEL.match(m) or GENERIC_WORD.fullmatch(m) or re.fullmatch(r'[\w ]+\d+,\d+', m):  # MacBookPro18,1 — модель, а не имя
         return ''
     if DESKTOP.search(d.get('platform') or '') or re.match(r'(desktop|laptop|win)-[a-z0-9]{5,}$', m, re.I):
