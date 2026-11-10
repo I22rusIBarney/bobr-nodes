@@ -176,7 +176,11 @@ function guardCard(pid, key) {
     h('div', { class: 'sheet', style: 'padding:14px 16px' },
       h('div', { class: 'stats' },
         ...[[d.score, 'баллов риска', d.level === 'crit' ? 'bad' : d.level === 'warn' ? 'warn' : ''], [d.devices + (d.limit ? ` / ${d.limit}` : ''), 'устройств / лимит'],
-          [d.ips, 'IP подключений сейчас', d.ips > Math.max(d.devices, 1) + 2 ? 'warn' : ''], [gbs(d.yesterday), 'трафик за вчера'], [gbs(d.usual), 'обычно в сутки'], [gbs(d.used), 'всего']]
+          [d.ips, 'IP подключений сейчас', d.ips > Math.max(d.devices, 1) + 2 ? 'warn' : ''], [gbs(d.yesterday), 'трафик за вчера'], [gbs(d.usual), 'обычно в сутки'], [gbs(d.used), 'всего'],
+          [d.week_devices ?? '—', 'устройств за 7 дней', d.limit && d.week_devices >= d.limit + 3 ? 'warn' : ''],
+          [(d.sub_ips || []).length, 'IP ссылки за сутки', (d.sub_ips || []).length >= Math.max(d.devices, 1) * 3 + 3 ? 'warn' : ''],
+          [d.active_hours ?? '—', 'часов с трафиком из 24', d.active_hours >= 22 ? 'warn' : ''],
+          ...(d.torrents ? [[d.torrents, 'торренты за неделю', 'warn']] : [])]
           .map(([k, l, c]) => h('div', { class: 'stat', style: 'cursor:default' }, h('span', { class: 'k ' + (c || '') }, String(k)), h('span', { class: 'l' }, l)))),
       h('div', { style: 'margin-top:12px' }, actBtns(pid, d, refresh)),
       d.ok ? h('div', { class: 'hint', style: 'margin-top:8px' }, 'Отмечен «всё в порядке»: бот напишет только о новом критичном признаке.') : null),
@@ -195,6 +199,19 @@ function guardCard(pid, key) {
         h('div', null, netTag(c.net), h('div', { class: 's' }, (c.nodes.length ? 'ноды: ' + c.nodes.join(', ') : '') + (c.last ? ` · виден ${ago(c.last * 1000)}` : ''))),
         h('span', { class: 'st ' + (c.live ? 'ok' : '') }, c.live ? 'сейчас' : 'раньше'))))
         : h('div', { class: 'sheet', style: 'padding:14px 16px' }, d.conn_err ? 'Ноды не отдали IP подключений (нужна панель 2.7+): ' + d.conn_err : 'Сейчас не подключён.')),
+    (d.device_history || []).some(x => !x.current) ? sec('История устройств', `за 30 дней · ${d.device_history.length}`,
+      h('div', { class: 'list' }, d.device_history.map(x => row(h('span', { class: 'mono' }, x.hwid),
+        h('div', { class: 's' }, `впервые ${ago(x.first * 1000)}` + (x.current ? '' : ` · пропало ${ago(x.last * 1000)}`)),
+        h('span', { class: 'st ' + (x.current ? 'ok' : '') }, x.current ? 'сейчас' : 'удалено'))))) : null,
+    (d.sub_ips || []).length ? sec('С каких IP забирали ссылку подписки', `за сутки · ${d.sub_ips.length}`,
+      h('div', { class: 'list' }, d.sub_ips.map(x => row(x.ip, h('div', null, netTag(x.net), h('div', { class: 's' }, ago(x.at * 1000))))))) : null,
+    d.hourly ? sec('Трафик по часам', `за сутки · с трафиком ${d.active_hours} ч из 24`,
+      h('div', { class: 'sheet', style: 'padding:14px 16px' }, (() => { const mx = Math.max(1, ...d.hourly);
+        return h('div', { style: 'display:flex;align-items:flex-end;gap:2px;height:60px', 'aria-label': 'Трафик по часам' },
+          d.hourly.map((b, i) => h('div', { title: `${24 - i} ч назад: ${gbs(b)}`, style: `flex:1;height:${Math.max(2, b / mx * 100)}%;border-radius:2px;background:${b >= 50 * 2 ** 20 ? 'var(--accent, var(--warn))' : 'var(--sheet-2)'}` }))); })(),
+        h('div', { class: 'hint', style: 'margin-top:6px' }, 'У людей ночью трафик почти пропадает. Ровный круглые сутки — так качает сервер или раздача.'))) : null,
+    (d.torrent_list || []).length ? sec('Торренты', `за неделю · ${d.torrent_list.length}`,
+      h('div', { class: 'sheet', style: 'padding:14px 16px' }, 'Torrent Blocker срабатывал: ' + d.torrent_list.slice(0, 8).map(t => ago(t * 1000)).join(', '))) : null,
     sec('Запросы подписки', d.subs.length ? 'последние' : '',
       d.subs.length ? h('div', { class: 'list' }, d.subs.map(r => row(r.ua || 'без User-Agent',
         h('div', null, h('div', { class: 's' }, `${r.at ? ago(r.at * 1000) : ''}` + (r.ip ? ` · IP ${r.ip}` : '') + (r.rule ? ` · правило «${r.rule}»` : '')), r.net ? netTag(r.net) : null),

@@ -381,3 +381,98 @@ def test_pc_name_ignores_architecture_suffix():
     happ = {'platform': 'Windows', 'model': 'DESKTOP-FR15BBH_x86_64'}  # так присылает Happ 4.3 на Windows
     assert gd.pc_name(happ) == gd.pc_name({'platform': 'windows', 'model': 'DESKTOP-FR15BBH'}) == 'desktop-fr15bbh'
     assert gd.pc_name({'platform': 'Windows', 'model': 'PC_x86_64'}) == ''
+
+
+# ───────── смена устройств, IP подписки, круглосуточный трафик, ферма, торренты, общий чёрный список ─────────
+def test_device_churn_over_a_week():
+    users = [user('u1', 'reseller', hwidDeviceLimit=3)]
+    hw = {}
+    for day in range(7):  # каждый день — два новых устройства, старые удалены
+        devs = [device(f'dev{day:02d}{i:06d}', 'u1') for i in range(2)]
+        hw = gd.remember_devices(hw, gd.index(data(users, devs)), NOW - (6 - day) * DAY)
+    ix = gd.index(data(users, devs))
+    j = gd.judge(ix, 'u1', CONF, {}, {}, NOW, {'hw': hw})
+    assert j['week_devices'] == 14 and [r['code'] for r in j['reasons']] == ['churn'] and j['reasons'][0]['w'] == 50
+    old = gd.remember_devices(hw, ix, NOW + 40 * DAY)  # через 40 дней старые забыты
+    assert set(old['u1']) == {d['hwid'] for d in devs}
+
+
+def test_subscription_link_opened_from_many_ips():
+    subs = [{'owner': 'u1', 'at': NOW - 600 * i, 'ip': f'31.0.0.{i}', 'ua': 'Happ/4', 'type': 'XRAY_BASE64', 'rule': ''} for i in range(9)]
+    d = {**data([user('u1', 'a')], [device('dev000000001', 'u1'), device('dev000000002', 'u1')]), 'subs': subs}
+    ix = gd.index(d)
+    mem = gd.remember_subips({}, ix, NOW)
+    j = gd.judge(ix, 'u1', CONF, {}, {}, NOW, {'subip': mem})
+    assert j['sub_ips'] == 9 and j['reasons'][0]['code'] == 'subips'
+    assert gd.judge(ix, 'u1', CONF, {}, {}, NOW + 2 * DAY, {'subip': mem})['reasons'] == []  # старое не считаем
+
+
+def test_traffic_around_the_clock():
+    pts, used = {}, 0
+    for h in range(25, -1, -1):
+        used += 300 * 2**20
+        pts = gd.remember_hourly(pts, [{'key': 'u1', 'used': used}], NOW - h * 3600)
+    hrs = gd.active_hours(pts['u1'], NOW)
+    assert hrs['active'] == 24 and len(hrs['hours']) == 24
+    ix = gd.index(data([user('u1', 'a', used=used)], []))
+    assert gd.judge(ix, 'u1', CONF, {}, {}, NOW, {'hourly': pts})['reasons'][0]['code'] == 'flat'
+    idle = gd.remember_hourly({}, [{'key': 'u2', 'used': 5}], NOW)
+    idle = gd.remember_hourly(idle, [{'key': 'u2', 'used': 5}], NOW + 3600)
+    assert idle['u2'] == [[NOW + 3600, 5]]  # без трафика храним одну отметку
+    assert gd.active_hours(idle['u2'], NOW + 3600) is None
+
+
+def test_trial_farm_and_torrents():
+    users = [user('u0', 'main')] + [user(f't{i}', f'trial{i}', status='EXPIRED') for i in range(3)]
+    devs = [device('farmhwid0001', o) for o in ('u0', 't0', 't1', 't2')]
+    d = {**data(users, devs), 'torrents': [{'owner': 'name:main', 'at': NOW - 3600 * i} for i in range(4)]}
+    j = gd.judge(gd.index(d), 'u0', CONF, {}, {}, NOW)
+    codes = {r['code'] for r in j['reasons']}
+    assert 'farm' in codes and 'torrent' in codes and j['torrents'] == 4
+
+
+def test_shared_blacklist_only_inside_one_owner(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    a = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'on': True}})
+    b = store.save_profile({'name': 'B', 'panel_url': 'https://b', 'panel_token': 't', 'guard': {'on': True}})
+    c = store.save_profile({'name': 'C', 'panel_url': 'https://c', 'panel_token': 't', 'guard': {'on': True}, 'created_by': 777})
+    g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {})
+    asyncio.run(g.check(store.profile(a), NOW, data([user('x', 'banned', status='DISABLED')],
+                                                     [device('evilhwid0001', 'x'), device('pc0000000001', 'x', platform='Windows', model='DESKTOP-EVIL123')])))
+    newcomer = [user('y', 'newcomer')], [device('evilhwid0001', 'y')]
+    found = asyncio.run(g.check(store.profile(b), NOW, data(*newcomer)))
+    assert found and found[0]['crit'] and 'другой вашей группе' in found[0]['reasons'][0]['text']
+    assert asyncio.run(g.check(store.profile(c), NOW, data(*newcomer))) == []  # чужой владелец — список не общий
+    pc = asyncio.run(g.check(store.profile(b), NOW + 1, data([user('z', 'pcguy')], [device('pc0000000002', 'z', platform='Windows', model='DESKTOP-EVIL123_x86_64')])))
+    assert pc[0]['reasons'][0]['code'] == 'xban-pc'
+
+
+def test_sub_history_pages_newest_first_and_oldest_first():
+    rec = lambda i: {'userId': 1, 'requestAt': iso(NOW - i * 60), 'requestIp': f'1.1.{i // 250}.{i % 250}', 'userAgent': 'Happ'}  # noqa: E731
+    newest = [rec(i) for i in range(1500)]          # свежие сначала, 1500 записей по минуте
+
+    def call_new(method, path):
+        start = int(path.split('start=')[1].split('&')[0])
+        return {'records': newest[start:start + 500], 'total': 1500}
+    out = gd.sub_history(call_new, NOW - 600 * 60)
+    assert len(out) == 601 and max(r['at'] for r in out) == pytest.approx(NOW)
+    oldest = list(reversed(newest))
+
+    def call_old(method, path):
+        start = int(path.split('start=')[1].split('&')[0])
+        return {'records': oldest[start:start + 500], 'total': 1500}
+    assert len(gd.sub_history(call_old, NOW - 600 * 60)) == 601
+
+
+def test_card_shows_memory(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'on': True}})
+    g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {'holder': 'MTS'})
+    users = [user('u1', 'a')]
+    asyncio.run(g.check(store.profile(pid), NOW - DAY, data(users, [device('olddevice001', 'u1')])))
+    subs = [{'owner': 'u1', 'at': NOW - 60, 'ip': '5.5.5.5', 'ua': 'Happ', 'type': 'XRAY_BASE64', 'rule': ''}]
+    asyncio.run(g.check(store.profile(pid), NOW, {**data(users, [device('newdevice001', 'u1')]), 'subs': subs}))
+    card = g.detail(store.profile(pid), 'u1', NOW)
+    assert [(x['hwid'], x['current']) for x in card['device_history']] == [('newdevice001', True), ('olddevice001', False)]
+    assert card['week_devices'] == 2 and card['sub_ips'][0]['ip'] == '5.5.5.5' and card['sub_ips'][0]['net']['holder'] == 'MTS'
+    assert card['hourly'] is None and card['torrent_list'] == []
