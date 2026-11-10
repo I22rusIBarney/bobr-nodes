@@ -10,7 +10,14 @@
 - то же устройство или IP, что у отключённого в панели пользователя (обход бана), то же устройство у другого;
 - IP подключений на нодах (Remnawave 2.7+): одновременно IP заметно больше, чем устройств, — ключи вставлены мимо
   подписки (переносят хосты в чужие клиенты); подключения с IP хостинга — сервер-посредник;
-- история запросов подписки: забирали запрещённым клиентом (правило ответа заблокировало) или сервером.
+- история запросов подписки: забирали запрещённым клиентом (правило ответа заблокировало) или сервером;
+  ссылку за сутки забирали с IP намного больше, чем устройств, — ссылкой делятся;
+- смена устройств: за неделю разных HWID намного больше лимита — старые удаляют, новые добавляют (перепродажа);
+- трафик идёт почти круглые сутки — сервер-посредник или раздача;
+- ферма пробных периодов: на одном устройстве или компьютере несколько аккаунтов, и большинство уже истекли;
+- торренты (срабатывания Torrent Blocker);
+- устройство или компьютер отключённого подписчика из другой группы того же владельца.
+Делиться подпиской в пределах лимита устройств можно: разные города и сети сами по себе не признак.
 
 Каждый признак даёт баллы. От WARN — сообщение тем, кто ведёт группу, с кнопками «перевыпустить подписку»,
 «отключить», «всё в порядке». Автодействие (по настройке группы) — только для критичных признаков.
@@ -44,6 +51,11 @@ CONN_ACTIVE = 3600        # IP подключения считается жив�
 CONN_WAIT = 45            # сколько ждать ответа ноды о подключениях
 SUBS_KEEP = 15            # запросов подписки на пользователя — для карточки
 BLOCKED = {'BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP'}
+HW_DAYS = 30              # сколько помним устройства подписчика (смена устройств)
+SUBIP_KEEP = 48 * 3600    # сколько помним IP, с которых забирали подписку
+HOURLY_KEEP = 27 * 3600   # почасовой трафик: последние сутки с запасом
+ACTIVE_HOUR = 50 * 2**20  # час «с трафиком» — от 50 МБ
+SUBS_PAGES = 20           # страниц истории запросов подписки за проход (по 500)
 AI_DAY = 30               # разборов нейросетью в уведомлениях на группу в сутки (по кнопке — без ограничения)
 AI_TTL = 24 * 3600        # разбор с тем же набором признаков — из кэша
 
@@ -148,7 +160,8 @@ def norm_user(u: dict) -> dict | None:
         used = _first(u, 'lifetimeUsedTrafficBytes', 'usedTrafficBytes', default=0)
     ids = {str(x) for x in (u.get('uuid'), u.get('id')) if x not in (None, '')}
     return {'key': key, 'ids': ids, 'name': str(u.get('username') or key)[:64], 'status': str(u.get('status') or '').upper(),
-            'tg': u.get('telegramId'), 'limit': u.get('hwidDeviceLimit'), 'used': int(float(used or 0))}
+            'tg': u.get('telegramId'), 'limit': u.get('hwidDeviceLimit'), 'used': int(float(used or 0)),
+            'expire': _ts(u.get('expireAt')), 'created': _ts(u.get('createdAt'))}
 
 
 def norm_device(d: dict) -> dict | None:
@@ -187,6 +200,47 @@ def norm_sub(r: dict) -> dict | None:
     return {'owner': owner, 'at': _ts(_first(r, 'requestAt', 'createdAt')) or 0, 'ip': str(r.get('requestIp') or ''),
             'ua': str(r.get('userAgent') or '')[:120], 'type': str(r.get('srrResponseType') or ''),
             'rule': str(r.get('srrRuleName') or '')[:60]}
+
+
+def sub_history(call, since: float) -> list[dict]:
+    """Запросы подписки не старше since: по страницам, свежие сначала (панель может отдавать и старые сначала)."""
+    first = call('GET', '/api/subscription-request-history?start=0&size=500')
+    rows = first.get('records') if isinstance(first, dict) else first
+    total = first.get('total') if isinstance(first, dict) else None
+    recs = [x for x in (norm_sub(r) for r in rows or [] if isinstance(r, dict)) if x]
+    if len(recs) < 2 or not isinstance(total, int) or total <= 500:
+        return [r for r in recs if r['at'] >= since]
+    asc = recs[0]['at'] < recs[-1]['at']
+    out, step = [r for r in recs if r['at'] >= since], 500
+    starts = range(total - step, -1, -step) if asc else range(step, total, step)
+    if asc:
+        out = []  # первая страница — самые старые: идём с конца
+    for n, start in enumerate(starts):
+        if n >= SUBS_PAGES:
+            break
+        page = call('GET', f'/api/subscription-request-history?start={max(start, 0)}&size={step}')
+        rows = page.get('records') if isinstance(page, dict) else page
+        part = [x for x in (norm_sub(r) for r in rows or [] if isinstance(r, dict)) if x]
+        if not part:
+            break
+        out += [r for r in part if r['at'] >= since]
+        if min(r['at'] for r in part) < since:
+            break
+    return out
+
+
+def torrent_reports(call) -> list[dict]:
+    """Срабатывания Torrent Blocker за последнее время: [{owner, at}] (owner — id, uuid или «name:имя»)."""
+    page = call('GET', '/api/node-plugins/torrent-blocker?start=0&size=500') or {}
+    out = []
+    for x in page.get('records') or []:
+        u = x.get('user') if isinstance(x.get('user'), dict) else {}
+        owner = str(_first(u, 'id', 'uuid', default='') or _first(x, 'userId', 'userUuid', default='') or '')
+        if not owner and u.get('username'):
+            owner = 'name:' + str(u['username'])
+        if owner:
+            out.append({'owner': owner, 'at': _ts(x.get('createdAt')) or 0})
+    return out
 
 
 def _job(panel, start: str, result: str, wait: float = CONN_WAIT, sleep=time.sleep):
@@ -245,11 +299,14 @@ def collect(panel, extra_own: set | None = None, conns: bool = True, stage=lambd
         dev_err = str(e)[:200]
     subs, subs_err = [], ''
     try:
-        page = panel.call('GET', '/api/subscription-request-history?start=0&size=1000')
-        rows = page.get('records') if isinstance(page, dict) else page
-        subs = [x for x in (norm_sub(r) for r in rows or [] if isinstance(r, dict)) if x]
+        subs = sub_history(panel.call, time.time() - 26 * 3600)
     except Exception as e:  # noqa: BLE001
         subs_err = str(e)[:200]
+    torrents = []
+    try:
+        torrents = torrent_reports(panel.call)
+    except Exception:  # noqa: BLE001 — плагина нет или он выключен
+        pass
     own, nodes = set(extra_own or ()), []
     try:
         from . import engine
@@ -278,7 +335,7 @@ def collect(panel, extra_own: set | None = None, conns: bool = True, stage=lambd
         if errs and not conn:
             conn_err = errs[0]
     return {'users': users, 'devices': devices, 'dev_err': dev_err, 'own': own, 'conn': conn, 'conn_err': conn_err,
-            'subs': subs, 'subs_err': subs_err}
+            'subs': subs, 'subs_err': subs_err, 'torrents': torrents}
 
 
 # ───────── трафик ─────────
@@ -323,8 +380,9 @@ def index(data: dict) -> dict:
     """Кто есть кто: пользователи, их устройства, IP подключений и запросы подписки — по ключу пользователя."""
     users = {u['key']: u for u in data['users'] if not u['name'].startswith('bridge_')}  # служебные пользователи мостов
     alias = {i: u['key'] for u in users.values() for i in u['ids']}
+    alias.update({'name:' + u['name']: u['key'] for u in users.values()})
     own = data.get('own') or set()
-    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'pc': {}, 'ip': {}, 'own': own,
+    ix = {'users': users, 'dev': {}, 'conn': {}, 'subs': {}, 'hwid': {}, 'pc': {}, 'ip': {}, 'own': own, 'torrent': {},
           'banned': {k for k, u in users.items() if u['status'] == 'DISABLED'}}
     for d in data.get('devices') or []:
         k = alias.get(d['owner'])
@@ -344,6 +402,10 @@ def index(data: dict) -> dict:
             if c['node'] and c['node'] not in cur['nodes']:
                 cur['nodes'].append(c['node'])
             ix['ip'].setdefault(c['ip'], set()).add(k)
+    for t in data.get('torrents') or []:
+        k = alias.get(t['owner'])
+        if k:
+            ix['torrent'].setdefault(k, []).append(t['at'])
     for r in sorted(data.get('subs') or [], key=lambda r: -r['at']):
         k = alias.get(r['owner'])
         if k:
@@ -360,9 +422,10 @@ def live_ips(ix: dict, k: str, now: float) -> list[dict]:
     return [c for c in (ix['conn'].get(k) or {}).values() if not c['last'] or now - c['last'] < CONN_ACTIVE]
 
 
-def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) -> dict:
+def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex: dict | None = None) -> dict:
     """Признаки одного пользователя: {key, name, score, level, crit, reasons, devices, ips, …}; level '' — чисто."""
     u, banned, own = ix['users'][k], ix['banned'], ix['own']
+    ex = ex or {}
     reasons: list[dict] = []
 
     def add(code, w, text, crit=False):
@@ -378,9 +441,6 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
     hosted = sorted({d['ip'] for d in devs if d['ip'] and d['ip'] not in own and HOSTING.search(holder(ipinfo, d['ip']))})
     for ip in hosted[:3]:
         add('host:' + ip, 60, f'подписку забирали с IP хостинга {ip} ({holder(ipinfo, ip)[:40]})')
-    nets = {holder(ipinfo, d['ip']) for d in devs if d['ip'] and d['ip'] not in own} - {''}
-    if len(nets) >= 4:
-        add('nets', 20, f'устройства в {len(nets)} разных сетях')
     if conf['burst']:
         fresh_d = [d for d in devs if d['created'] and now - d['created'] < 86400]
         if len(fresh_d) >= conf['burst']:
@@ -399,6 +459,20 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
         names = ', '.join(ix['users'][o]['name'] for o in sorted(twins)[:3]) + (f' и ещё {len(twins) - 3}' if len(twins) > 3 else '')
         add('twin:' + ','.join(sorted(twins)[:5]), 30 if len(twins) == 1 else 50,
             f'то же устройство (HWID) у других аккаунтов: {names}')
+    # ферма пробных периодов: соседи по устройству или компьютеру, и большинство уже истекли
+    pcs = {o for d in devs if pc_name(d) for o in (ix['pc'].get(pc_name(d)) or {})} - {k} - banned
+    near = twins | pcs
+    gone = [o for o in near if ix['users'][o]['status'] in ('EXPIRED', 'LIMITED') or (ix['users'][o].get('expire') or now) < now]
+    if len(near) >= 2 and len(gone) >= 2:
+        add('farm', 40, f'на этом устройстве или компьютере ещё {len(near)} аккаунтов, из них истекли {len(gone)} — '
+                        f'похоже на сбор пробных периодов')
+    # устройство или компьютер отключённого в другой группе того же владельца
+    xb = ex.get('ban') or {}
+    for d in devs:
+        if d['hwid'] in (xb.get('hw') or {}):
+            add('xban-hw', CRIT, 'устройство (HWID) было у отключённого подписчика в другой вашей группе', True)
+        if pc_name(d) and pc_name(d) in (xb.get('pc') or {}):
+            add('xban-pc', 50, f'компьютер «{d["model"]}» был у отключённого подписчика в другой вашей группе')
     # тот же компьютер под другим HWID (другое приложение или переустановка): уникальное имя ПК вроде DESKTOP-7F3K2LQ
     for d in devs:
         name = pc_name(d)
@@ -424,9 +498,6 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
         add('over', 20, f'IP подключений больше лимита устройств ({u["limit"]})')
     for c in sorted((c for c in ips if HOSTING.search(holder(ipinfo, c['ip']))), key=lambda c: c['ip'])[:3]:
         add('conn-host:' + c['ip'], 70, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) — сервер-посредник')
-    cnets = {holder(ipinfo, c['ip']) for c in ips} - {''}
-    if len(cnets) >= 4:
-        add('conn-nets', 20, f'подключения одновременно из {len(cnets)} разных сетей')
     # запросы подписки: запрещённый клиент или сервер
     for r in (ix['subs'].get(k) or [])[:50]:
         if now - r['at'] > 3 * 86400:
@@ -436,6 +507,25 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
         elif r['type'] in BLOCKED:
             add('sub-block:' + r['ua'][:30], 40, f'подписку пытались забрать запрещённым клиентом: {r["ua"] or "без User-Agent"}'
                 + (f' (правило «{r["rule"]}»)' if r['rule'] else ''))
+    lim = int(u.get('limit') or 0) or max(len(devs), 3)
+    week = [h for h, (_f, last) in ((ex.get('hw') or {}).get(k) or {}).items() if last >= now - 7 * 86400]
+    if len(week) >= lim * 2 and len(week) >= lim + 4:
+        add('churn', 50, f'за 7 дней {len(week)} разных устройств при лимите {lim}: старые удаляют, новые добавляют — '
+                         f'похоже на перепродажу')
+    elif len(week) >= lim + 3:
+        add('churn', 25, f'за 7 дней {len(week)} разных устройств при лимите {lim}')
+    subips = [ip for ip, t in ((ex.get('subip') or {}).get(k) or {}).items() if t >= now - 86400]
+    nd = max(len(devs), 1)
+    if len(subips) >= nd * 3 + 3:
+        add('subips', 40, f'за сутки ссылку подписки забирали с {len(subips)} разных IP при {len(devs)} устройствах — '
+                          f'похоже, ссылкой делятся')
+    hours = active_hours((ex.get('hourly') or {}).get(k), now)
+    if hours is not None and hours['active'] >= 22 and hours['total'] >= 5 * 2**30:
+        add('flat', 30, f'трафик идёт почти круглые сутки: {hours["active"]} часов из 24, {gb(hours["total"])} — '
+                        f'так качает сервер или раздача, а не люди')
+    tor = [t for t in ix['torrent'].get(k, []) if t >= now - 7 * 86400]
+    if len(tor) >= 3:
+        add('torrent', 20, f'торренты: {len(tor)} срабатываний Torrent Blocker за неделю')
     y, base = traffic(hist.get(k) or {}, now, conf['tz'])
     if y is not None:
         if conf['day_gb'] and y > conf['day_gb'] * 2**30:
@@ -450,14 +540,16 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float) ->
     crit = any(r['crit'] for r in reasons)
     level = 'crit' if crit or score >= CRIT else 'warn' if score >= WARN else ''
     return {'key': k, 'name': u['name'], 'tg': u['tg'], 'status': u['status'], 'score': score, 'crit': crit, 'level': level,
-            'reasons': reasons, 'devices': len(devs), 'ips': len(ips), 'limit': u['limit'], 'yesterday': y, 'usual': base}
+            'reasons': reasons, 'devices': len(devs), 'ips': len(ips), 'limit': u['limit'], 'yesterday': y, 'usual': base,
+            'week_devices': len(week), 'sub_ips': len(subips), 'active_hours': hours['active'] if hours else None,
+            'torrents': len(tor)}
 
 
-def analyze(data: dict, conf: dict, hist: dict, ipinfo: dict, now: float, ix: dict | None = None) -> list[dict]:
+def analyze(data: dict, conf: dict, hist: dict, ipinfo: dict, now: float, ix: dict | None = None, ex: dict | None = None) -> list[dict]:
     """Подозрительные пользователи (от WARN или с критичным признаком), по убыванию баллов. Отключённые — не в счёт.
     ipinfo — {ip: {'holder': …}} (что успели узнать); hist — отметки трафика (remember_traffic)."""
     ix = ix or index(data)
-    out = [f for f in (judge(ix, k, conf, hist, ipinfo, now) for k in ix['users'] if k not in ix['banned']) if f['level']]
+    out = [f for f in (judge(ix, k, conf, hist, ipinfo, now, ex) for k in ix['users'] if k not in ix['banned']) if f['level']]
     return sorted(out, key=lambda x: -x['score'])
 
 
@@ -495,11 +587,95 @@ def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
     return '\n'.join(lines)[:3900]
 
 
+# ───────── память между проверками ─────────
+def remember_devices(hw: dict, ix: dict, now: float) -> dict:
+    """Какие HWID были у подписчика за HW_DAYS: {ключ: {hwid: [впервые, последний раз]}}."""
+    out = {}
+    for k in ix['users']:
+        cur = {h: list(v) for h, v in (hw.get(k) or {}).items() if v[1] >= now - HW_DAYS * 86400}
+        for d in ix['dev'].get(k, []):
+            first = (cur.get(d['hwid']) or [d['created'] or now])[0]
+            cur[d['hwid']] = [first, now]
+        if cur:
+            out[k] = cur
+    return out
+
+
+def remember_subips(mem: dict, ix: dict, now: float) -> dict:
+    """С каких IP забирали подписку: {ключ: {ip: когда последний раз}} за SUBIP_KEEP."""
+    out = {}
+    for k in ix['users']:
+        cur = {ip: t for ip, t in (mem.get(k) or {}).items() if t >= now - SUBIP_KEEP}
+        for r in ix['subs'].get(k) or []:
+            if r['ip'] and r['ip'] not in ix['own'] and r['at'] >= now - SUBIP_KEEP:
+                cur[r['ip']] = max(cur.get(r['ip'], 0), r['at'])
+        if cur:
+            out[k] = cur
+    return out
+
+
+def remember_hourly(mem: dict, users: list[dict], now: float) -> dict:
+    """Счётчик трафика каждый проход: {ключ: [[время, байт], …]} за сутки. Без изменений — только последняя отметка."""
+    out = {}
+    for u in users:
+        pts = [p for p in (mem.get(u['key']) or []) if p[0] >= now - HOURLY_KEEP and p[1] <= u['used']] + [[now, u['used']]]
+        out[u['key']] = pts[-30:] if len({p[1] for p in pts}) > 1 else pts[-1:]
+    return out
+
+
+def active_hours(pts: list | None, now: float) -> dict | None:
+    """Сколько из последних 24 часов шёл трафик (от ACTIVE_HOUR) и сколько всего; None — отметок за сутки мало."""
+    pts = sorted(p for p in (pts or []) if p[0] >= now - 25 * 3600)
+    pairs = [(a, b) for a, b in zip(pts, pts[1:]) if 0 < b[0] - a[0] <= 2 * 3600 and b[1] >= a[1]]
+    if len(pairs) < 20:
+        return None
+    by_hour: dict[int, int] = {}
+    for a, b in pairs:
+        by_hour[int(b[0] // 3600)] = by_hour.get(int(b[0] // 3600), 0) + b[1] - a[1]
+    last = int(now // 3600)
+    hours = [by_hour.get(h, 0) for h in range(last - 23, last + 1)]
+    return {'active': sum(1 for x in hours if x >= ACTIVE_HOUR), 'total': sum(hours), 'hours': hours}
+
+
+def tenant(prof: dict, admins=()) -> str:
+    """Чьи это группы: общий чёрный список — только между группами одного владельца."""
+    made = str(prof.get('created_by') or '')
+    owner = str(prof.get('owner_tg_id') or prof.get('owner') or '')
+    if owner:
+        return 'owner:' + owner.lower()
+    if made and made not in {str(a) for a in admins}:
+        return 'user:' + made
+    return 'admin'
+
+
+def remember_bans(ban: dict, ix: dict, pid: int, now: float) -> dict:
+    """Чёрный список владельца: HWID и имена ПК отключённых подписчиков из всех его групп ({hw|pc: {что: [группа, когда]}})."""
+    out = {kind: {x: v for x, v in (ban.get(kind) or {}).items() if v[0] != pid} for kind in ('hw', 'pc')}
+    for k in ix['banned']:
+        for d in ix['dev'].get(k, []):
+            out['hw'][d['hwid']] = [pid, now]
+            if pc_name(d):
+                out['pc'][pc_name(d)] = [pid, now]
+    for kind in ('hw', 'pc'):  # не больше 20 000 записей: старые уходят
+        if len(out[kind]) > 20000:
+            out[kind] = dict(sorted(out[kind].items(), key=lambda x: -x[1][1])[:20000])
+    return out
+
+
+def others(ban: dict, pid: int) -> dict:
+    """Записи чёрного списка из других групп."""
+    return {kind: {x: v for x, v in (ban.get(kind) or {}).items() if v[0] != pid} for kind in ('hw', 'pc')}
+
+
 # ───────── разбор нейросетью ─────────
 AI_SYSTEM = """Ты помогаешь владельцу VPN-сервиса (панель Remnawave) понять, честный ли подписчик или он раздаёт либо
 перепродаёт подписку. Тебе дают обезличенную сводку по одному подписчику: признаки, которые нашёл бот (с баллами),
 устройства (HWID: платформа, модель, клиент, сеть, хостинг ли), IP подключений к нодам за последний час (сеть, хостинг ли,
 к каким нодам), последние запросы подписки (клиент, ответ правила), трафик по дням и связи с другими аккаунтами.
+
+Правило сервиса: делиться подпиской в пределах лимита устройств разрешено — близкие и друзья в разных городах
+и сетях с собственными устройствами это нормально, не нарушение. Нарушение — выйти за лимит обходными путями
+(ключи мимо подписки, смена устройств, раздача ссылки), перепродажа, посредник, обход бана, сбор пробных периодов.
 
 Как рассуждать:
 - семья или компания друзей — несколько телефонов и ПК, IP одного-двух домашних провайдеров или мобильного оператора
@@ -560,6 +736,11 @@ def ai_input(card: dict, now: float) -> str:
                                    'hours_ago': round((now - r['at']) / 3600, 1) if r['at'] else None, 'net': net(r.get('net'))}
                                   for r in card['subs'][:10]],
         'traffic_gb_by_day': {t['day']: round(t['bytes'] / 2**30, 2) for t in card['traffic']},
+        'distinct_devices_last_7_days': card.get('week_devices'),
+        'subscription_fetch_ips_last_24h': len(card.get('sub_ips') or []),
+        'hours_with_traffic_last_24h': card.get('active_hours'),
+        'torrent_blocks_last_7_days': card.get('torrents'),
+        'policy': 'делиться подпиской в пределах лимита устройств разрешено; разные города и сети — не нарушение',
         'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'pc_name' if v.startswith('имя ПК') else 'ip'
                                                                for v in x['via']]}
                             for x in card['links'][:10]],
@@ -597,7 +778,8 @@ def snapshot(data: dict, now: float) -> dict:
             lst.append(r)
     return {'at': now, 'users': [{**{k: v for k, v in u.items() if k != 'ids'}, 'ids': sorted(u['ids'])} for u in data['users']],
             'devices': data.get('devices') or [], 'conn': data.get('conn') or [], 'subs': [r for v in subs.values() for r in v],
-            'own': sorted(data.get('own') or ()), 'conn_err': data.get('conn_err', ''), 'dev_err': data.get('dev_err', '')}
+            'own': sorted(data.get('own') or ()), 'conn_err': data.get('conn_err', ''), 'dev_err': data.get('dev_err', ''),
+            'torrents': [t for t in data.get('torrents') or [] if t['at'] >= now - 7 * 86400]}
 
 
 def unsnap(snap: dict) -> dict:
@@ -705,6 +887,26 @@ class Guard:
         except Exception:  # noqa: BLE001
             return set()
 
+    def ban_key(self, prof: dict) -> str:
+        return 'guard:ban:' + tenant(prof, getattr(self.notify, 'admins', ()) or ())
+
+    def memory(self, prof: dict, ix: dict, data: dict, now: float) -> dict:
+        """Обновить память между проверками (устройства, IP подписки, почасовой трафик, чёрный список) и отдать её разбору."""
+        pid = prof['id']
+        hw = remember_devices(self.get(f'guard:hw:{pid}', {}), ix, now)
+        subip = remember_subips(self.get(f'guard:subip:{pid}', {}), ix, now)
+        hourly = remember_hourly(self.get(f'guard:hourly:{pid}', {}), data['users'], now)
+        ban = remember_bans(self.get(self.ban_key(prof), {}), ix, pid, now)
+        for key, val in ((f'guard:hw:{pid}', hw), (f'guard:subip:{pid}', subip), (f'guard:hourly:{pid}', hourly), (self.ban_key(prof), ban)):
+            self.put(key, val)
+        return {'hw': hw, 'subip': subip, 'hourly': hourly, 'ban': others(ban, pid)}
+
+    def recall(self, prof: dict) -> dict:
+        """Память для карточки — только чтение."""
+        pid = prof['id']
+        return {'hw': self.get(f'guard:hw:{pid}', {}), 'subip': self.get(f'guard:subip:{pid}', {}),
+                'hourly': self.get(f'guard:hourly:{pid}', {}), 'ban': others(self.get(self.ban_key(prof), {}), pid)}
+
     def crunch(self, prof: dict, data: dict, now: float) -> tuple[list[dict], dict, set]:
         """Тяжёлая часть проверки (в потоке, чтобы не задерживать бота): трафик, сети IP, разбор, срез для карточек."""
         conf, pid = cfg(prof), prof['id']
@@ -716,7 +918,8 @@ class Guard:
         self.stage(pid, 'Узнаю, чьи сети у IP')
         info = self.lookup(sorted(conn_ips | dev_ips))
         self.stage(pid, 'Разбираю признаки')
-        found = analyze(data, conf, hist, info, now, ix)
+        ex = self.memory(prof, ix, data, now)
+        found = analyze(data, conf, hist, info, now, ix, ex)
         self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
         return found, ix, conn_ips
 
@@ -794,7 +997,13 @@ class Guard:
         ips = sorted({d['ip'] for d in ix['dev'].get(key, []) if d['ip']} | set(ix['conn'].get(key) or {}))
         info = self.cached(ips)
         hist = self.get(f'guard:traf:{pid}', {})
-        f = judge(ix, key, conf, hist, info, snap.get('at') or now)
+        ex = self.recall(prof)
+        at = snap.get('at') or now
+        f = judge(ix, key, conf, hist, info, at, ex)
+        subips = sorted(((ip, t) for ip, t in (ex['subip'].get(key) or {}).items() if t >= at - 86400), key=lambda x: -x[1])
+        info.update(self.cached([ip for ip, _ in subips if ip not in info]))
+        cur = {d['hwid'] for d in ix['dev'].get(key, [])}
+        hours = active_hours(ex['hourly'].get(key), at)
         net = lambda ip: {'holder': holder(info, ip), 'hosting': bool(HOSTING.search(holder(info, ip))), 'own': ip in ix['own']}  # noqa: E731
         links = {}
         for d in ix['dev'].get(key, []):
@@ -824,6 +1033,12 @@ class Guard:
                 'links': [{'key': o, 'name': ix['users'][o]['name'], 'status': ix['users'][o]['status'], 'via': sorted(v)}
                           for o, v in sorted(links.items()) if o in ix['users']][:20],
                 'conn_err': snap.get('conn_err', ''), 'dev_err': snap.get('dev_err', ''),
+                'week_devices': f['week_devices'], 'active_hours': f['active_hours'], 'torrents': f['torrents'],
+                'device_history': [{'hwid': h, 'first': v[0], 'last': v[1], 'current': h in cur}
+                                   for h, v in sorted((ex['hw'].get(key) or {}).items(), key=lambda x: -x[1][1])][:40],
+                'sub_ips': [{'ip': ip, 'at': t, 'net': net(ip)} for ip, t in subips[:40]],
+                'hourly': hours['hours'] if hours else None,
+                'torrent_list': sorted((t for t in ix['torrent'].get(key, [])), reverse=True)[:20],
                 'ai': self.ai_cached(pid, key)}
 
     def search(self, pid: int, q: str, limit: int = 20) -> list[dict]:
