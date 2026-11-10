@@ -28,7 +28,7 @@ from .store import ACTIVE, Store
 
 HERE = Path(__file__).resolve().parent.parent / 'web'
 STATIC = {'ui.css': 'text/css', 'ui.js': 'application/javascript',
-          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app-group.js': 'application/javascript', 'app-admin.js': 'application/javascript', 'app-relay.js': 'application/javascript', 'app-tools.js': 'application/javascript', 'app-buy.js': 'application/javascript', 'app-map.js': 'application/javascript', 'app-diag.js': 'application/javascript', 'app-stats.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
+          'app.css': 'text/css', 'app-core.js': 'application/javascript', 'app-more.js': 'application/javascript', 'app-extra.js': 'application/javascript', 'app-group.js': 'application/javascript', 'app-admin.js': 'application/javascript', 'app-relay.js': 'application/javascript', 'app-tools.js': 'application/javascript', 'app-buy.js': 'application/javascript', 'app-map.js': 'application/javascript', 'app-diag.js': 'application/javascript', 'app-stats.js': 'application/javascript', 'app-guard.js': 'application/javascript', 'app.js': 'application/javascript',  # новый интерфейс
           'geist.woff2': 'font/woff2', 'geist-mono.woff2': 'font/woff2',  # Geist (SIL OFL 1.1, web/static/geist-OFL.txt)
           'fx.js': 'application/javascript',
           'logo.png': 'image/png',
@@ -3303,6 +3303,35 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         except Exception as e:  # noqa: BLE001 — панель не ответила
             raise ApiError(f'Проверка не прошла: {str(e)[:300]}', 502) from None
         return J(guard_view(p))
+
+    @r.get('/api/guard')
+    async def guard_all(request):
+        """Раздел «Страж»: все группы пользователя — включён ли, итог последней проверки и сводка по дням."""
+        from . import guard as gd
+        g = guard_of()
+        out = []
+        for p in my_profiles(request):
+            last = g.get(f'guard:last:{p["id"]}', {})
+            found = last.get('found') or []
+            out.append({'pid': p['id'], 'name': p['name'], **gd.cfg(p), 'at': last.get('at'), 'error': last.get('error', ''),
+                        'users': last.get('users'), 'devices': last.get('devices'), 'ips': last.get('ips'), 'online': last.get('online'),
+                        'crit': sum(f['level'] == 'crit' for f in found), 'warn': sum(f['level'] == 'warn' for f in found),
+                        'conn_err': last.get('conn_err', ''), 'dev_err': last.get('dev_err', ''),
+                        'daily': g.get(f'guard:daily:{p["id"]}', {})})
+        return J({'groups': out})
+
+    @r.get('/api/profiles/{pid}/guard/users')
+    async def guard_search(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        return J({'users': guard_of().search(p['id'], request.query.get('q', ''))})
+
+    @r.get('/api/profiles/{pid}/guard/users/{key}')
+    async def guard_user(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        d = await asyncio.to_thread(guard_of().detail, p, request.match_info['key'])
+        if d is None:
+            raise ApiError('Подписчик не найден в последней проверке — нажмите «Проверить сейчас»', 404)
+        return J(d)
 
     @r.post('/api/profiles/{pid}/guard/users/{key}/{what}')
     async def guard_act(request):

@@ -161,3 +161,93 @@ def test_tick_skips_disabled_groups(tmp_path):
     g = gd.Guard(store, FakeNotify())
     asyncio.run(g.tick(store.profiles(), NOW))
     assert g._at == {}
+
+
+# ───────── IP подключений, история подписки, карточка ─────────
+def iso(t):
+    import datetime as dt
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).isoformat()
+
+
+def conn(owner, ip, ago=60, node='de1'):
+    return {'owner': owner, 'ip': ip, 'last': NOW - ago, 'node': node}
+
+
+def test_more_ips_than_devices_means_shared_keys():
+    devs = [device('phone0000001', 'u1', ip='5.18.0.1')]
+    ips = [conn('u1', f'31.173.0.{i}') for i in range(6)]
+    d = {**data([user('u1', 'alice'), user('u2', 'bob')], devs + [device('phone0000002', 'u2')]), 'conn': ips + [conn('u2', '5.5.5.5')]}
+    found = gd.analyze(d, CONF, {}, {}, NOW)
+    assert [f['name'] for f in found] == ['alice'] and found[0]['ips'] == 6
+    assert any(r['code'] == 'ips' and r['w'] == 60 for r in found[0]['reasons'])
+    old = {**d, 'conn': [conn('u1', f'31.173.0.{i}', ago=5 * 3600) for i in range(6)]}  # давно — не считаем
+    assert gd.analyze(old, CONF, {}, {}, NOW) == []
+
+
+def test_relay_through_hosting_and_own_relay_ignored():
+    d = {**data([user('u1', 'alice')], [device('phone0000001', 'u1')], own={'10.0.0.9'}),
+         'conn': [conn('u1', '95.1.1.1'), conn('u1', '10.0.0.9')]}
+    info = {'95.1.1.1': {'holder': 'AEZA-AS'}, '10.0.0.9': {'holder': 'AEZA-AS'}}
+    found = gd.analyze(d, CONF, {}, info, NOW)
+    assert [r['code'] for r in found[0]['reasons']] == ['conn-host:95.1.1.1']
+
+
+def test_blocked_and_server_subscription_requests():
+    subs = [{'owner': 'u1', 'at': NOW - 600, 'ip': '1.2.3.4', 'ua': 'v2rayNG/1.9', 'type': 'BLOCK', 'rule': 'Block everything else'},
+            {'owner': 'u2', 'at': NOW - 600, 'ip': '1.2.3.5', 'ua': '3x-ui-outbound-sub/1.0', 'type': 'BLOCK', 'rule': ''},
+            {'owner': 'u3', 'at': NOW - 600, 'ip': '1.2.3.6', 'ua': 'Happ/3.1', 'type': 'XRAY_BASE64', 'rule': 'Happ'}]
+    d = {**data([user('u1', 'a'), user('u2', 'b'), user('u3', 'c')], []), 'subs': subs}
+    f = {x['name']: x for x in gd.analyze(d, {**CONF, 'day_gb': 0}, {}, {}, NOW)}
+    assert 'c' not in f and f['b']['crit']
+    assert 'a' not in f  # 40 баллов — меньше порога: один запрет ещё не повод
+    j = gd.judge(gd.index(d), 'u1', CONF, {}, {}, NOW)
+    assert j['score'] == 40 and 'Block everything else' in j['reasons'][0]['text']
+
+
+class JobPanel:
+    """Панель с фоновыми задачами: 3.x (connections) или 2.7 (ip-control)."""
+    def __init__(self, v3=True):
+        self.v3, self.polls = v3, 0
+
+    def call(self, method, path, body=None):
+        from bot.engine import StepError
+        if method == 'POST':
+            if path.startswith('/api/connections/') and not self.v3:
+                raise StepError(f'панель POST {path}: HTTP 404: Not Found')
+            return {'jobId': 'j1'}
+        self.polls += 1
+        if self.polls < 2:
+            return {'isCompleted': False}
+        who = 'userId' if self.v3 else 'userUuid'
+        return {'isCompleted': True, 'result': {'success': True, 'users': [
+            {who: 7, 'ips': [{'ip': '1.1.1.1', 'lastSeen': iso(NOW)}, '2.2.2.2']}]}}
+
+
+@pytest.mark.parametrize('v3', [True, False])
+def test_node_connections_both_panel_versions(v3):
+    pytest.importorskip('httpx')
+    out = gd.node_connections(JobPanel(v3), {'uuid': 'n1', 'name': 'de1'}, sleep=lambda s: None)
+    assert [(c['owner'], c['ip'], c['node']) for c in out] == [('7', '1.1.1.1', 'de1'), ('7', '2.2.2.2', 'de1')]
+    assert out[0]['last'] == pytest.approx(NOW) and out[1]['last'] is None
+
+
+def test_detail_and_search_from_snapshot(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    prof = store.profile(pid)
+    g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {'holder': 'HETZNER-AS'} if ip == '95.1.1.1' else {'holder': 'MTS'})
+    d = {**data([user('u1', 'alice', tg=1), user('u2', 'old', status='DISABLED')],
+                [device('phone0000001', 'u1', ip='5.5.5.5'), device('phone0000001', 'u2', ip='5.5.5.5')]),
+         'conn': [conn('u1', '95.1.1.1'), conn('u1', '31.1.1.1', node='nl1')],
+         'subs': [{'owner': 'u1', 'at': NOW - 60, 'ip': '5.5.5.5', 'ua': 'Happ/3.1', 'type': 'XRAY_BASE64', 'rule': 'Happ'}]}
+    asyncio.run(g.check(prof, NOW, d))
+    card = g.detail(prof, 'u1', NOW)
+    assert card['level'] == 'crit' and card['devices'] == 1 and card['ips'] == 2
+    assert {c['ip'] for c in card['conn_list']} == {'95.1.1.1', '31.1.1.1'}
+    assert next(c for c in card['conn_list'] if c['ip'] == '95.1.1.1')['net']['hosting']
+    assert card['links'] == [{'key': 'u2', 'name': 'old', 'status': 'DISABLED', 'via': ['IP 5.5.5.5', 'устройство']}]
+    assert card['subs'][0]['ua'] == 'Happ/3.1' and not card['subs'][0]['blocked']
+    assert g.detail(prof, 'nobody', NOW) is None
+    assert [x['name'] for x in g.search(pid, 'ALI')] == ['alice']
+    daily = g.get(f'guard:daily:{pid}', {})
+    assert list(daily.values())[0]['crit'] == 1
