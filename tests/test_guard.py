@@ -349,3 +349,29 @@ def test_many_suspects_become_one_digest(tmp_path):
     asyncio.run(g.check(store.profile(pid), NOW, data(users, devs)))
     assert len(n.sent) == gd.ALERTS_EACH + 1
     assert 'ещё 7 подозрительных' in n.sent[-1][1] and 'критично: 7' in n.sent[-1][1]
+
+
+# ───────── то же устройство: HWID и имя компьютера ─────────
+def test_pc_name_only_for_unique_computer_names():
+    assert gd.pc_name({'platform': 'Windows', 'model': 'DESKTOP-7F3K2LQ'}) == 'desktop-7f3k2lq'
+    assert gd.pc_name({'platform': 'windows', 'model': 'VASYA-PC'}) == 'vasya-pc'
+    assert gd.pc_name({'platform': '', 'model': 'LAPTOP-AB12CD3'}) == 'laptop-ab12cd3'
+    for model, plat in (('iPhone 15', 'iOS'), ('SM-S918B', 'Android'), ('MacBookPro18,1', 'macOS'), ('PC', 'Windows'),
+                        ('System Product Name', 'Windows'), ('Pixel 8', 'Android'), ('MyPhone123', 'Android')):
+        assert gd.pc_name({'platform': plat, 'model': model}) == '', model
+
+
+def test_twin_by_hwid_not_by_model_and_pc_name_link():
+    users = [user(f'u{i}', f'n{i}') for i in range(4)] + [user('b', 'banned', status='DISABLED')]
+    devs = [device('samehwid0001', 'u0'), device('samehwid0001', 'u1'),               # одно приложение на одном телефоне
+            device('iphone000001', 'u2'), device('iphone000002', 'u3'),               # просто два iPhone 15 — не связь
+            device('pchwid000001', 'u3', platform='Windows', model='DESKTOP-7F3K2LQ'),
+            device('pchwid000002', 'b', platform='Windows', model='DESKTOP-7F3K2LQ')]  # тот же ПК, другой HWID
+    ix = gd.index(data(users, devs))
+    j = {k: gd.judge(ix, k, CONF, {}, {}, NOW) for k in ('u0', 'u2', 'u3')}
+    assert [r['w'] for r in j['u0']['reasons']] == [30] and j['u0']['level'] == ''   # одна пара — не тревога
+    assert j['u2']['reasons'] == []
+    assert [r['code'] for r in j['u3']['reasons']] == ['ban-pc:b'] and j['u3']['level'] == 'warn'
+    devs.append(device('samehwid0001', 'u2'))
+    j = gd.judge(gd.index(data(users, devs)), 'u0', CONF, {}, {}, NOW)
+    assert j['reasons'][0]['w'] == 50 and 'n1, n2' in j['reasons'][0]['text']
