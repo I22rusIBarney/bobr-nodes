@@ -10,6 +10,34 @@ const lvlChip = l => h('span', { class: 'st ' + (l === 'crit' ? 'bad' : l === 'w
 const netTag = n => n ? h('span', { class: 's', style: 'color:' + (n.own ? 'var(--muted)' : n.hosting ? 'var(--air-red)' : 'inherit') },
   n.own ? 'своя нода или вход' : (n.holder || 'сеть неизвестна') + (n.hosting ? ' · хостинг' : '')) : null;
 
+/* «Проверить сейчас»: проверка идёт в фоне (большая панель — минуты), раздел раз в 3 секунды спрашивает, как дела */
+const GW = {};
+function guardWatch(pid, apply) {
+  if (GW[pid]) return;
+  GW[pid] = setTimeout(async () => {
+    let r = null;
+    try { r = await api(`profiles/${pid}/guard`); } catch (x) { /* сеть моргнула — спросим ещё раз */ }
+    delete GW[pid];
+    if (r) {
+      apply(r); GU.grp[pid] = { a: r, at: Date.now() };
+      if (!r.running) {
+        GU.list = null; Object.keys(GU.card).filter(k => k.startsWith(pid + '/')).forEach(k => delete GU.card[k]);
+        const l = r.last || {};
+        l.error ? toast('Проверка не прошла', l.error, 'bad') : toast('Проверено', `${(l.found || []).length} подозрительных · подписчиков ${l.users ?? '—'}`);
+      }
+    }
+    render(true);
+    if (!r || r.running) guardWatch(pid, apply);
+  }, 3000);
+}
+async function guardStart(pid, apply) {
+  try { const r = await api(`profiles/${pid}/guard/check`, 'POST', {}); apply(r); GU.grp[pid] = { a: r, at: Date.now() }; toast('Проверка началась', 'Большая панель проверяется несколько минут — можно уйти со страницы.'); }
+  catch (x) { return toast('Не получилось', x.message, 'bad'); }
+  render(); guardWatch(pid, apply);
+}
+const guardRunning = run => h('span', { class: 'chips', style: 'align-items:center;gap:8px' }, h('span', { class: 'spin', 'aria-hidden': 'true' }),
+  h('span', { class: 'faint' }, `${run.stage || 'Проверяю'} · ${since(run.started * 1000)}`));
+
 function guardLoad(force) {
   if (!force && GU.list && (GU.list.loading || Date.now() - GU.list.at < 60e3)) return;
   GU.list = { ...(GU.list || {}), loading: true, at: Date.now() };
@@ -60,7 +88,7 @@ function vGuard(arg) {
     h('div', { class: 'ic-tile' }, ic('shield')),
     h('div', { class: 'grow', style: 'min-width:0' },
       h('div', { class: 't' }, g.name),
-      h('div', { class: 's' }, !g.on ? 'выключен — включите в группе' : g.error ? 'панель не ответила: ' + g.error
+      h('div', { class: 's' }, g.running ? `проверяю: ${g.running.stage || ''}` : !g.on ? 'выключен — включите в группе' : g.error ? 'панель не ответила: ' + g.error
         : g.at ? `проверено ${tsAgo(g.at)} · подписчиков ${g.users ?? '—'} · устройств ${g.devices ?? '—'}` + (g.ips != null ? ` · IP сейчас ${g.ips}` : '') : 'первая проверка — в течение часа'),
       g.on ? dailyBars(g.daily) : null),
     g.crit ? h('span', { class: 'st bad' }, `критично ${g.crit}`) : null, g.warn ? h('span', { class: 'st warn' }, `внимание ${g.warn}`) : null,
@@ -76,14 +104,15 @@ function guardGroupView(pid) {
   guardLoad();  // сводка по дням — из общего списка
   if (!st.a) return [back, pageH(g.name), st.err ? empty('alert', 'Не загрузилось', st.err, btn('Повторить', () => guardGroup(pid, true), 'primary')) : h('div', { class: 'sk', style: 'height:300px' })];
   const a = st.a, last = a.last || {}, lvl = GU.lvl[pid] || 'all', q = GU.q[pid] || '';
-  const check = e => busyBtn(e, async () => { try { st.a = await api(`profiles/${pid}/guard/check`, 'POST', {}); toast('Проверено', `${(st.a.last.found || []).length} подозрительных`); GU.list = null; } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); });
+  const check = () => guardStart(pid, r => { st.a = r; });
+  if (a.running) guardWatch(pid, r => { st.a = r; });
   const found = (last.found || []).filter(f => lvl === 'all' || f.level === lvl);
   const search = async v => { GU.q[pid] = v; if (v.trim().length < 2) { GU.found[pid] = null; return render(); }
     try { GU.found[pid] = (await api(`profiles/${pid}/guard/users?q=${encodeURIComponent(v.trim())}`)).users; } catch (x) { GU.found[pid] = []; } render(); };
   const stat = (k, l, cls) => h('div', { class: 'stat', style: 'cursor:default' }, h('span', { class: 'k ' + (cls || '') }, k), h('span', { class: 'l' }, l));
   const crit = (last.found || []).filter(f => f.level === 'crit').length, warn = (last.found || []).filter(f => f.level === 'warn').length;
   return [back,
-    pageH(g.name, last.at ? `Последняя проверка ${tsAgo(last.at)}` : 'Ещё не проверяли', [btn('Проверить сейчас', check, '', 'radar'), btn('Настройки', () => { UI.tabs['g' + pid] = 'guard'; go('group/' + pid); }, '', 'sliders')]),
+    pageH(g.name, last.at ? `Последняя проверка ${tsAgo(last.at)}` : 'Ещё не проверяли', [a.running ? guardRunning(a.running) : btn('Проверить сейчас', check, '', 'radar'), btn('Настройки', () => { UI.tabs['g' + pid] = 'guard'; go('group/' + pid); }, '', 'sliders')]),
     !a.on ? h('div', { class: 'notice', style: 'background:var(--warn-soft);margin-bottom:14px' }, h('span', { class: 'i', style: 'color:var(--warn)' }, ic('alert')),
       h('div', null, h('b', null, 'Страж в этой группе выключен'), 'Сам по расписанию не проверяет и не пишет. Включите в настройках группы — или проверьте разово кнопкой выше.')) : null,
     last.error ? h('div', { class: 'err', role: 'alert', style: 'margin-bottom:10px' }, 'Панель не ответила: ' + last.error) : null,

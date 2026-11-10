@@ -3280,7 +3280,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         last = guard_of().get(f'guard:last:{p["id"]}', {})
         admin = request is not None and is_admin(request)
         return {**gd.cfg(p), 'actions': gd.ACTIONS, 'last': last, 'admin': admin,
-                'ai_ready': admin and bool(store.get('gemini_key'))}
+                'ai_ready': admin and bool(store.get('gemini_key')), 'running': guard_of().running.get(p['id'])}
 
     @r.get('/api/profiles/{pid}/guard')
     async def guard_get(request):
@@ -3303,11 +3303,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     @r.post('/api/profiles/{pid}/guard/check')
     async def guard_check(request):
         p = profile_or_404(request.match_info['pid'], request)
-        g = guard_of()
-        try:
-            await g.check(p, time.time())
-        except Exception as e:  # noqa: BLE001 — панель не ответила
-            raise ApiError(f'Проверка не прошла: {str(e)[:300]}', 502) from None
+        guard_of().start(p)  # в фоне: большая панель проверяется минуты, а запрос ждать столько не может
         return J(guard_view(p, request))
 
     @r.get('/api/guard')
@@ -3322,14 +3318,14 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             out.append({'pid': p['id'], 'name': p['name'], **gd.cfg(p), 'at': last.get('at'), 'error': last.get('error', ''),
                         'users': last.get('users'), 'devices': last.get('devices'), 'ips': last.get('ips'), 'online': last.get('online'),
                         'crit': sum(f['level'] == 'crit' for f in found), 'warn': sum(f['level'] == 'warn' for f in found),
-                        'conn_err': last.get('conn_err', ''), 'dev_err': last.get('dev_err', ''),
+                        'conn_err': last.get('conn_err', ''), 'dev_err': last.get('dev_err', ''), 'running': g.running.get(p['id']),
                         'daily': g.get(f'guard:daily:{p["id"]}', {})})
         return J({'groups': out})
 
     @r.get('/api/profiles/{pid}/guard/users')
     async def guard_search(request):
         p = profile_or_404(request.match_info['pid'], request)
-        return J({'users': guard_of().search(p['id'], request.query.get('q', ''))})
+        return J({'users': await asyncio.to_thread(guard_of().search, p['id'], request.query.get('q', ''))})
 
     @r.get('/api/profiles/{pid}/guard/users/{key}')
     async def guard_user(request):
