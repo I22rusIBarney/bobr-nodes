@@ -43,11 +43,15 @@ def test_normal_family_is_quiet():
 
 
 def test_hosting_ip_but_own_node_is_ignored():
-    d = data([user('u1', 'alice')], [device('h1aaaaaaaaaa', 'u1', ip='1.1.1.1'), device('h2aaaaaaaaaa', 'u1', ip='9.9.9.9')],
+    d = data([user('u1', 'alice')], [device('h1aaaaaaaaaa', 'u1', ip='1.1.1.1', ua='', platform='Linux'), device('h2aaaaaaaaaa', 'u1', ip='9.9.9.9')],
              own={'9.9.9.9'})
     info = {'1.1.1.1': {'holder': 'HETZNER-AS'}, '9.9.9.9': {'holder': 'HETZNER-AS'}}
     found = gd.analyze(d, CONF, {}, info, NOW)
     assert len(found) == 1 and [r['code'] for r in found[0]['reasons']] == ['host:1.1.1.1']
+    # обычное приложение на телефоне через хостинг — у человека включён другой VPN: слабый признак, без сообщения
+    app = data([user('u1', 'alice')], [device('h1aaaaaaaaaa', 'u1', ip='1.1.1.1')])
+    assert gd.analyze(app, CONF, {}, info, NOW) == []
+    assert gd.judge(gd.index(app), 'u1', CONF, {}, info, NOW)['score'] == 15
 
 
 def test_ban_evasion_by_hwid_and_ip():
@@ -57,7 +61,8 @@ def test_ban_evasion_by_hwid_and_ip():
     found = {f['name']: f for f in gd.analyze(d, CONF, {}, {}, NOW)}
     assert 'banned' not in found  # уже отключён
     assert found['second']['crit'] and 'banned' in found['second']['reasons'][0]['text']
-    assert found['neighbour']['level'] == 'warn' and not found['neighbour']['crit']  # общий IP — только внимание
+    assert 'neighbour' not in found  # общий IP — у оператора один адрес на тысячи людей: только отметка в карточке
+    assert gd.judge(gd.index(d), 'u3', CONF, {}, {}, NOW)['score'] == 20
 
 
 def test_burst_of_new_devices():
@@ -173,23 +178,70 @@ def conn(owner, ip, ago=60, node='de1'):
     return {'owner': owner, 'ip': ip, 'last': NOW - ago, 'node': node}
 
 
-def test_more_ips_than_devices_means_shared_keys():
-    devs = [device('phone0000001', 'u1', ip='5.18.0.1')]
-    ips = [conn('u1', f'31.173.0.{i}') for i in range(6)]
-    d = {**data([user('u1', 'alice'), user('u2', 'bob')], devs + [device('phone0000002', 'u2')]), 'conn': ips + [conn('u2', '5.5.5.5')]}
-    found = gd.analyze(d, CONF, {}, {}, NOW)
-    assert [f['name'] for f in found] == ['alice'] and found[0]['ips'] == 6
-    assert any(r['code'] == 'ips' and r['w'] == 60 for r in found[0]['reasons'])
-    old = {**d, 'conn': [conn('u1', f'31.173.0.{i}', ago=5 * 3600) for i in range(6)]}  # давно — не считаем
-    assert gd.analyze(old, CONF, {}, {}, NOW) == []
+def nets(ips, start=0):
+    """Каждому IP — свой оператор."""
+    return {ip: {'asn': f'AS{start + i}', 'holder': f'ISP{start + i}'} for i, ip in enumerate(ips)}
 
 
-def test_relay_through_hosting_and_own_relay_ignored():
+def test_many_ips_in_one_network_is_one_phone():
+    # один телефон у оператора: 6 адресов за час, но сеть одна — не признак
+    ips = [f'31.173.0.{i}' for i in range(6)]
+    d = {**data([user('u1', 'alice', hwidDeviceLimit=3)], [device('phone0000001', 'u1')]), 'conn': [conn('u1', ip) for ip in ips]}
+    one_net = {ip: {'asn': 'AS8359', 'holder': 'MTS'} for ip in ips}
+    j = gd.judge(gd.index(d), 'u1', CONF, {}, one_net, NOW)
+    assert j['reasons'] == [] and j['nets'] == 1 and j['ips'] == 6
+    assert gd.judge(gd.index(d), 'u1', CONF, {}, {}, NOW)['nets'] == 1   # сети не узнали — тоже одна куча, не обвиняем
+
+
+def test_concurrent_means_seen_together_not_within_the_hour():
+    # телефон за час сменил 5 сетей (вышки, кафе, дом) — одновременно он только в последней
+    ips = [f'31.{i}.0.1' for i in range(5)]
+    d = {**data([user('u1', 'a', hwidDeviceLimit=1)], [device('phone0000001', 'u1')]),
+         'conn': [conn('u1', ip, ago=60 + i * 600) for i, ip in enumerate(ips)]}
+    j = gd.judge(gd.index(d), 'u1', CONF, {}, nets(ips), NOW)
+    assert j['ips'] == 1 and j['nets'] == 1 and j['reasons'] == []
+
+
+def test_more_networks_than_limit_needs_repeats(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
+    ips = [f'31.{i}.0.1' for i in range(5)]
+    info = nets(ips)
+    n = FakeNotify()
+    g = gd.Guard(store, n, ipinfo=lambda ip: info.get(ip) or {})
+    for hour in range(3):
+        t = NOW + hour * 3600
+        d = {**data([user('u1', 'reseller', hwidDeviceLimit=3)], [device('phone0000001', 'u1')]),
+             'conn': [{'owner': 'u1', 'ip': ip, 'last': t - 30, 'node': 'de1'} for ip in ips]}
+        found = asyncio.run(g.check(store.profile(pid), t, d))
+        if hour < 2:   # одна-две проверки — может быть совпадение: наблюдаем молча
+            assert found == [] and n.sent == []
+    assert found[0]['reasons'][0]['code'] == 'nets-limit!' and found[0]['nets'] == 5 and len(n.sent) == 1
+    assert '5 разных сетей при лимите 3' in n.sent[0][1] and 'из 5 сетей (5 IP)' in n.sent[0][1]
+    card = g.detail(store.profile(pid), 'u1', t)
+    assert card['nets_checks'] == 3 and len(card['conc_history']) == 3 and all(c['live'] for c in card['conn_list'])
+
+
+def test_keys_outside_subscription_but_within_limit_is_only_a_note():
+    ips = [f'31.{i}.0.1' for i in range(3)]
+    d = {**data([user('u1', 'a', hwidDeviceLimit=5)], [device('phone0000001', 'u1')]), 'conn': [conn('u1', ip) for ip in ips]}
+    ix = gd.index(d)
+    past = {'conc': {'u1': [[NOW - 7200, 3, 3, []], [NOW - 3600, 3, 3, []], [NOW, 3, 3, []]]}}
+    j = gd.judge(ix, 'u1', CONF, {}, nets(ips), NOW, past)
+    assert [(r['code'], r['w']) for r in j['reasons']] == [('nets-dev', 20)] and j['level'] == ''
+
+
+def test_relay_through_hosting_needs_repeats_and_own_relay_ignored():
     d = {**data([user('u1', 'alice')], [device('phone0000001', 'u1')], own={'10.0.0.9'}),
          'conn': [conn('u1', '95.1.1.1'), conn('u1', '10.0.0.9')]}
     info = {'95.1.1.1': {'holder': 'AEZA-AS'}, '10.0.0.9': {'holder': 'AEZA-AS'}}
-    found = gd.analyze(d, CONF, {}, info, NOW)
-    assert [r['code'] for r in found[0]['reasons']] == ['conn-host:95.1.1.1']
+    ix = gd.index(d)
+    once = gd.judge(ix, 'u1', CONF, {}, info, NOW)
+    assert [(r['code'], r['w']) for r in once['reasons']] == [('conn-host:95.1.1.1', 15)] and once['level'] == ''
+    past = {'conc': {'u1': [[NOW - 7200, 1, 1, ['95.1.1.1']], [NOW - 3600, 1, 1, ['95.1.1.1']], [NOW, 1, 1, ['95.1.1.1']]]}}
+    held = gd.judge(ix, 'u1', CONF, {}, info, NOW, past)
+    assert [(r['code'], r['w']) for r in held['reasons']] == [('conn-host!:95.1.1.1', 70)] and held['level'] == 'warn'
+    assert gd.remember_conc({}, ix, info, NOW)['u1'] == [[NOW, 1, 1, ['95.1.1.1']]]
 
 
 def test_blocked_and_server_subscription_requests():
@@ -397,14 +449,17 @@ def test_device_churn_over_a_week():
     assert set(old['u1']) == {d['hwid'] for d in devs}
 
 
-def test_subscription_link_opened_from_many_ips():
-    subs = [{'owner': 'u1', 'at': NOW - 600 * i, 'ip': f'31.0.0.{i}', 'ua': 'Happ/4', 'type': 'XRAY_BASE64', 'rule': ''} for i in range(9)]
-    d = {**data([user('u1', 'a')], [device('dev000000001', 'u1'), device('dev000000002', 'u1')]), 'subs': subs}
+def test_subscription_link_counts_networks_not_ips():
+    ips = [f'31.{i}.0.1' for i in range(13)]
+    subs = [{'owner': 'u1', 'at': NOW - 600 * i, 'ip': ip, 'ua': 'Happ/4', 'type': 'XRAY_BASE64', 'rule': ''} for i, ip in enumerate(ips)]
+    d = {**data([user('u1', 'a', hwidDeviceLimit=3)], [device('dev000000001', 'u1')]), 'subs': subs}
     ix = gd.index(d)
     mem = gd.remember_subips({}, ix, NOW)
-    j = gd.judge(ix, 'u1', CONF, {}, {}, NOW, {'subip': mem})
-    assert j['sub_ips'] == 9 and j['reasons'][0]['code'] == 'subips'
-    assert gd.judge(ix, 'u1', CONF, {}, {}, NOW + 2 * DAY, {'subip': mem})['reasons'] == []  # старое не считаем
+    one = {ip: {'asn': 'AS8359'} for ip in ips}   # 13 адресов одного оператора — один телефон в дороге
+    j = gd.judge(ix, 'u1', CONF, {}, one, NOW, {'subip': mem})
+    assert j['sub_ips'] == 13 and j['sub_nets'] == 1 and j['reasons'] == []
+    j = gd.judge(ix, 'u1', CONF, {}, nets(ips), NOW, {'subip': mem})
+    assert j['sub_nets'] == 13 and [(r['code'], r['w']) for r in j['reasons']] == [('subnets', 25)]
 
 
 def test_traffic_around_the_clock():

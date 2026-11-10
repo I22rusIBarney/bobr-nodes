@@ -176,9 +176,10 @@ function guardCard(pid, key) {
     h('div', { class: 'sheet', style: 'padding:14px 16px' },
       h('div', { class: 'stats' },
         ...[[d.score, 'баллов риска', d.level === 'crit' ? 'bad' : d.level === 'warn' ? 'warn' : ''], [d.devices + (d.limit ? ` / ${d.limit}` : ''), 'устройств / лимит'],
-          [d.ips, 'IP подключений сейчас', d.ips > Math.max(d.devices, 1) + 2 ? 'warn' : ''], [gbs(d.yesterday), 'трафик за вчера'], [gbs(d.usual), 'обычно в сутки'], [gbs(d.used), 'всего'],
+          [d.nets ?? '—', 'сетей одновременно', d.limit && d.nets > d.limit ? 'warn' : ''], [d.ips, 'IP одновременно'],
+          ...(d.nets_checks ? [[d.nets_checks, 'проверок за сутки сверх лимита', d.nets_checks >= 3 ? 'bad' : 'warn']] : []), [gbs(d.yesterday), 'трафик за вчера'], [gbs(d.usual), 'обычно в сутки'], [gbs(d.used), 'всего'],
           [d.week_devices ?? '—', 'устройств за 7 дней', d.limit && d.week_devices >= d.limit + 3 ? 'warn' : ''],
-          [(d.sub_ips || []).length, 'IP ссылки за сутки', (d.sub_ips || []).length >= Math.max(d.devices, 1) * 3 + 3 ? 'warn' : ''],
+          [`${d.sub_nets ?? '—'} / ${(d.sub_ips || []).length}`, 'сетей / IP ссылки за сутки'],
           [d.active_hours ?? '—', 'часов с трафиком из 24', d.active_hours >= 22 ? 'warn' : ''],
           ...(d.torrents ? [[d.torrents, 'торренты за неделю', 'warn']] : [])]
           .map(([k, l, c]) => h('div', { class: 'stat', style: 'cursor:default' }, h('span', { class: 'k ' + (c || '') }, String(k)), h('span', { class: 'l' }, l)))),
@@ -195,6 +196,7 @@ function guardCard(pid, key) {
           h('div', { class: 's' }, (x.ip ? `IP ${x.ip}` : 'IP неизвестен') + (x.created ? ` · добавлено ${ago(x.created * 1000)}` : '')), x.net ? netTag(x.net) : null),
         x.server ? h('span', { class: 'st bad' }, 'сервер') : null))) : h('div', { class: 'sheet', style: 'padding:14px 16px' }, 'Устройств нет — подписку ещё не добавляли или HWID не присылают.')),
     sec('IP подключений на нодах', d.conn_err ? 'ноды не отдали' : `${d.conn_list.length}`,
+      h('div', { class: 'hint', style: 'margin-bottom:8px' }, 'Много IP — не признак: телефон меняет адрес от вышки к вышке. Важно, из скольких разных сетей (операторов) подключён одновременно — одно устройство не бывает в двух сетях сразу.'),
       d.conn_list.length ? h('div', { class: 'list' }, d.conn_list.map(c => row(c.ip,
         h('div', null, netTag(c.net), h('div', { class: 's' }, (c.nodes.length ? 'ноды: ' + c.nodes.join(', ') : '') + (c.last ? ` · виден ${ago(c.last * 1000)}` : ''))),
         h('span', { class: 'st ' + (c.live ? 'ok' : '') }, c.live ? 'сейчас' : 'раньше'))))
