@@ -100,6 +100,7 @@ async def main():
     backups = backup.Backup(store, autopilot.notify, data_dir, version=selfupdate.current)
     autopilot.backup = dp['backup'] = backups
     dp['autopilot'] = autopilot
+    dp['guard'] = autopilot.guard
 
     await bot.set_my_commands([BotCommand(command='start', description='Меню'),
                                BotCommand(command='summary', description='Сводка по нодам'),

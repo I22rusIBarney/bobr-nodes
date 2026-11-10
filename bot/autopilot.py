@@ -259,6 +259,8 @@ class Autopilot:
         self._lock = asyncio.Lock()
         self.hostload = None  # нагрузка сервера бота (задаётся в main)
         self.notify = Notifier(store, bot, access)
+        from .guard import Guard
+        self.guard = Guard(store, self.notify)  # страж подписок: раздача и перепродажа (сам решает, кого пора проверить)
         self.feedback = None  # опросы после установки (задаётся в main)
         self.data_dir = None  # папка данных: версия бота (задаётся в main)
         self.billing = None   # подписка пользователей (задаётся в main)
@@ -354,6 +356,9 @@ class Autopilot:
             self._bg_task(self.check_new_version())
             self._bg_task(self.report_cleanup())
             self._bg_task(self.check_panel_release())
+        if not self.guard._lock.locked():
+            self.guard.notify = self.notify
+            self._bg_task(self.guard.tick(self.profiles(), now))
         if now - self._preset_at >= PRESET_EVERY:
             self._preset_at = now
             self._bg_task(self.refresh_presets())

@@ -3267,6 +3267,54 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
         store.save_profile({**p, 'auto': a})
         return J({'ok': True, **a})
 
+    # ── страж подписок: раздача и перепродажа подписок ──
+    def guard_of():
+        g = getattr(pilot(), 'guard', None)
+        if g is None:
+            raise ApiError('Страж подписок выключен', 404)
+        return g
+
+    def guard_view(p: dict) -> dict:
+        from . import guard as gd
+        last = guard_of().get(f'guard:last:{p["id"]}', {})
+        return {**gd.cfg(p), 'actions': gd.ACTIONS, 'last': last}
+
+    @r.get('/api/profiles/{pid}/guard')
+    async def guard_get(request):
+        return J(guard_view(profile_or_404(request.match_info['pid'], request)))
+
+    @r.post('/api/profiles/{pid}/guard')
+    async def guard_save(request):
+        from . import guard as gd
+        p = profile_or_404(request.match_info['pid'], request)
+        try:
+            g = gd.clean(await body(request), p)
+        except ValueError as e:
+            raise ApiError(str(e)) from None
+        store.save_profile({**p, 'guard': g})
+        return J(guard_view(store.profile(p['id'])))
+
+    @r.post('/api/profiles/{pid}/guard/check')
+    async def guard_check(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        g = guard_of()
+        try:
+            await g.check(p, time.time())
+        except Exception as e:  # noqa: BLE001 — панель не ответила
+            raise ApiError(f'Проверка не прошла: {str(e)[:300]}', 502) from None
+        return J(guard_view(p))
+
+    @r.post('/api/profiles/{pid}/guard/users/{key}/{what}')
+    async def guard_act(request):
+        p = profile_or_404(request.match_info['pid'], request)
+        what, key = request.match_info['what'], request.match_info['key']
+        if what not in ('revoke', 'disable', 'ok') or not re.fullmatch(r'[\w-]{1,64}', key):
+            raise ApiError('Неизвестное действие')
+        msg = await guard_of().act(p, key, what)
+        if msg.startswith('❌'):
+            raise ApiError(msg[2:], 502)
+        return J({'ok': True, 'msg': msg})
+
     # ── плагины нод: Torrent Blocker, Ingress / Egress Filter (одна запись плагина на группу) ──
     def plug_mem(pid: int) -> dict:
         """Какие записи списков добавлены пресетами — чтобы обновлять и убирать их, не трогая ручные."""
