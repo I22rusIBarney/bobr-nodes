@@ -42,6 +42,8 @@ CONN_ACTIVE = 3600        # IP подключения считается жив�
 CONN_WAIT = 45            # сколько ждать ответа ноды о подключениях
 SUBS_KEEP = 15            # запросов подписки на пользователя — для карточки
 BLOCKED = {'BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP'}
+AI_DAY = 30               # разборов нейросетью в уведомлениях на группу в сутки (по кнопке — без ограничения)
+AI_TTL = 24 * 3600        # разбор с тем же набором признаков — из кэша
 
 SERVER_UA = re.compile(r'3x-?ui|x-ui|xray|v2ray-?core|sing-?box-?server|marzban|remnawave|curl|wget|python|aiohttp|httpx|'
                        r'go-http|okhttp|node-fetch|axios|java/|postman|insomnia|libwww|scrapy|headless', re.I)
@@ -66,6 +68,7 @@ def cfg(prof: dict) -> dict:
             'day_gb': int(g.get('day_gb', 50)),       # трафик за сутки выше — подозрительно (0 — не смотреть)
             'spike': int(g.get('spike', 5)),          # во сколько раз выше обычного (0 — не смотреть)
             'burst': int(g.get('burst', 4)),          # столько новых устройств за сутки (0 — не смотреть)
+            'ai': bool(g.get('ai')),                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
             'tz': int(g.get('tz', (prof.get('auto') or {}).get('tz', 0)))}
 
 
@@ -73,6 +76,8 @@ def clean(raw: dict, prof: dict) -> dict:
     g = cfg(prof)
     if 'on' in raw:
         g['on'] = bool(raw['on'])
+    if 'ai' in raw:
+        g['ai'] = bool(raw['ai'])
     if 'auto' in raw:
         if raw['auto'] not in ACTIONS:
             raise ValueError('Автодействие: только сообщать, перевыпускать или отключать')
@@ -431,16 +436,110 @@ def fresh(found: list[dict], seen: dict, ok: set[str], now: float) -> list[dict]
     return out
 
 
-def text(prof: dict, f: dict, done: str = '') -> str:
+def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
     e = html.escape
     who = e(f['name']) + (f' · TG <code>{e(str(f["tg"]))}</code>' if f.get('tg') else '')
     lines = [f'{LEVELS[f["level"]]} <b>Подозрительная подписка</b> · {e(prof["name"])}', who,
              f'Устройств: {f["devices"]}' + (f' из {f["limit"]}' if f.get('limit') else '')
              + (f' · IP подключений сейчас: {f["ips"]}' if f.get('ips') else ''), '']
     lines += ['• ' + e(r['text']) for r in f['reasons'][:8]]
+    if ai:
+        lines += ['', ai_line(ai)]
     if done:
         lines += ['', done]
     return '\n'.join(lines)[:3900]
+
+
+# ───────── разбор нейросетью ─────────
+AI_SYSTEM = """Ты помогаешь владельцу VPN-сервиса (панель Remnawave) понять, честный ли подписчик или он раздаёт либо
+перепродаёт подписку. Тебе дают обезличенную сводку по одному подписчику: признаки, которые нашёл бот (с баллами),
+устройства (HWID: платформа, модель, клиент, сеть, хостинг ли), IP подключений к нодам за последний час (сеть, хостинг ли,
+к каким нодам), последние запросы подписки (клиент, ответ правила), трафик по дням и связи с другими аккаунтами.
+
+Как рассуждать:
+- семья или компания друзей — несколько телефонов и ПК, IP одного-двух домашних провайдеров или мобильного оператора
+  одного региона; 1–2 лишних IP у телефона в дороге — норма;
+- раздача — IP подключений заметно больше устройств, много разных провайдеров и городов, ключи вставлены мимо подписки;
+- перепродажа или посредник — устройство-сервер (3x-ui, xray, curl), подключения или запросы подписки с IP хостингов,
+  ровный большой трафик;
+- обход бана — общее устройство или IP с отключённым аккаунтом.
+Не выдумывай фактов, которых нет в сводке. Мало данных — так и скажи (verdict "unclear").
+
+Ответ — строго JSON на русском:
+{"verdict": "honest"|"family"|"sharing"|"reselling"|"relay"|"evasion"|"unclear",
+ "confidence": 0-100,
+ "summary": "2–3 предложения простыми словами: что происходит",
+ "evidence": ["до 5 фактов из сводки, на которых основан вывод"],
+ "doubts": ["до 3 фактов, которые говорят в пользу клиента или против вывода"],
+ "action": "none"|"watch"|"message"|"revoke"|"disable",
+ "check": ["до 3 вещей, которые админу стоит проверить руками"]}"""
+
+VERDICTS = {'honest': 'честный клиент', 'family': 'семья или друзья', 'sharing': 'раздаёт подписку',
+            'reselling': 'перепродаёт подписку', 'relay': 'сервер-посредник', 'evasion': 'обход бана', 'unclear': 'неясно'}
+AI_ACTIONS = {'none': 'ничего не делать', 'watch': 'понаблюдать', 'message': 'написать клиенту',
+              'revoke': 'перевыпустить подписку', 'disable': 'отключить'}
+
+
+def _mask(ip: str) -> str:
+    """IP без хвоста: сети нейросети хватает, сам адрес ей не нужен."""
+    parts = ip.split('.')
+    return '.'.join(parts[:2] + ['x', 'x']) if len(parts) == 4 else ip[:9] + '…'
+
+
+_IPV4 = re.compile(r'\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b')
+
+
+def _scrub(text: str, secrets_: list[str]) -> str:
+    """Текст признака без имён, HWID и полных IP."""
+    for x in sorted({x for x in secrets_ if x and len(x) >= 3}, key=len, reverse=True):
+        text = text.replace(x, '«скрыто»')
+    return _IPV4.sub(lambda m: f'{m.group(1)}.{m.group(2)}.x.x', text)
+
+
+def ai_input(card: dict, now: float) -> str:
+    """Сводка карточки без имени, TG ID, HWID и полных IP."""
+    hide = [card['name'], str(card.get('tg') or '')] + [x['name'] for x in card['links']] + [d['hwid'] for d in card['device_list']]
+    hide += [d['hwid'][:40] for d in card['device_list']]
+    days = lambda t: None if not t else round((now - t) / 86400, 1)  # noqa: E731
+    net = lambda x: {k: x[k] for k in ('holder', 'hosting', 'own') if k in x} if x else None  # noqa: E731
+    out = {
+        'score': card['score'], 'level': card['level'] or 'clean', 'status': card['status'],
+        'device_limit': card['limit'], 'devices': card['devices'], 'live_ips': card['ips'],
+        'reasons': [{'text': _scrub(r['text'], hide), 'points': r['w'], 'critical': r['crit']} for r in card['reasons']],
+        'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': d['model'],
+                         'server_like': d['server'], 'client': _scrub(d['ua'], hide), 'added_days_ago': days(d['created']), 'ip': _mask(d['ip']) if d['ip'] else None,
+                         'net': net(d.get('net'))} for d in card['device_list'][:20]],
+        'connections': [{'ip': _mask(c['ip']), 'net': net(c.get('net')), 'nodes': c['nodes'], 'live': c['live'],
+                         'seen_hours_ago': None if not c['last'] else round((now - c['last']) / 3600, 1)} for c in card['conn_list'][:30]],
+        'subscription_requests': [{'client': _scrub(r['ua'], hide), 'answer': r['type'], 'rule': r['rule'], 'blocked': r['blocked'],
+                                   'hours_ago': round((now - r['at']) / 3600, 1) if r['at'] else None, 'net': net(r.get('net'))}
+                                  for r in card['subs'][:10]],
+        'traffic_gb_by_day': {t['day']: round(t['bytes'] / 2**30, 2) for t in card['traffic']},
+        'linked_accounts': [{'status': x['status'], 'shared': ['device' if v == 'устройство' else 'ip' for v in x['via']]}
+                            for x in card['links'][:10]],
+    }
+    if card.get('conn_err'):
+        out['note'] = 'ноды не отдали IP подключений'
+    return json.dumps(out, ensure_ascii=False)
+
+
+def ai_clean(raw: dict) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    lst = lambda k, n: [str(x)[:300] for x in (raw.get(k) or []) if x][:n]  # noqa: E731
+    try:
+        conf = max(0, min(100, int(raw.get('confidence') or 0)))
+    except (TypeError, ValueError):
+        conf = 0
+    return {'verdict': raw.get('verdict') if raw.get('verdict') in VERDICTS else 'unclear', 'confidence': conf,
+            'summary': str(raw.get('summary') or '')[:1000], 'evidence': lst('evidence', 5), 'doubts': lst('doubts', 3),
+            'action': raw.get('action') if raw.get('action') in AI_ACTIONS else 'watch', 'check': lst('check', 3)}
+
+
+def ai_line(a: dict) -> str:
+    """Одна-две строки разбора для сообщения в Telegram (HTML)."""
+    e = html.escape
+    return (f'🤖 <b>Нейросеть:</b> {e(VERDICTS[a["verdict"]])} ({a["confidence"]}%) — совет: {e(AI_ACTIONS[a["action"]])}'
+            + (f'\n<i>{e(a["summary"][:400])}</i>' if a.get('summary') else ''))
 
 
 def snapshot(data: dict, now: float) -> dict:
@@ -462,9 +561,10 @@ def unsnap(snap: dict) -> dict:
 
 # ───────── страж ─────────
 class Guard:
-    def __init__(self, store, notify, ipinfo=None):
+    def __init__(self, store, notify, ipinfo=None, gemini=None):
         self.store, self.notify = store, notify
         self._ipinfo = ipinfo  # для тестов: функция ip → {'holder': …}
+        self._gemini = gemini  # для тестов: свой Gemini
         self._at: dict[int, float] = {}
         self._lock = asyncio.Lock()
 
@@ -535,17 +635,17 @@ class Guard:
         seen = self.get(f'guard:seen:{pid}', {})
         ok = set(self.get(f'guard:ok:{pid}', []))
         acted = {'revoke': 0, 'disable': 0}
+        self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
         for f in fresh(found, seen, ok, now):
             seen[f['key']] = {'sig': signature(f), 'ts': now, 'codes': [r['code'] for r in f['reasons']]}
             done = ''
             if f['crit'] and conf['auto'] != 'off' and f['key'] not in ok:
                 done = await self.act(prof, f['key'], conf['auto'])
                 acted[conf['auto']] += not done.startswith('❌')
-            await self.alert(prof, f, done)
+            await self.alert(prof, f, done, await self.ai_auto(prof, f['key'], now) if conf['ai'] else None)
         live = {f['key'] for f in found}
         seen = {k: v for k, v in seen.items() if k in live or now - v.get('ts', 0) < REMIND}
         self.put(f'guard:seen:{pid}', seen)
-        self.put(f'guard:snap:{pid}', snapshot(data, now))
         self.count(pid, now, conf['tz'], warn=sum(f['level'] == 'warn' for f in found), crit=sum(f['level'] == 'crit' for f in found),
                    users=len(ix['users']), **acted)
         self.put(f'guard:last:{pid}', {'at': now, 'users': len(data['users']), 'devices': len(data['devices']),
@@ -607,7 +707,8 @@ class Guard:
                 'traffic': traffic_days[-8:],
                 'links': [{'key': o, 'name': ix['users'][o]['name'], 'status': ix['users'][o]['status'], 'via': sorted(v)}
                           for o, v in sorted(links.items()) if o in ix['users']][:20],
-                'conn_err': snap.get('conn_err', ''), 'dev_err': snap.get('dev_err', '')}
+                'conn_err': snap.get('conn_err', ''), 'dev_err': snap.get('dev_err', ''),
+                'ai': self.ai_cached(pid, key)}
 
     def search(self, pid: int, q: str, limit: int = 20) -> list[dict]:
         snap = self.get(f'guard:snap:{pid}', {})
@@ -622,6 +723,58 @@ class Guard:
             return {ip: self._ipinfo(ip) or {} for ip in ips}
         from . import banlab
         return {ip: hit for ip in ips if (hit := banlab.cached_info(self.store, ip, fetch=False))}
+
+    # ── нейросеть ──
+    def gemini(self):
+        """Gemini администратора; None — ключа нет."""
+        if self._gemini is not None:
+            return self._gemini
+        if not self.store.get('gemini_key'):
+            return None
+        from . import scripts as sc
+        return sc.Gemini(self.store.get('gemini_key'), self.store.get('gemini_model'), self.store.get('gemini_proxy'),
+                         base=self.store.get('gemini_base') or None)
+
+    def ai_cached(self, pid: int, key: str) -> dict | None:
+        hit = self.get(f'guard:ai:{pid}:{key}', {})
+        return hit or None
+
+    async def ai(self, prof: dict, key: str, now: float | None = None, force: bool = False) -> dict:
+        """Разбор подписчика нейросетью по карточке последней проверки. Тот же набор признаков за сутки — из кэша.
+        Нейросеть не видит имени, TG ID, HWID и полных IP. Ошибки — ValueError с понятным текстом."""
+        now = now if now is not None else time.time()
+        g = self.gemini()
+        if g is None:
+            raise ValueError('Нейросеть не подключена: задайте ключ Gemini в «Подключениях»')
+        card = await asyncio.to_thread(self.detail, prof, key, now)
+        if card is None:
+            raise ValueError('Подписчик не найден в последней проверке — нажмите «Проверить сейчас»')
+        sig = hashlib.sha1(json.dumps([sorted(r['text'] for r in card['reasons']), card['devices'], card['ips'], card['at']],
+                                      ensure_ascii=False).encode()).hexdigest()[:12]
+        hit = self.ai_cached(prof['id'], key)
+        if hit and not force and hit.get('sig') == sig and now - hit.get('at', 0) < AI_TTL:
+            return hit
+        from . import scripts as sc
+        try:
+            raw = await g.ask(AI_SYSTEM, [{'role': 'user', 'text': ai_input(card, card.get('at') or now)}])
+        except sc.ScriptError as e:
+            raise ValueError(str(e)) from None
+        out = {**ai_clean(raw), 'sig': sig, 'at': now}
+        self.put(f'guard:ai:{prof["id"]}:{key}', out)
+        return out
+
+    async def ai_auto(self, prof: dict, key: str, now: float) -> dict | None:
+        """Разбор для сообщения: не больше AI_DAY в сутки на группу; не вышло — сообщение уйдёт без него."""
+        key_used, today = f'guard:ai_used:{prof["id"]}', day_of(now, 0)
+        used = self.get(key_used, {}).get(today, 0)
+        if used >= AI_DAY or self.gemini() is None:
+            return None
+        self.put(key_used, {today: used + 1})
+        try:
+            return await self.ai(prof, key, now)
+        except Exception as e:  # noqa: BLE001
+            log.info('guard ai %s %s: %s', prof.get('id'), key, e)
+            return None
 
     # ── кнопки и действия ──
     def token(self, pid: int, f: dict, now: float) -> str:
@@ -640,13 +793,13 @@ class Guard:
         return InlineKeyboardMarkup(inline_keyboard=[[b('🔄 Перевыпустить', 'r'), b('⛔ Отключить', 'd')],
                                                      [b('✅ Всё в порядке', 'o')]])
 
-    async def alert(self, prof: dict, f: dict, done: str = '') -> None:
+    async def alert(self, prof: dict, f: dict, done: str = '', ai: dict | None = None) -> None:
         tok = self.token(prof['id'], f, time.time())
         try:
             mk = self.markup(prof['id'], tok)
         except ImportError:  # тесты без aiogram
             mk = None
-        await self.notify.emit('security.guard', text(prof, f, done), prof, mk)
+        await self.notify.emit('security.guard', text(prof, f, done, ai), prof, mk)
 
     async def act(self, prof: dict, key: str, what: str) -> str:
         """revoke | disable | ok. Возвращает строку для пользователя."""

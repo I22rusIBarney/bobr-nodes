@@ -78,7 +78,10 @@ function groupGuard(g) {
         h('div', { class: 'row2' },
           fld('Трафик за сутки, ГБ', numIn(a.day_gb, x => save({ day_gb: x })), 'больше — подозрительно; 0 — не смотреть'),
           fld('Всплеск, во сколько раз', numIn(a.spike, x => save({ spike: x })), 'выше обычного; 0 — не смотреть')),
-        fld('Новых устройств за сутки', numIn(a.burst, x => save({ burst: x })), 'столько и больше — подозрительно; 0 — не смотреть')) : h('div', { style: 'margin-bottom:22px' })),
+        fld('Новых устройств за сутки', numIn(a.burst, x => save({ burst: x })), 'столько и больше — подозрительно; 0 — не смотреть'),
+        a.admin ? h('div', { class: 'list', style: 'background:var(--sheet-2)' }, switchRow('Разбор нейросетью в сообщениях',
+          a.ai_ready ? 'К каждому сообщению — вывод Gemini: честный клиент, семья, раздача или перепродажа, и что сделать. Нейросеть не видит имени, TG ID, HWID и полных IP. Не больше 30 разборов в сутки на группу'
+            : 'Нужен ключ Gemini — задайте его в «Подключениях»', a.ai, v => save({ ai: v }))) : null) : h('div', { style: 'margin-bottom:22px' })),
     a.on || found.length ? section('Последняя проверка',
       h('div', { class: 'chips', style: 'margin-bottom:10px' },
         h('span', { class: 'faint' }, last.at ? `${ago(last.at * 1000)} · пользователей ${last.users ?? '—'}, устройств ${last.devices ?? '—'}` : 'ещё не было'),

@@ -251,3 +251,61 @@ def test_detail_and_search_from_snapshot(tmp_path):
     assert [x['name'] for x in g.search(pid, 'ALI')] == ['alice']
     daily = g.get(f'guard:daily:{pid}', {})
     assert list(daily.values())[0]['crit'] == 1
+
+
+# ───────── разбор нейросетью ─────────
+class FakeGemini:
+    def __init__(self, answer):
+        self.answer, self.asked = answer, []
+
+    async def ask(self, system, turns):
+        self.asked.append(turns[0]['text'])
+        return self.answer
+
+
+def test_ai_card_is_anonymous_cached_and_in_alert(tmp_path):
+    import json
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True, 'ai': True}})
+    prof = store.profile(pid)
+    gem = FakeGemini({'verdict': 'reselling', 'confidence': 180, 'summary': 'Подписка подключена к серверу.',
+                      'evidence': ['3x-ui'], 'action': 'revoke', 'junk': 1})
+    n = FakeNotify()
+    g = gd.Guard(store, n, ipinfo=lambda ip: {'holder': 'AEZA'}, gemini=gem)
+    d = {**data([user('u1', 'secret-name', tg=424242)],
+                [device('3x-ui-server-0001', 'u1', ua='3x-ui-outbound-sub/1.0', platform='', model='', ip='95.142.10.20')]),
+         'conn': [conn('u1', '95.142.10.21')]}
+    asyncio.run(g.check(prof, NOW, d))
+    assert len(gem.asked) == 1
+    sent = gem.asked[0]
+    for secret in ('secret-name', '424242', '3x-ui-server-0001', '95.142.10.20', '95.142.10.21'):
+        assert secret not in sent
+    assert '95.142.x.x' in sent and json.loads(sent)['device_list'][0]['server_like']
+    assert 'Нейросеть' in n.sent[0][1] and 'перепродаёт' in n.sent[0][1]
+    a = asyncio.run(g.ai(prof, 'u1', NOW + 60))
+    assert a['confidence'] == 100 and a['verdict'] == 'reselling' and a['doubts'] == [] and 'junk' not in a
+    assert len(gem.asked) == 1                      # тот же набор признаков — из кэша
+    asyncio.run(g.ai(prof, 'u1', NOW + 60, force=True))
+    assert len(gem.asked) == 2
+    assert g.detail(prof, 'u1', NOW)['ai']['verdict'] == 'reselling'
+
+
+def test_ai_errors_and_daily_cap(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    prof = store.profile(pid)
+    g = gd.Guard(store, FakeNotify())
+    with pytest.raises(ValueError, match='Gemini'):
+        asyncio.run(g.ai(prof, 'u1'))
+    g = gd.Guard(store, FakeNotify(), gemini=FakeGemini({'verdict': '???'}))
+    with pytest.raises(ValueError, match='Проверить сейчас'):
+        asyncio.run(g.ai(prof, 'u1'))
+    monkeypatch.setattr(gd, 'AI_DAY', 0)
+    assert asyncio.run(g.ai_auto(prof, 'u1', NOW)) is None
+    assert gd.ai_clean({'verdict': '???', 'confidence': 'x'}) | {} == {
+        'verdict': 'unclear', 'confidence': 0, 'summary': '', 'evidence': [], 'doubts': [], 'action': 'watch', 'check': []}
+
+
+def test_scrub_hides_names_and_ips():
+    t = gd._scrub('то же устройство, что у vasya_99 · IP 31.173.5.6 · h-123456789', ['vasya_99', 'h-123456789', 'ab'])
+    assert t == 'то же устройство, что у «скрыто» · IP 31.173.x.x · «скрыто»'
