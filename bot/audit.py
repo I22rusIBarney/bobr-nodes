@@ -83,6 +83,9 @@ ROUTES: list[tuple[str, str, str, str]] = [
     ('POST', r'/api/deploy/own', 'deploy.own', 'Поставил ноду на свой сервер'),
     ('POST', r'/api/profiles/(?P<pid>\d+)/nodes/(?P<uuid>[^/]+)/xray', 'node.xray', 'Сменил версию Xray на ноде'),
     ('POST', r'/api/stats/ask', 'stats.ai', 'Спросил нейросеть о блокировках'),
+    ('POST', r'/api/profiles/(?P<pid>\d+)/guard', 'guard.cfg', 'Изменил стража подписок'),
+    ('POST', r'/api/profiles/(?P<pid>\d+)/guard/users/(?P<key>[^/]+)/(?P<what>revoke|disable|ok)', 'guard.act',
+     'Страж подписок: действие с подписчиком'),
     ('POST', r'/api/users/(?P<tg>\d+)/block', 'user.block', 'Заблокировал или разблокировал пользователя'),
     ('DELETE', r'/api/users/(?P<tg>\d+)', 'user.delete', 'Удалил пользователя'),
 ]
@@ -95,7 +98,7 @@ SHOW = {'name': 'название', 'domain': 'домен', 'domains': 'доме
         'free': 'бесплатно', 'blocked': 'закрыт', 'price_rub': 'цена ₽', 'period_days': 'период, дней', 'scale': 'автомасштабирование',
         'scale_max': 'лимит нод', 'online_max': 'онлайн на ноду', 'update': 'автообновление', 'load': 'нагрузка', 'renew': 'автопродление',
         'autorenew': 'автопродление', 'action': 'действие', 'hour': 'час', 'host': 'хост', 'uuids': 'ноды', 'amount_rub': 'сумма ₽',
-        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'exit_egames': 'переустановить выход', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок', 'hoster': 'хостер', 'question': 'вопрос'}
+        'note': 'заметка', 'region': 'регион', 'hoster_url': 'хостер', 'source': 'откуда сервер', 'sni': 'SNI', 'hop': 'связь', 'exit_egames': 'переустановить выход', 'server_id': 'сервер', 'uses': 'входов', 'keep': 'хранить копий', 'period': 'срок', 'hoster': 'хостер', 'question': 'вопрос', 'auto': 'автодействие', 'day_gb': 'порог трафика, ГБ', 'spike': 'всплеск, раз', 'burst': 'новых устройств за сутки'}
 
 
 def match(method: str, path: str) -> tuple[str, str, dict] | None:
@@ -154,7 +157,8 @@ def from_request(store, uid: int, method: str, path: str, body, who: str = '') -
     extra = []
     if g.get('uuid'):
         extra.append(f'нода {g["uuid"][:8]}')
-    for k, what in (('sid', 'сервер'), ('jid', 'задача'), ('tg', 'пользователь'), ('rid', '№'), ('cid', 'чекер'), ('iid', 'приглашение')):
+    for k, what in (('sid', 'сервер'), ('jid', 'задача'), ('tg', 'пользователь'), ('rid', '№'), ('cid', 'чекер'), ('iid', 'приглашение'),
+                    ('key', 'подписчик'), ('what', 'действие')):
         if g.get(k):
             extra.append(f'{what} {g[k]}')
     d = describe(body)

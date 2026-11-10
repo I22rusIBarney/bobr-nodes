@@ -51,6 +51,51 @@ function groupAuto(g) {
     h('div', { class: 'list' }, dangerRow('clock', 'Утренняя сводка', 'Итог по всем группам раз в день', btn('Настроить', () => go('settings/summary'), 's'))));
 }
 
+/* ═════════ Страж подписок: раздача и перепродажа ═════════ */
+function groupGuard(g) {
+  const key = 'gd' + g.id, st = GD[key];
+  if (!st) { GD[key] = { loading: true }; api(`profiles/${g.id}/guard`).then(r => { GD[key] = { a: r }; }).catch(e => { GD[key] = { err: e.message }; }).then(() => render(true)); }
+  if (!st || st.loading) return h('div', { class: 'sk', style: 'height:300px' });
+  if (st.err) return empty('alert', 'Не загрузилось', st.err, btn('Повторить', () => { delete GD[key]; render(); }, 'primary'));
+  const a = st.a, last = a.last || {};
+  const save = async patch => { try { st.a = await api(`profiles/${g.id}/guard`, 'POST', { ...patch, tz: tzNow() }); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); };
+  const check = e => busyBtn(e, async () => { try { st.a = await api(`profiles/${g.id}/guard/check`, 'POST', {}); toast('Проверено', `${(st.a.last.found || []).length} подозрительных`); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); });
+  const act = (f, what) => {
+    const T = { revoke: ['Перевыпустить подписку?', 'Старая ссылка и ключи перестанут работать — пользователю нужно будет заново добавить подписку из бота продаж.', 'Перевыпустить', 'primary'],
+      disable: ['Отключить пользователя?', 'Пользователь будет отключён в панели Remnawave. Включить обратно можно в самой панели.', 'Отключить', 'danger solid'],
+      ok: ['Всё в порядке?', 'Бот больше не будет писать об этом пользователе — только если появится что-то критичное.', 'Да, всё в порядке', 'primary'] }[what];
+    confirmAct({ title: T[0], text: T[1], ok: T[2], cls: T[3], icon: ['shield', what === 'disable' ? 'bad' : what === 'ok' ? 'run' : 'warn'],
+      fn: async () => { const r = await api(`profiles/${g.id}/guard/users/${encodeURIComponent(f.key)}/${what}`, 'POST', {}); toast(r.msg); if (what === 'ok') f.ok = true; render(); } });
+  };
+  const sheet = (...kids) => h('div', { class: 'sheet form', style: 'padding:16px;margin-bottom:22px' }, ...kids);
+  const found = last.found || [];
+  return h('div', { style: 'max-width:760px' },
+    section('Страж подписок',
+      h('div', { class: 'list', style: 'margin-bottom:10px' }, switchRow('Следить за подписчиками', 'Раз в час бот смотрит пользователей и устройства в панели: серверы и скрипты вместо приложений, IP хостингов, обход бана, всплески трафика. О подозрительных — сообщение с кнопками', a.on, v => save({ on: v }))),
+      a.on ? sheet(
+        fld('При критичных признаках', optSel(a.actions, a.auto, x => save({ auto: x }), 'Автодействие'),
+          'Критичные — устройство-сервер (3x-ui, xray, curl…) или устройство отключённого пользователя. Остальное бот только присылает.'),
+        h('div', { class: 'row2' },
+          fld('Трафик за сутки, ГБ', numIn(a.day_gb, x => save({ day_gb: x })), 'больше — подозрительно; 0 — не смотреть'),
+          fld('Всплеск, во сколько раз', numIn(a.spike, x => save({ spike: x })), 'выше обычного; 0 — не смотреть')),
+        fld('Новых устройств за сутки', numIn(a.burst, x => save({ burst: x })), 'столько и больше — подозрительно; 0 — не смотреть')) : h('div', { style: 'margin-bottom:22px' })),
+    a.on || found.length ? section('Последняя проверка',
+      h('div', { class: 'chips', style: 'margin-bottom:10px' },
+        h('span', { class: 'faint' }, last.at ? `${ago(last.at * 1000)} · пользователей ${last.users ?? '—'}, устройств ${last.devices ?? '—'}` : 'ещё не было'),
+        btn('Проверить сейчас', check, 's', 'radar')),
+      last.error ? h('div', { class: 'err', role: 'alert', style: 'margin-bottom:10px' }, 'Панель не ответила: ' + last.error) : null,
+      last.dev_err ? h('div', { class: 'hint', style: 'margin-bottom:10px' }, 'Список устройств панель не отдала — проверяю только трафик. ' + last.dev_err) : null,
+      found.length ? h('div', { class: 'list' }, found.map(f => h('div', { class: 'li', style: 'align-items:flex-start' },
+        h('span', { class: 'st ' + (f.level === 'crit' ? 'bad' : 'warn') }, f.level === 'crit' ? 'критично' : 'внимание'),
+        h('div', { class: 'grow', style: 'min-width:0' },
+          h('div', { class: 't' }, f.name + (f.ok ? ' · отмечен «всё в порядке»' : '')),
+          h('div', { class: 's' }, `устройств ${f.devices}` + (f.limit ? ` из ${f.limit}` : '') + (f.tg ? ` · TG ${f.tg}` : '')),
+          f.reasons.slice(0, 5).map(r => h('div', { class: 's' }, '• ' + r)),
+          h('div', { class: 'chips', style: 'margin-top:8px' },
+            btn('Перевыпустить', () => act(f, 'revoke'), 's'), btn('Отключить', () => act(f, 'disable'), 's'),
+            f.ok ? null : btn('Всё в порядке', () => act(f, 'ok'), 's')))))) : last.at ? empty('shield', 'Подозрительных нет', 'Бот напишет, если кто-то начнёт раздавать или перепродавать подписку.') : null) : null);
+}
+
 /* ═════════ Проверка и починка ═════════ */
 function groupMon(g) {
   if (!D.mon) return empty('radar', 'Мониторинг выключен', 'На этом боте нет проверки из России.');

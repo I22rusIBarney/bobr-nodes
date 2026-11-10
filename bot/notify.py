@@ -47,6 +47,7 @@ TYPES: dict[str, tuple[str, str, str, bool, bool]] = {
     'billing.notice':   ('money', 'Подписка BobrNet: напоминания и оплата', TG, True, False),
     'security.login':   ('security', 'Вход по SSH на сервер бота', TG, True, True),
     'security.brute':   ('security', 'Подбор паролей к серверу бота', TG, False, True),
+    'security.guard':   ('security', 'Страж подписок: подозрительные пользователи', TG, False, False),
     'system.host':      ('system', 'Серверу бота не хватает ресурсов', TG, False, True),
     'system.update':    ('system', 'Бот обновился', TG, False, True),
     'system.update_available': ('system', 'Вышла новая версия бота', TG, False, True),

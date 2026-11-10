@@ -358,11 +358,11 @@ function vGroup(arg) {
   const pid = +arg, g = groups().find(p => p.id === pid);
   if (!g) return [pageH('Группа не найдена'), empty('layers', 'Такой группы нет', 'Возможно, её удалили или у вас нет к ней доступа.', btn('К группам', () => go('groups'), 'primary'))];
   const tab = UI.tabs['g' + pid] || 'nodes', ns = allNodes().filter(n => n.pid === pid);
-  const TABS = [['nodes', `Ноды · ${ns.length}`], ['conn', 'Подключение'], ['mon', 'Проверка и починка'], ['auto', 'Автоматизация'], ['rent', 'Аренда'], ['plugins', 'Плагины'], ['clean', 'Уборка']];
+  const TABS = [['nodes', `Ноды · ${ns.length}`], ['conn', 'Подключение'], ['mon', 'Проверка и починка'], ['auto', 'Автоматизация'], ['guard', 'Страж'], ['rent', 'Аренда'], ['plugins', 'Плагины'], ['clean', 'Уборка']];
   const f = { status: 'all', q: '', cc: null, group: 'all', sort: UI.nf.sort };
   const content = { nodes: () => [D.nerr[pid] ? nodesErrors() : null, ns.length ? [nodesTable(filtered(ns, f), false), nodeCards(filtered(ns, f)), bulkBar()]
       : D.nodes[pid] ? empty('server', 'В группе нет нод', 'Добавьте первые — выберите страны и тариф.', btn('Добавить ноды', () => openDeploy(pid), 'primary', 'plus')) : skeleton()],
-    conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), rent: () => groupRent(g), plugins: () => groupPlugins(g), clean: () => groupCleanup(g) }[tab]();
+    conn: () => groupConn(g), mon: () => groupMon(g), auto: () => groupAuto(g), guard: () => groupGuard(g), rent: () => groupRent(g), plugins: () => groupPlugins(g), clean: () => groupCleanup(g) }[tab]();
   D.prel = D.prel || {};
   if (!D.prel[pid]) { D.prel[pid] = { loading: true }; api(`profiles/${pid}/panel-release`).then(r => { D.prel[pid] = r; }, () => { D.prel[pid] = {}; }).then(() => render(true)); }
   const PR = D.prel[pid];

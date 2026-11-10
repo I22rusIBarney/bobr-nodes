@@ -830,6 +830,27 @@ async def scale_button(c: CallbackQuery, store: Store, autopilot=None, access: A
     await c.answer(msg[:200], show_alert=True)
 
 
+# ───────────────────────── страж подписок ─────────────────────────
+
+@router.callback_query(F.data.regexp(r'^gd:[rdo]:\d+:[0-9a-f]{8}$'))
+async def guard_button(c: CallbackQuery, store: Store, guard=None, access: Access | None = None,
+                       role: str = 'admin', uid: int = 0, username: str = ''):
+    if guard is None:
+        return await c.answer('Страж подписок выключен', show_alert=True)
+    _, what, pid, tok = c.data.split(':')
+    if not my_profile(store, access, role, uid, username, int(pid)):
+        return await c.answer('Нет доступа', show_alert=True)
+    try:
+        msg = await guard.button(int(pid), tok, what)
+    except ValueError as e:
+        msg = str(e)
+    try:
+        await c.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await c.answer(msg[:200], show_alert=True)
+
+
 # ───────────────────────── задачи ─────────────────────────
 
 @router.callback_query(F.data == 'm:jobs')
