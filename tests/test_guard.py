@@ -23,7 +23,7 @@ def data(users, devices, own=()):
     return {'users': [gd.norm_user(u) for u in users], 'devices': [gd.norm_device(d) for d in devices], 'own': set(own)}
 
 
-CONF = gd.cfg({'guard': {'on': True}})
+CONF = gd.cfg({'guard': {'names': '', 'on': True}})
 
 
 def test_server_device_is_critical():
@@ -134,7 +134,7 @@ class FakePanel:
 
 def test_guard_check_alerts_once_and_auto_revokes(tmp_path, monkeypatch):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True, 'auto': 'revoke'}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True, 'auto': 'revoke'}})
     prof = store.profile(pid)
     n = FakeNotify()
     g = gd.Guard(store, n, ipinfo=lambda ip: {})
@@ -233,7 +233,7 @@ def test_node_connections_both_panel_versions(v3):
 
 def test_detail_and_search_from_snapshot(tmp_path):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
     prof = store.profile(pid)
     g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {'holder': 'HETZNER-AS'} if ip == '95.1.1.1' else {'holder': 'MTS'})
     d = {**data([user('u1', 'alice', tg=1), user('u2', 'old', status='DISABLED')],
@@ -266,7 +266,7 @@ class FakeGemini:
 def test_ai_card_is_anonymous_cached_and_in_alert(tmp_path):
     import json
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True, 'ai': True}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True, 'ai': True}})
     prof = store.profile(pid)
     gem = FakeGemini({'verdict': 'reselling', 'confidence': 180, 'summary': 'Подписка подключена к серверу.',
                       'evidence': ['3x-ui'], 'action': 'revoke', 'junk': 1})
@@ -292,7 +292,7 @@ def test_ai_card_is_anonymous_cached_and_in_alert(tmp_path):
 
 def test_ai_errors_and_daily_cap(tmp_path, monkeypatch):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
     prof = store.profile(pid)
     g = gd.Guard(store, FakeNotify())
     with pytest.raises(ValueError, match='Gemini'):
@@ -314,7 +314,7 @@ def test_scrub_hides_names_and_ips():
 # ───────── «Проверить сейчас» в фоне и сводка вместо пачки сообщений ─────────
 def test_start_runs_in_background_and_reports_errors(tmp_path, monkeypatch):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
     prof = store.profile(pid)
     g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {})
     gate = asyncio.Event()
@@ -341,7 +341,7 @@ def test_start_runs_in_background_and_reports_errors(tmp_path, monkeypatch):
 
 def test_many_suspects_become_one_digest(tmp_path):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
     n = FakeNotify()
     g = gd.Guard(store, n, ipinfo=lambda ip: {})
     users = [user(f'u{i}', f'name{i}') for i in range(12)]
@@ -433,9 +433,9 @@ def test_trial_farm_and_torrents():
 
 def test_shared_blacklist_only_inside_one_owner(tmp_path):
     store = Store(tmp_path / 'db.sqlite')
-    a = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'on': True}})
-    b = store.save_profile({'name': 'B', 'panel_url': 'https://b', 'panel_token': 't', 'guard': {'on': True}})
-    c = store.save_profile({'name': 'C', 'panel_url': 'https://c', 'panel_token': 't', 'guard': {'on': True}, 'created_by': 777})
+    a = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
+    b = store.save_profile({'name': 'B', 'panel_url': 'https://b', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
+    c = store.save_profile({'name': 'C', 'panel_url': 'https://c', 'panel_token': 't', 'guard': {'names': '', 'on': True}, 'created_by': 777})
     g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {})
     asyncio.run(g.check(store.profile(a), NOW, data([user('x', 'banned', status='DISABLED')],
                                                      [device('evilhwid0001', 'x'), device('pc0000000001', 'x', platform='Windows', model='DESKTOP-EVIL123')])))
@@ -466,7 +466,7 @@ def test_sub_history_pages_newest_first_and_oldest_first():
 
 def test_card_shows_memory(tmp_path):
     store = Store(tmp_path / 'db.sqlite')
-    pid = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'on': True}})
+    pid = store.save_profile({'name': 'A', 'panel_url': 'https://a', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
     g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {'holder': 'MTS'})
     users = [user('u1', 'a')]
     asyncio.run(g.check(store.profile(pid), NOW - DAY, data(users, [device('olddevice001', 'u1')])))
@@ -476,3 +476,38 @@ def test_card_shows_memory(tmp_path):
     assert [(x['hwid'], x['current']) for x in card['device_history']] == [('newdevice001', True), ('olddevice001', False)]
     assert card['week_devices'] == 2 and card['sub_ips'][0]['ip'] == '5.5.5.5' and card['sub_ips'][0]['net']['holder'] == 'MTS'
     assert card['hourly'] is None and card['torrent_list'] == []
+
+
+# ───────── только подписки бота продаж, понятные сообщения ─────────
+def test_only_sales_bot_names_are_checked():
+    conf = gd.cfg({'guard': {'on': True}})
+    assert conf['names'] == gd.NAMES_DEF
+    users = [user('1', 'BOBR_1364999314'), user('2', '160_1195917992'), user('3', 'test', status='DISABLED'),
+             user('4', 'statistics'), user('5', 'bridge_ab12')]
+    ix = gd.index(data(users, []), conf['names'])
+    assert sorted(u['name'] for u in ix['users'].values()) == ['160_1195917992', 'BOBR_1364999314']
+    shared = [device('samehwid0001', '1', ip='95.85.248.151'), device('otherhwid001', '3', ip='95.85.248.151')]
+    assert gd.analyze(data(users, shared), conf, {}, {}, NOW) == []  # отключённый test — системный, не связь
+    with pytest.raises(ValueError):
+        gd.clean({'names': '(['}, {})
+    assert gd.clean({'names': ''}, {})['names'] == ''
+
+
+def test_warp_and_private_relay_are_not_hosting():
+    assert not gd.hosting('CLOUDFLARENET - Cloudflare, Inc.') and not gd.hosting('AKAMAI-AS') and not gd.hosting('FASTLY')
+    assert gd.hosting('HETZNER-AS') and gd.hosting('AS-3HCLOUD Newserverlife LLC')
+    d = {**data([user('u1', 'a')], [device('phone0000001', 'u1')]), 'conn': [conn('u1', '104.22.219.101')]}
+    assert gd.analyze(d, CONF, {}, {'104.22.219.101': {'holder': 'CLOUDFLARENET - Cloudflare, Inc.'}}, NOW) == []
+
+
+def test_notification_is_informative_and_copyable():
+    assert gd.handle_of('@alchern1999 | Алексей Чернышков') == '@alchern1999' and gd.handle_of('без ника') == ''
+    users = [user('u1', 'BOBR_1364999314', tg=1364999314, description='@alchern1999 | Алексей', hwidDeviceLimit=5)]
+    devs = [device('3x-ui-server-92ff0059', 'u1', ua='3x-ui-outbound-sub/1.0', platform='', model='', ip='45.38.3.215'),
+            device('97351eb0-2c50-4ef8', 'u1', ua='Happ/4.3.0/Windows', platform='Windows', model='DESKTOP-FR15BBH_x86_64', ip='5.18.1.1')]
+    f = gd.analyze(data(users, devs), CONF, {}, {'45.38.3.215': {'holder': 'AS-3HCLOUD'}}, NOW)[0]
+    t = gd.text({'name': 'Barney'}, f)
+    assert '<code>BOBR_1364999314</code> · <code>@alchern1999</code>' in t and 'TG <code>' not in t
+    assert '<code>3x-ui-server-92ff0059</code>' in t and '<code>45.38.3.215</code>' in t   # устройство признака и IP
+    assert 'DESKTOP-FR15BBH_x86_64' in t and '<code>97351eb0-2c50-4ef8</code>' in t         # остальные устройства
+    assert '🔴' in t and '🖥' in t and len(t) < 3900
