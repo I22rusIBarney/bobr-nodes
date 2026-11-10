@@ -71,13 +71,18 @@ GENERIC_MODEL = re.compile(r'^(iphone|ipad|ipod|sm-|samsung|galaxy|pixel|redmi|x
 GENERIC_WORD = re.compile(r'(mac|pc|computer|desktop|laptop|windows|linux|ubuntu|android|unknown|default|user|admin|home)'
                           r'(-pc)?', re.I)  # имя целиком из общего слова
 ARCH = re.compile(r'[_ ](x86_64|amd64|x64|x86|i[3-6]86|arm64|aarch64|armv\d\w*)$', re.I)
+OS_NAME = re.compile(r'(windows|win\d|mac ?os|macos|os ?x|darwin|linux|ubuntu|debian|fedora|arch|android|ios|ipados)(\b|\d|_|-)', re.I)
+SHARED_MAX = 5            # HWID или имя ПК больше чем у стольких аккаунтов — не уникальные (клиент шлёт одинаковое)
 DESKTOP = re.compile(r'windows|win32|win64|mac ?os|macos|darwin|linux', re.I)
 
 
 def pc_name(d: dict) -> str:
     """Имя компьютера, если оно похоже на уникальное (DESKTOP-7F3K2LQ, VASYA-PC); у телефонов и типовых моделей — ''."""
     m = ARCH.sub('', (d.get('model') or '').strip())  # Happ на Windows: DESKTOP-FR15BBH_x86_64 — архитектура не часть имени
-    if len(m) < 5 or GENERIC_MODEL.match(m) or GENERIC_WORD.fullmatch(m) or re.fullmatch(r'[\w ]+\d+,\d+', m):  # MacBookPro18,1 — модель, а не имя
+    # в имени компьютера не бывает пробелов (Windows их запрещает), а «Windows 10 amd64», «Mac OS X aarch64» —
+    # это система, которую присылают некоторые клиенты вместо имени
+    if (len(m) < 5 or ' ' in m or OS_NAME.match(m) or GENERIC_MODEL.match(m) or GENERIC_WORD.fullmatch(m)
+            or re.fullmatch(r'[\w ]+\d+,\d+', m)):  # MacBookPro18,1 — модель, а не имя
         return ''
     if DESKTOP.search(d.get('platform') or '') or re.match(r'(desktop|laptop|win)-[a-z0-9]{5,}$', m, re.I):
         return m.lower()
@@ -92,7 +97,7 @@ HOSTING = re.compile(r'hetzner|\bovh|digitalocean|amazon|\baws\b|google|microsof
 
 # сети WARP и iCloud Private Relay: оттуда ходят обычные люди со «скрытием IP» — не хостинг клиента
 RELAY_NET = re.compile(r'cloudflare|akamai|fastly', re.I)
-NAMES_DEF = r'^(bobr_\d+|\d+_\d+)$'   # подписки бота продаж; test, bridge_…, statistics и прочие системные — не проверяем
+NAMES_DEF = r'^(bobr_\d+|\d+_\d+)'   # подписки бота продаж; test, bridge_…, statistics и прочие системные — не проверяем
 
 
 def hosting(h: str) -> bool:
@@ -113,7 +118,8 @@ def cfg(prof: dict) -> dict:
             'spike': int(g.get('spike', 5)),          # во сколько раз выше обычного (0 — не смотреть)
             'burst': int(g.get('burst', 4)),          # столько новых устройств за сутки (0 — не смотреть)
             'ai': bool(g.get('ai')),
-            'names': str(g['names']) if isinstance(g.get('names'), str) else NAMES_DEF,  # какие подписки проверять ('' — все)                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
+            # какие подписки проверять ('' — все); прежний шаблон по умолчанию (с $) — на новый
+            'names': NAMES_DEF if g.get('names') in (None, NAMES_DEF + '$') or not isinstance(g.get('names'), str) else g['names'],                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
             'tz': int(g.get('tz', (prof.get('auto') or {}).get('tz', 0)))}
 
 
@@ -430,6 +436,8 @@ def index(data: dict, names: str | None = None) -> dict:
             if c['node'] and c['node'] not in cur['nodes']:
                 cur['nodes'].append(c['node'])
             ix['ip'].setdefault(c['ip'], set()).add(k)
+    ix['common_hw'] = {h for h, ks in ix['hwid'].items() if len(ks) > SHARED_MAX}
+    ix['common_pc'] = {n for n, ks in ix['pc'].items() if len(ks) > SHARED_MAX}
     for t in data.get('torrents') or []:
         k = alias.get(t['owner'])
         if k:
@@ -485,6 +493,8 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     # один аккаунт рядом — бывает (две подписки у одного человека), два и больше — повод посмотреть
     twins, twin_dev = set(), None
     for d in devs:
+        if d['hwid'] in ix['common_hw']:
+            continue  # такой HWID у многих — клиент присылает не уникальный: связью не считаем
         for o in ix['hwid'].get(d['hwid'], set()) - {k}:
             if o in banned:
                 add('ban-hwid:' + o, CRIT, f'то же устройство (HWID), что у отключённого {ix["users"][o]["name"]}', True, d)
@@ -496,7 +506,7 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
         add('twin:' + ','.join(sorted(twins)[:5]), 30 if len(twins) == 1 else 50,
             f'то же устройство (HWID) у других аккаунтов: {names}', dev=twin_dev)
     # ферма пробных периодов: соседи по устройству или компьютеру, и большинство уже истекли
-    pcs = {o for d in devs if pc_name(d) for o in (ix['pc'].get(pc_name(d)) or {})} - {k} - banned
+    pcs = {o for d in devs if pc_name(d) and pc_name(d) not in ix['common_pc'] for o in (ix['pc'].get(pc_name(d)) or {})} - {k} - banned
     near = twins | pcs
     gone = [o for o in near if ix['users'][o]['status'] in ('EXPIRED', 'LIMITED') or (ix['users'][o].get('expire') or now) < now]
     if len(near) >= 2 and len(gone) >= 2:
@@ -512,13 +522,15 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     # тот же компьютер под другим HWID (другое приложение или переустановка): уникальное имя ПК вроде DESKTOP-7F3K2LQ
     for d in devs:
         name = pc_name(d)
-        for o, hw in sorted((ix['pc'].get(name) or {}).items()) if name else ():
-            if o == k or d['hwid'] in hw:
-                continue
-            if o in banned:
-                add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}', dev=d)
-            else:
-                add('pc:' + o, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {ix["users"][o]["name"]}', dev=d)
+        if not name or name in ix['common_pc']:
+            continue
+        same = [o for o, hw in sorted((ix['pc'].get(name) or {}).items()) if o != k and d['hwid'] not in hw]
+        for o in [o for o in same if o in banned][:2]:
+            add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}', dev=d)
+        rest = [o for o in same if o not in banned]
+        if rest:  # одной строкой и одними баллами, сколько бы их ни было
+            names = ', '.join(ix['users'][o]['name'] for o in rest[:3]) + (f' и ещё {len(rest) - 3}' if len(rest) > 3 else '')
+            add('pc:' + name, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {names}', dev=d)
     mine_ips = {d['ip'] for d in devs if d['ip']} | set(ix['conn'].get(k) or {})
     for ip in sorted(mine_ips - own):
         for o in sorted((ix['ip'].get(ip, set()) & banned) - {k})[:2]:
@@ -621,7 +633,7 @@ def dev_brief(d: dict, ipinfo: dict | None = None) -> dict:
             'created': d.get('created')}
 
 
-_COPY = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:bobr_\d+|\d+_\d+)\b', re.I)
+_COPY = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:bobr_\d+|\d+_\d+)\w*', re.I)
 
 
 def copyable(text_: str) -> str:
@@ -742,8 +754,9 @@ def remember_bans(ban: dict, ix: dict, pid: int, now: float) -> dict:
     out = {kind: {x: v for x, v in (ban.get(kind) or {}).items() if v[0] != pid} for kind in ('hw', 'pc')}
     for k in ix['banned']:
         for d in ix['dev'].get(k, []):
-            out['hw'][d['hwid']] = [pid, now]
-            if pc_name(d):
+            if d['hwid'] not in ix.get('common_hw', ()):
+                out['hw'][d['hwid']] = [pid, now]
+            if pc_name(d) and pc_name(d) not in ix.get('common_pc', ()):
                 out['pc'][pc_name(d)] = [pid, now]
     for kind in ('hw', 'pc'):  # не больше 20 000 записей: старые уходят
         if len(out[kind]) > 20000:
@@ -1098,9 +1111,9 @@ class Guard:
                           'relay': bool(RELAY_NET.search(holder(info, ip)))}
         links = {}
         for d in ix['dev'].get(key, []):
-            for o in ix['hwid'].get(d['hwid'], set()) - {key}:
+            for o in (ix['hwid'].get(d['hwid'], set()) - {key}) if d['hwid'] not in ix['common_hw'] else ():
                 links.setdefault(o, set()).add('устройство')
-            for o in (ix['pc'].get(pc_name(d)) or {}) if pc_name(d) else ():
+            for o in (ix['pc'].get(pc_name(d)) or {}) if pc_name(d) and pc_name(d) not in ix['common_pc'] else ():
                 if o != key:
                     links.setdefault(o, set()).add(f'имя ПК {d["model"]}')
         for ip in ips:
