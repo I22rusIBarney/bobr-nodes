@@ -8,10 +8,13 @@
 - много устройств за сутки, устройства в разных сетях;
 - трафик за вчера выше порога группы или в разы выше обычного для этого пользователя;
 - то же устройство или IP, что у отключённого в панели пользователя (обход бана), то же устройство у другого;
-- IP подключений на нодах (Remnawave 2.7+): одновременно IP заметно больше, чем устройств, — ключи вставлены мимо
-  подписки (переносят хосты в чужие клиенты); подключения с IP хостинга — сервер-посредник;
+- подключения на нодах (Remnawave 2.7+). Число IP само по себе ничего не значит: телефон меняет IP от вышки к вышке,
+  оператор выпускает одно устройство с нескольких адресов, дома — Wi-Fi. Считаем СЕТИ (операторов), из которых
+  подписчик подключён ОДНОВРЕМЕННО: одно устройство не бывает в двух сетях сразу. Сетей одновременно больше лимита
+  устройств и так в нескольких проверках за сутки — подпиской пользуются сверх лимита; один и тот же IP хостинга
+  в нескольких проверках — сервер-посредник;
 - история запросов подписки: забирали запрещённым клиентом (правило ответа заблокировало) или сервером;
-  ссылку за сутки забирали с IP намного больше, чем устройств, — ссылкой делятся;
+  ссылку за сутки забирали из очень многих разных сетей — ссылкой делятся (слабый признак);
 - смена устройств: за неделю разных HWID намного больше лимита — старые удаляют, новые добавляют (перепродажа);
 - трафик идёт почти круглые сутки — сервер-посредник или раздача;
 - ферма пробных периодов: на одном устройстве или компьютере несколько аккаунтов, и большинство уже истекли;
@@ -48,6 +51,8 @@ ALERTS_EACH = 5           # столько самых серьёзных — о�
 PAGE = 500
 MAX_USERS = 50_000
 CONN_ACTIVE = 3600        # IP подключения считается живым, если был виден не раньше часа назад
+CONN_NOW = 180            # «одновременно»: IP видели не раньше чем за 3 минуты до самого свежего в этой проверке
+CONC_CHECKS = 3           # в стольких проверках за сутки должна повториться аномалия, чтобы считать её устойчивой
 CONN_WAIT = 45            # сколько ждать ответа ноды о подключениях
 SUBS_KEEP = 15            # запросов подписки на пользователя — для карточки
 BLOCKED = {'BLOCK', 'STATUS_CODE_404', 'STATUS_CODE_451', 'SOCKET_DROP'}
@@ -436,6 +441,8 @@ def index(data: dict, names: str | None = None) -> dict:
             if c['node'] and c['node'] not in cur['nodes']:
                 cur['nodes'].append(c['node'])
             ix['ip'].setdefault(c['ip'], set()).add(k)
+    seen_at = [c['last'] for c in data.get('conn') or [] if c.get('last')]
+    ix['conn_at'] = max(seen_at) if seen_at else None
     ix['common_hw'] = {h for h, ks in ix['hwid'].items() if len(ks) > SHARED_MAX}
     ix['common_pc'] = {n for n, ks in ix['pc'].items() if len(ks) > SHARED_MAX}
     for t in data.get('torrents') or []:
@@ -451,6 +458,33 @@ def index(data: dict, names: str | None = None) -> dict:
 
 def holder(ipinfo: dict, ip: str) -> str:
     return str((ipinfo.get(ip) or {}).get('holder') or '')
+
+
+def net_of(ipinfo: dict, ip: str) -> str:
+    """Сеть IP — оператор (ASN). Неизвестные — в одну кучу «?»: лучше недосчитать сеть, чем обвинить зря."""
+    i = ipinfo.get(ip) or {}
+    return str(i.get('asn') or i.get('holder') or '?')
+
+
+def concurrent(ix: dict, k: str) -> list[dict]:
+    """IP, с которых подписчик подключён прямо сейчас: видны в пределах CONN_NOW от самого свежего IP этой проверки."""
+    ref = ix.get('conn_at')
+    return [c for c in (ix['conn'].get(k) or {}).values() if not c['last'] or not ref or ref - c['last'] <= CONN_NOW]
+
+
+def remember_conc(mem: dict, ix: dict, ipinfo: dict, now: float) -> dict:
+    """По проверкам за сутки: {ключ: [[когда, сетей одновременно, IP одновременно, [IP хостингов]], …]} — только где есть что помнить."""
+    out = {}
+    for k in ix['users']:
+        cur = [e for e in (mem.get(k) or []) if e[0] >= now - 25 * 3600 and e[0] < now]
+        conc = concurrent(ix, k)
+        nets = len({net_of(ipinfo, c['ip']) for c in conc})
+        hosts = sorted(c['ip'] for c in conc if hosting(holder(ipinfo, c['ip'])))[:3]
+        if nets >= 2 or hosts:
+            cur.append([now, nets, len(conc), hosts])
+        if cur:
+            out[k] = cur[-30:]
+    return out
 
 
 def live_ips(ix: dict, k: str, now: float) -> list[dict]:
@@ -482,8 +516,10 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
             add('bare:' + d['hwid'], 20, f'устройство без платформы и модели ({d["ua"] or "без User-Agent"})', dev=d)
     hosted = sorted({d['ip'] for d in devs if d['ip'] and d['ip'] not in own and hosting(holder(ipinfo, d['ip']))})
     for ip in hosted[:3]:
-        add('host:' + ip, 60, f'подписку забирали с IP хостинга {ip} ({holder(ipinfo, ip)[:40]})', ip=ip,
-            dev=next((d for d in devs if d['ip'] == ip), None))
+        d = next((d for d in devs if d['ip'] == ip), None)
+        app = bool(d and CLIENT_UA.search(d['ua']) and (d['platform'] or d['model']))  # обычное приложение на устройстве
+        add('host:' + ip, 15 if app else 60, f'подписку забирали с IP хостинга {ip} ({holder(ipinfo, ip)[:40]})'
+            + (' — обычное приложение; скорее всего, был включён другой VPN' if app else ''), ip=ip, dev=d)
     if conf['burst']:
         fresh_d = [d for d in devs if d['created'] and now - d['created'] < 86400]
         if len(fresh_d) >= conf['burst']:
@@ -534,20 +570,36 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     mine_ips = {d['ip'] for d in devs if d['ip']} | set(ix['conn'].get(k) or {})
     for ip in sorted(mine_ips - own):
         for o in sorted((ix['ip'].get(ip, set()) & banned) - {k})[:2]:
-            add('ban-ip:' + o, 50, f'тот же IP {ip}, что у отключённого {ix["users"][o]["name"]}', ip=ip,
+            add('ban-ip:' + o, 20, f'тот же IP {ip}, что у отключённого {ix["users"][o]["name"]}', ip=ip,
                 dev=next((d for d in devs if d['ip'] == ip), None))
-    # подключения на нодах: ключи, вставленные мимо подписки, и серверы-посредники
-    ips = live_ips(ix, k, now)
-    n_dev = max(len(devs), 1)
-    if len(ips) >= n_dev + 3:
-        bad = len(ips) >= n_dev * 2 + 2
-        add('ips', 60 if bad else 30, f'сейчас {len(ips)} IP подключений, а устройств {len(devs)}'
-            + (' — похоже, ключи вставлены в чужие клиенты мимо подписки' if bad else ''))
-    if u.get('limit') and len(ips) > int(u['limit']) + 2:
-        add('over', 20, f'IP подключений больше лимита устройств ({u["limit"]})')
+    # подключения на нодах. Число IP — не признак (вышки, CGNAT, Wi-Fi). Признак — из скольких СЕТЕЙ подключён
+    # одновременно: одно устройство не бывает в двух сетях сразу (в трёх — тем более), и повторяется ли это
+    lim = int(u.get('limit') or 0) or max(len(devs), 3)
+    ips = concurrent(ix, k)
+    nets = len({net_of(ipinfo, c['ip']) for c in ips})
+    past = [e for e in ((ex.get('conc') or {}).get(k) or []) if now - 86400 <= e[0] <= now]
+    if nets > lim:
+        times = max(sum(1 for e in past if e[1] > lim), 1)
+        if times >= CONC_CHECKS:
+            add('nets-limit!', 80, f'одновременно подключён из {nets} разных сетей при лимите {lim} устройств — так уже в '
+                                   f'{times} проверках за сутки: подпиской пользуются сверх лимита')
+        else:
+            add('nets-limit', 30, f'одновременно подключён из {nets} разных сетей при лимите {lim} устройств '
+                                  f'(пока в {times} из {CONC_CHECKS} проверок — наблюдаю)')
+    elif devs and nets > len(devs) + 1 and sum(1 for e in past if e[1] > len(devs) + 1) >= CONC_CHECKS:
+        add('nets-dev', 20, f'одновременно подключён из {nets} сетей при {len(devs)} устройствах: ключи добавлены мимо '
+                            f'подписки, но в пределах лимита {lim}')
+    if len(ips) > 3 * max(lim, len(devs)) + 2:  # даже в одной сети столько адресов сразу одно-два устройства не дадут
+        add('ips-many', 40, f'одновременно {len(ips)} IP подключений при лимите {lim} устройств')
     for c in sorted((c for c in ips if hosting(holder(ipinfo, c['ip']))), key=lambda c: c['ip'])[:3]:
-        add('conn-host:' + c['ip'], 70, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) — сервер-посредник'
-            + (f', ноды: {", ".join(c["nodes"])}' if c['nodes'] else ''), ip=c['ip'])
+        times = max(sum(1 for e in past if c['ip'] in (e[3] if len(e) > 3 else [])), 1)
+        tail = f', ноды: {", ".join(c["nodes"])}' if c['nodes'] else ''
+        if times >= CONC_CHECKS:
+            add('conn-host!:' + c['ip'], 70, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) держится: '
+                                             f'{times} проверок за сутки — сервер-посредник' + tail, ip=c['ip'])
+        else:
+            add('conn-host:' + c['ip'], 15, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) — '
+                                            f'разово так бывает при втором VPN; наблюдаю' + tail, ip=c['ip'])
     # запросы подписки: запрещённый клиент или сервер
     for r in (ix['subs'].get(k) or [])[:50]:
         if now - r['at'] > 3 * 86400:
@@ -557,7 +609,6 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
         elif r['type'] in BLOCKED:
             add('sub-block:' + r['ua'][:30], 40, f'подписку пытались забрать запрещённым клиентом: {r["ua"] or "без User-Agent"}'
                 + (f' (правило «{r["rule"]}»)' if r['rule'] else ''))
-    lim = int(u.get('limit') or 0) or max(len(devs), 3)
     week = [h for h, (_f, last) in ((ex.get('hw') or {}).get(k) or {}).items() if last >= now - 7 * 86400]
     if len(week) >= lim * 2 and len(week) >= lim + 4:
         add('churn', 50, f'за 7 дней {len(week)} разных устройств при лимите {lim}: старые удаляют, новые добавляют — '
@@ -565,10 +616,10 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     elif len(week) >= lim + 3:
         add('churn', 25, f'за 7 дней {len(week)} разных устройств при лимите {lim}')
     subips = [ip for ip, t in ((ex.get('subip') or {}).get(k) or {}).items() if t >= now - 86400]
-    nd = max(len(devs), 1)
-    if len(subips) >= nd * 3 + 3:
-        add('subips', 40, f'за сутки ссылку подписки забирали с {len(subips)} разных IP при {len(devs)} устройствах — '
-                          f'похоже, ссылкой делятся')
+    subnets = len({net_of(ipinfo, ip) for ip in subips})  # не IP, а сети: у телефона IP меняется сам
+    if subnets > 3 * max(lim, len(devs)) + 2:
+        add('subnets', 25, f'за сутки ссылку подписки забирали из {subnets} разных сетей при лимите {lim} устройств — '
+                           f'похоже, ссылкой делятся')
     hours = active_hours((ex.get('hourly') or {}).get(k), now)
     if hours is not None and hours['active'] >= 22 and hours['total'] >= 5 * 2**30:
         add('flat', 30, f'трафик идёт почти круглые сутки: {hours["active"]} часов из 24, {gb(hours["total"])} — '
@@ -591,7 +642,8 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     level = 'crit' if crit or score >= CRIT else 'warn' if score >= WARN else ''
     return {'key': k, 'name': u['name'], 'tg': u['tg'], 'handle': u.get('handle', ''), 'status': u['status'], 'score': score,
             'crit': crit, 'level': level, 'dev_list': [dev_brief(d, ipinfo) for d in devs][:12],
-            'reasons': reasons, 'devices': len(devs), 'ips': len(ips), 'limit': u['limit'], 'yesterday': y, 'usual': base,
+            'reasons': reasons, 'devices': len(devs), 'ips': len(ips), 'nets': nets, 'sub_nets': subnets,
+            'nets_checks': sum(1 for e in past if e[1] > lim), 'limit': u['limit'], 'yesterday': y, 'usual': base,
             'week_devices': len(week), 'sub_ips': len(subips), 'active_hours': hours['active'] if hours else None,
             'torrents': len(tor)}
 
@@ -657,7 +709,7 @@ def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
     who = f'<code>{e(f["name"])}</code>' + (f' · <code>{e(f["handle"])}</code>' if f.get('handle') else '')
     lines = [f'{LEVELS[f["level"]]} <b>Подозрительная подписка</b> · {e(prof["name"])}', who,
              f'Устройств: {f["devices"]}' + (f' из {f["limit"]}' if f.get('limit') else '')
-             + (f' · IP подключений сейчас: {f["ips"]}' if f.get('ips') else ''), '']
+             + (f' · сейчас подключён из {f["nets"]} сет{"и" if f["nets"] == 1 else "ей"} ({f["ips"]} IP)' if f.get('ips') else ''), '']
     shown = set()
     for r in f['reasons'][:8]:
         lines.append(('🔴 ' if r.get('crit') else '• ') + copyable(r['text']))
@@ -779,6 +831,11 @@ AI_SYSTEM = """Ты помогаешь владельцу VPN-сервиса (п
 и сетях с собственными устройствами это нормально, не нарушение. Нарушение — выйти за лимит обходными путями
 (ключи мимо подписки, смена устройств, раздача ссылки), перепродажа, посредник, обход бана, сбор пробных периодов.
 
+Число IP само по себе не признак: телефон меняет IP от вышки к вышке, оператор выпускает одно устройство с нескольких
+адресов, дома Wi-Fi. Значимо другое: из скольких разных СЕТЕЙ (операторов) подписчик подключён одновременно — одно
+устройство не бывает в двух сетях сразу — и повторяется ли это от проверки к проверке. Обычное приложение, забравшее
+подписку с IP хостинга, — чаще всего человек с включённым вторым VPN.
+
 Как рассуждать:
 - семья или компания друзей — несколько телефонов и ПК, IP одного-двух домашних провайдеров или мобильного оператора
   одного региона; 1–2 лишних IP у телефона в дороге — норма;
@@ -827,7 +884,8 @@ def ai_input(card: dict, now: float) -> str:
     net = lambda x: {k: x[k] for k in ('holder', 'hosting', 'own') if k in x} if x else None  # noqa: E731
     out = {
         'score': card['score'], 'level': card['level'] or 'clean', 'status': card['status'],
-        'device_limit': card['limit'], 'devices': card['devices'], 'live_ips': card['ips'],
+        'device_limit': card['limit'], 'devices': card['devices'], 'ips_right_now': card['ips'], 'networks_right_now': card.get('nets'),
+        'checks_last_24h_with_more_networks_than_limit': card.get('nets_checks'),
         'reasons': [{'text': _scrub(r['text'], hide), 'points': r['w'], 'critical': r['crit']} for r in card['reasons']],
         'device_list': [{'platform': d['platform'], 'os': d['os'], 'model': 'уникальное имя ПК' if pc_name(d) else d['model'],
                          'server_like': d['server'], 'client': _scrub(d['ua'], hide), 'added_days_ago': days(d['created']), 'ip': _mask(d['ip']) if d['ip'] else None,
@@ -992,22 +1050,25 @@ class Guard:
     def ban_key(self, prof: dict) -> str:
         return 'guard:ban:' + tenant(prof, getattr(self.notify, 'admins', ()) or ())
 
-    def memory(self, prof: dict, ix: dict, data: dict, now: float) -> dict:
+    def memory(self, prof: dict, ix: dict, data: dict, now: float, info: dict | None = None) -> dict:
         """Обновить память между проверками (устройства, IP подписки, почасовой трафик, чёрный список) и отдать её разбору."""
         pid = prof['id']
         hw = remember_devices(self.get(f'guard:hw:{pid}', {}), ix, now)
         subip = remember_subips(self.get(f'guard:subip:{pid}', {}), ix, now)
         hourly = remember_hourly(self.get(f'guard:hourly:{pid}', {}), data['users'], now)
         ban = remember_bans(self.get(self.ban_key(prof), {}), ix, pid, now)
-        for key, val in ((f'guard:hw:{pid}', hw), (f'guard:subip:{pid}', subip), (f'guard:hourly:{pid}', hourly), (self.ban_key(prof), ban)):
+        conc = remember_conc(self.get(f'guard:conc:{pid}', {}), ix, info or {}, now)
+        for key, val in ((f'guard:hw:{pid}', hw), (f'guard:subip:{pid}', subip), (f'guard:hourly:{pid}', hourly), (self.ban_key(prof), ban),
+                         (f'guard:conc:{pid}', conc)):
             self.put(key, val)
-        return {'hw': hw, 'subip': subip, 'hourly': hourly, 'ban': others(ban, pid)}
+        return {'hw': hw, 'subip': subip, 'hourly': hourly, 'ban': others(ban, pid), 'conc': conc}
 
     def recall(self, prof: dict) -> dict:
         """Память для карточки — только чтение."""
         pid = prof['id']
         return {'hw': self.get(f'guard:hw:{pid}', {}), 'subip': self.get(f'guard:subip:{pid}', {}),
-                'hourly': self.get(f'guard:hourly:{pid}', {}), 'ban': others(self.get(self.ban_key(prof), {}), pid)}
+                'hourly': self.get(f'guard:hourly:{pid}', {}), 'ban': others(self.get(self.ban_key(prof), {}), pid),
+                'conc': self.get(f'guard:conc:{pid}', {})}
 
     def crunch(self, prof: dict, data: dict, now: float) -> tuple[list[dict], dict, set]:
         """Тяжёлая часть проверки (в потоке, чтобы не задерживать бота): трафик, сети IP, разбор, срез для карточек."""
@@ -1018,9 +1079,10 @@ class Guard:
         conn_ips = {c['ip'] for k in ix['conn'] for c in live_ips(ix, k, now)}
         dev_ips = {d['ip'] for d in data['devices'] if d['ip'] and d['ip'] not in data['own']}
         self.stage(pid, 'Узнаю, чьи сети у IP')
-        info = self.lookup(sorted(conn_ips | dev_ips))
+        sub_ips = {r['ip'] for rs in ix['subs'].values() for r in rs if r['ip'] and r['ip'] not in data['own'] and r['at'] >= now - 86400}
+        info = self.lookup(sorted(conn_ips | dev_ips) + sorted(sub_ips - conn_ips - dev_ips))  # сначала важные: запас запросов не бесконечен
         self.stage(pid, 'Разбираю признаки')
-        ex = self.memory(prof, ix, data, now)
+        ex = self.memory(prof, ix, data, now, info)
         found = analyze(data, conf, hist, info, now, ix, ex)
         self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
         return found, ix, conn_ips
@@ -1102,9 +1164,10 @@ class Guard:
         hist = self.get(f'guard:traf:{pid}', {})
         ex = self.recall(prof)
         at = snap.get('at') or now
-        f = judge(ix, key, conf, hist, info, at, ex)
         subips = sorted(((ip, t) for ip, t in (ex['subip'].get(key) or {}).items() if t >= at - 86400), key=lambda x: -x[1])
         info.update(self.cached([ip for ip, _ in subips if ip not in info]))
+        f = judge(ix, key, conf, hist, info, at, ex)
+        now_ips = {c['ip'] for c in concurrent(ix, key)}
         cur = {d['hwid'] for d in ix['dev'].get(key, [])}
         hours = active_hours(ex['hourly'].get(key), at)
         net = lambda ip: {'holder': holder(info, ip), 'hosting': hosting(holder(info, ip)), 'own': ip in ix['own'],  # noqa: E731
@@ -1123,13 +1186,15 @@ class Guard:
         days = sorted(h)
         traffic_days = [{'day': days[i], 'bytes': h[days[i + 1]] - h[days[i]]} for i in range(len(days) - 1) if h[days[i + 1]] >= h[days[i]]]
         u = ix['users'][key]
-        return {**{k: f[k] for k in ('key', 'name', 'tg', 'handle', 'status', 'score', 'level', 'devices', 'ips', 'limit', 'yesterday', 'usual')},
+        return {**{k: f[k] for k in ('key', 'name', 'tg', 'handle', 'status', 'score', 'level', 'devices', 'ips', 'nets', 'sub_nets', 'nets_checks',
+                                      'limit', 'yesterday', 'usual')},
+                'conc_history': [{'at': e[0], 'nets': e[1], 'ips': e[2]} for e in (ex['conc'].get(key) or []) if e[0] >= at - 86400],
                 'reasons': [{'text': r['text'], 'w': r['w'], 'crit': r['crit']} for r in f['reasons']],
                 'used': u['used'], 'at': snap.get('at'), 'ok': key in set(self.get(f'guard:ok:{pid}', [])),
                 'device_list': [{**{k: d[k] for k in ('hwid', 'platform', 'os', 'model', 'ua', 'ip', 'created')},
                                  'server': bool(SERVER_UA.search(' '.join((d['ua'], d['hwid']))) and not CLIENT_UA.search(d['ua'])),
                                  **({'net': net(d['ip'])} if d['ip'] else {})} for d in ix['dev'].get(key, [])],
-                'conn_list': sorted(({**c, 'live': not c['last'] or (snap.get('at') or now) - c['last'] < CONN_ACTIVE, 'net': net(c['ip'])}
+                'conn_list': sorted(({**c, 'live': c['ip'] in now_ips, 'net': net(c['ip'])}
                                      for c in (ix['conn'].get(key) or {}).values()), key=lambda c: -(c['last'] or 0)),
                 'subs': [{**r, 'blocked': r['type'] in BLOCKED, **({'net': net(r['ip'])} if r['ip'] else {})}
                          for r in (ix['subs'].get(key) or [])[:SUBS_KEEP]],
