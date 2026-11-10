@@ -171,8 +171,9 @@ function parentOf(r) {
   if (r.name === 'group') return 'groups';
   if (r.name === 'script') return 'settings/scripts';
   if (r.name === 'report') return 'settings/reports';
+  if (r.name === 'guard' && r.arg) return r.arg.includes('/') ? 'guard/' + r.arg.split('/')[0] : 'guard';  // карточка → группа → раздел
   if (r.name === 'settings' && r.arg) return phone ? 'settings' : null;
-  if (phone && ['groups', 'settings'].includes(r.name)) return 'more';  // на телефоне группы и настройки открываются из «Ещё»
+  if (phone && ['groups', 'settings', 'guard', 'stats'].includes(r.name)) return 'more';  // на телефоне группы и настройки открываются из «Ещё»
   return null;
 }
 function renderOverlay(r) {
