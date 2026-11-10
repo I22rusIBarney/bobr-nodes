@@ -110,6 +110,7 @@ ADMIN_ONLY = [
     (r'.*', r'/api/backup(/.*)?'),
     (r'.*', r'/api/audit'),
     (r'POST', r'/api/stats/ask'),  # нейросеть — на ключе администратора
+    (r'POST', r'/api/profiles/\d+/guard/users/[^/]+/ai'),
 ]
 
 
@@ -3274,25 +3275,30 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             raise ApiError('Страж подписок выключен', 404)
         return g
 
-    def guard_view(p: dict) -> dict:
+    def guard_view(p: dict, request=None) -> dict:
         from . import guard as gd
         last = guard_of().get(f'guard:last:{p["id"]}', {})
-        return {**gd.cfg(p), 'actions': gd.ACTIONS, 'last': last}
+        admin = request is not None and is_admin(request)
+        return {**gd.cfg(p), 'actions': gd.ACTIONS, 'last': last, 'admin': admin,
+                'ai_ready': admin and bool(store.get('gemini_key'))}
 
     @r.get('/api/profiles/{pid}/guard')
     async def guard_get(request):
-        return J(guard_view(profile_or_404(request.match_info['pid'], request)))
+        return J(guard_view(profile_or_404(request.match_info['pid'], request), request))
 
     @r.post('/api/profiles/{pid}/guard')
     async def guard_save(request):
         from . import guard as gd
         p = profile_or_404(request.match_info['pid'], request)
+        b = await body(request)
+        if not is_admin(request):
+            b.pop('ai', None)  # нейросеть — на ключе администратора
         try:
-            g = gd.clean(await body(request), p)
+            g = gd.clean(b, p)
         except ValueError as e:
             raise ApiError(str(e)) from None
         store.save_profile({**p, 'guard': g})
-        return J(guard_view(store.profile(p['id'])))
+        return J(guard_view(store.profile(p['id']), request))
 
     @r.post('/api/profiles/{pid}/guard/check')
     async def guard_check(request):
@@ -3302,7 +3308,7 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
             await g.check(p, time.time())
         except Exception as e:  # noqa: BLE001 — панель не ответила
             raise ApiError(f'Проверка не прошла: {str(e)[:300]}', 502) from None
-        return J(guard_view(p))
+        return J(guard_view(p, request))
 
     @r.get('/api/guard')
     async def guard_all(request):
@@ -3337,8 +3343,13 @@ def build_web(store: Store, runner: Runner, bot_token: str, admins: set[int], pu
     async def guard_act(request):
         p = profile_or_404(request.match_info['pid'], request)
         what, key = request.match_info['what'], request.match_info['key']
-        if what not in ('revoke', 'disable', 'ok') or not re.fullmatch(r'[\w-]{1,64}', key):
+        if what not in ('revoke', 'disable', 'ok', 'ai') or not re.fullmatch(r'[\w-]{1,64}', key):
             raise ApiError('Неизвестное действие')
+        if what == 'ai':  # разбор нейросетью (только администратор — см. ADMIN_ONLY)
+            try:
+                return J(await guard_of().ai(p, key, force=bool((await body(request)).get('force'))))
+            except ValueError as e:
+                raise ApiError(str(e)) from None
         msg = await guard_of().act(p, key, what)
         if msg.startswith('❌'):
             raise ApiError(msg[2:], 502)

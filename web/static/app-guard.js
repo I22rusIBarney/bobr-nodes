@@ -109,6 +109,25 @@ function guardGroupView(pid) {
       : last.at ? empty('shield', lvl === 'all' ? 'Подозрительных нет' : 'Таких нет', 'Бот напишет, если кто-то начнёт раздавать или перепродавать подписку.') : null];
 }
 
+const VERDICT = { honest: ['честный клиент', 'ok'], family: ['семья или друзья', 'ok'], sharing: ['раздаёт подписку', 'warn'], reselling: ['перепродаёт подписку', 'bad'],
+  relay: ['сервер-посредник', 'bad'], evasion: ['обход бана', 'bad'], unclear: ['неясно', ''] };
+const AI_ACT = { none: 'ничего не делать', watch: 'понаблюдать', message: 'написать клиенту', revoke: 'перевыпустить подписку', disable: 'отключить' };
+function aiBlock(pid, key, d) {
+  const ask = (e, force) => busyBtn(e, async () => {
+    try { d.ai = await api(`profiles/${pid}/guard/users/${encodeURIComponent(key)}/ai`, 'POST', { force: !!force }); } catch (x) { toast('Нейросеть не ответила', x.message, 'bad'); }
+    render(); });
+  const a = d.ai;
+  if (!a) return h('div', { class: 'sheet', style: 'padding:14px 16px' },
+    h('p', { style: 'margin:0 0 10px' }, 'Gemini посмотрит на всё, что есть в карточке, и скажет, похоже ли это на семью, раздачу, перепродажу или посредника. Имя, TG ID, HWID и полные IP ему не отправляются.'),
+    btn('Разобрать', e => ask(e), 'primary', 'chart'));
+  const V = VERDICT[a.verdict] || VERDICT.unclear, list = (t, xs) => xs && xs.length ? [h('div', { class: 's', style: 'margin-top:10px' }, h('b', null, t)), xs.map(x => h('div', { class: 's' }, '• ' + x))] : null;
+  return h('div', { class: 'sheet', style: 'padding:14px 16px' },
+    h('div', { class: 'chips', style: 'align-items:center' }, h('span', { class: 'st ' + V[1] }, V[0]), h('span', { class: 'faint' }, `уверенность ${a.confidence}% · совет: ${AI_ACT[a.action] || a.action}`)),
+    a.summary ? h('p', { style: 'margin:10px 0 0' }, a.summary) : null,
+    list('На чём основан вывод', a.evidence), list('В пользу клиента', a.doubts), list('Проверьте руками', a.check),
+    h('div', { style: 'margin-top:12px' }, btn('Разобрать заново', e => ask(e, true), 's', 'refresh')),
+    h('div', { class: 'hint', style: 'margin-top:6px' }, 'Нейросеть может ошибаться: решение — за вами.'));
+}
 function guardCard(pid, key) {
   const back = h('button', { type: 'button', class: 'back', onclick: () => go('guard/' + pid) }, ic('chevL'), (groups().find(p => p.id === pid) || {}).name || 'Группа');
   const ck = pid + '/' + key, st = GU.card[ck];
@@ -135,6 +154,7 @@ function guardCard(pid, key) {
     sec('Почему подозрительно', d.reasons.length ? `${d.reasons.length}` : '',
       d.reasons.length ? h('div', { class: 'list' }, d.reasons.map(r => row(r.text, null, h('span', { class: 'st ' + (r.crit ? 'bad' : r.w >= 50 ? 'warn' : '') }, r.crit ? 'критично' : `+${r.w}`))))
         : h('div', { class: 'sheet', style: 'padding:14px 16px' }, 'Признаков нет: устройства обычные, IP подключений не больше устройств, трафик в норме.')),
+    isAdmin() ? sec('Разбор нейросетью', d.ai ? `${ago(d.ai.at * 1000)}` : '', aiBlock(pid, key, d)) : null,
     sec('Устройства', `${d.device_list.length}`,
       d.device_list.length ? h('div', { class: 'list' }, d.device_list.map(x => row(
         [x.platform, x.os, x.model].filter(Boolean).join(' · ') || 'платформа неизвестна',
