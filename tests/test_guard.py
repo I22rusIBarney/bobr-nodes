@@ -309,3 +309,43 @@ def test_ai_errors_and_daily_cap(tmp_path, monkeypatch):
 def test_scrub_hides_names_and_ips():
     t = gd._scrub('то же устройство, что у vasya_99 · IP 31.173.5.6 · h-123456789', ['vasya_99', 'h-123456789', 'ab'])
     assert t == 'то же устройство, что у «скрыто» · IP 31.173.x.x · «скрыто»'
+
+
+# ───────── «Проверить сейчас» в фоне и сводка вместо пачки сообщений ─────────
+def test_start_runs_in_background_and_reports_errors(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    prof = store.profile(pid)
+    g = gd.Guard(store, FakeNotify(), ipinfo=lambda ip: {})
+    gate = asyncio.Event()
+
+    async def slow_check(p, now, data=None):
+        g.stage(pid, 'Спрашиваю ноды')
+        await gate.wait()
+        raise RuntimeError('панель упала')
+    monkeypatch.setattr(g, 'check', slow_check)
+
+    async def scenario():
+        st = g.start(prof)
+        assert st['stage'] == 'Начинаю'
+        await asyncio.sleep(0)
+        assert g.running[pid]['stage'] == 'Спрашиваю ноды'
+        assert g.start(prof)['stage'] == 'Спрашиваю ноды'   # вторая не запускается
+        assert len(g._tasks) == 1
+        gate.set()
+        await asyncio.gather(*list(g._tasks))
+        assert pid not in g.running
+        assert g.get(f'guard:last:{pid}', {})['error'] == 'панель упала'
+    asyncio.run(scenario())
+
+
+def test_many_suspects_become_one_digest(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'on': True}})
+    n = FakeNotify()
+    g = gd.Guard(store, n, ipinfo=lambda ip: {})
+    users = [user(f'u{i}', f'name{i}') for i in range(12)]
+    devs = [device(f'3x-ui-server-{i:04d}', f'u{i}', ua='3x-ui-outbound-sub/1.0', platform='', model='') for i in range(12)]
+    asyncio.run(g.check(store.profile(pid), NOW, data(users, devs)))
+    assert len(n.sent) == gd.ALERTS_EACH + 1
+    assert 'ещё 7 подозрительных' in n.sent[-1][1] and 'критично: 7' in n.sent[-1][1]

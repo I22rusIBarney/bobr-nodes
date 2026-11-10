@@ -261,6 +261,7 @@ class Autopilot:
         self.notify = Notifier(store, bot, access)
         from .guard import Guard
         self.guard = Guard(store, self.notify)  # страж подписок: раздача и перепродажа (сам решает, кого пора проверить)
+        self.guard.panel_button = self.button
         self.feedback = None  # опросы после установки (задаётся в main)
         self.data_dir = None  # папка данных: версия бота (задаётся в main)
         self.billing = None   # подписка пользователей (задаётся в main)

@@ -59,7 +59,8 @@ function groupGuard(g) {
   if (st.err) return empty('alert', 'Не загрузилось', st.err, btn('Повторить', () => { delete GD[key]; render(); }, 'primary'));
   const a = st.a, last = a.last || {};
   const save = async patch => { try { st.a = await api(`profiles/${g.id}/guard`, 'POST', { ...patch, tz: tzNow() }); toast('Сохранено'); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); };
-  const check = e => busyBtn(e, async () => { try { st.a = await api(`profiles/${g.id}/guard/check`, 'POST', {}); toast('Проверено', `${(st.a.last.found || []).length} подозрительных`); } catch (x) { toast('Не получилось', x.message, 'bad'); } render(); });
+  const check = () => guardStart(g.id, r => { st.a = r; });
+  if (a.running) guardWatch(g.id, r => { st.a = r; });
   const act = (f, what) => {
     const T = { revoke: ['Перевыпустить подписку?', 'Старая ссылка и ключи перестанут работать — пользователю нужно будет заново добавить подписку из бота продаж.', 'Перевыпустить', 'primary'],
       disable: ['Отключить пользователя?', 'Пользователь будет отключён в панели Remnawave. Включить обратно можно в самой панели.', 'Отключить', 'danger solid'],
@@ -84,8 +85,8 @@ function groupGuard(g) {
             : 'Нужен ключ Gemini — задайте его в «Подключениях»', a.ai, v => save({ ai: v }))) : null) : h('div', { style: 'margin-bottom:22px' })),
     a.on || found.length ? section('Последняя проверка',
       h('div', { class: 'chips', style: 'margin-bottom:10px' },
-        h('span', { class: 'faint' }, last.at ? `${ago(last.at * 1000)} · пользователей ${last.users ?? '—'}, устройств ${last.devices ?? '—'}` : 'ещё не было'),
-        btn('Проверить сейчас', check, 's', 'radar'), btn('Открыть раздел «Страж»', () => go('guard/' + g.id), 's', 'shield')),
+        a.running ? guardRunning(a.running) : h('span', { class: 'faint' }, last.at ? `${ago(last.at * 1000)} · пользователей ${last.users ?? '—'}, устройств ${last.devices ?? '—'}` : 'ещё не было'),
+        a.running ? null : btn('Проверить сейчас', check, 's', 'radar'), btn('Открыть раздел «Страж»', () => go('guard/' + g.id), 's', 'shield')),
       last.error ? h('div', { class: 'err', role: 'alert', style: 'margin-bottom:10px' }, 'Панель не ответила: ' + last.error) : null,
       last.dev_err ? h('div', { class: 'hint', style: 'margin-bottom:10px' }, 'Список устройств панель не отдала — проверяю только трафик. ' + last.dev_err) : null,
       found.length ? h('div', { class: 'list' }, found.map(f => h('div', { class: 'li', style: 'align-items:flex-start' },

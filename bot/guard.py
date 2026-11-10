@@ -36,6 +36,8 @@ TOKEN_TTL = 14 * 86400    # сколько живут кнопки в сообщ
 REMIND = 7 * 86400        # тот же набор признаков — не чаще раза в неделю
 HISTORY_DAYS = 9          # сколько дней храним отметки трафика
 IP_LOOKUPS = 150          # новых IP на разбор сети за один проход (RIPEstat не любит частых запросов)
+IP_BUDGET = 60            # секунд на разбор новых IP за проход: не успели — узнаем в следующий
+ALERTS_EACH = 5           # столько самых серьёзных — отдельными сообщениями, остальных — одной сводкой
 PAGE = 500
 MAX_USERS = 50_000
 CONN_ACTIVE = 3600        # IP подключения считается живым, если был виден не раньше часа назад
@@ -210,9 +212,10 @@ def node_connections(panel, node: dict, api: list | None = None, sleep=time.slee
     raise err or ValueError('панель не отдаёт IP подключений')
 
 
-def collect(panel, extra_own: set | None = None, conns: bool = True) -> dict:
+def collect(panel, extra_own: set | None = None, conns: bool = True, stage=lambda s: None) -> dict:
     """Пользователи, устройства, IP подключений, история запросов подписки и адреса своих нод из панели (в потоке)."""
     from concurrent.futures import ThreadPoolExecutor
+    stage('Скачиваю подписчиков и устройства из панели')
     users = [x for x in (norm_user(u) for u in pages(panel.call, '/api/users', 'users')) if x]
     devices, dev_err = [], ''
     try:
@@ -237,6 +240,7 @@ def collect(panel, extra_own: set | None = None, conns: bool = True) -> dict:
     except Exception:  # noqa: BLE001 — без адресов нод просто не отличим «обновил через наш VPN»
         pass
     conn, conn_err = [], ''
+    stage('Спрашиваю ноды, кто с каких IP подключён')
     live = [n for n in nodes if n.get('uuid') and n.get('isConnected') and not n.get('isDisabled')]
     if conns and live:
         errs = []
@@ -567,6 +571,9 @@ class Guard:
         self._gemini = gemini  # для тестов: свой Gemini
         self._at: dict[int, float] = {}
         self._lock = asyncio.Lock()
+        self.running: dict[int, dict] = {}   # идущие проверки: {pid: {started, stage}}
+        self._tasks: set = set()
+        self.panel_button = None             # кнопка «Панель управления» (задаёт автопилот)
 
     def get(self, key: str, default):
         try:
@@ -583,19 +590,32 @@ class Guard:
         from . import engine
         return engine.Panel(prof['panel_url'], prof['panel_token'], prof.get('panel_cookie', ''), prof.get('panel_headers'))
 
-    def lookup(self, ips: list[str]) -> dict:
-        """Сеть IP (держатель ASN): из кэша, новые — понемногу за проход."""
-        out, asked = {}, 0
+    def lookup(self, ips: list[str], budget: float = IP_BUDGET) -> dict:
+        """Сеть IP (держатель ASN): из кэша, новые — параллельно, не больше IP_LOOKUPS и budget секунд за проход
+        (что не успели — останется в кэше к следующей проверке)."""
         if self._ipinfo is not None:
             return {ip: self._ipinfo(ip) or {} for ip in ips}
+        from concurrent.futures import ThreadPoolExecutor, wait
         from . import banlab
+        out, new = {}, []
         for ip in ips:
             hit = banlab.cached_info(self.store, ip, fetch=False)
-            if not hit and asked < IP_LOOKUPS:
-                asked += 1
-                hit = banlab.cached_info(self.store, ip)
             if hit:
                 out[ip] = hit
+            elif len(new) < IP_LOOKUPS:
+                new.append(ip)
+        if new:
+            ex = ThreadPoolExecutor(max_workers=8, thread_name_prefix='guard-ip')
+            futs = {ex.submit(banlab.cached_info, self.store, ip): ip for ip in new}
+            done, _ = wait(futs, timeout=budget)
+            ex.shutdown(wait=False, cancel_futures=True)
+            for f in done:
+                try:
+                    hit = f.result()
+                except Exception:  # noqa: BLE001
+                    hit = None
+                if hit:
+                    out[futs[f]] = hit
         return out
 
     async def tick(self, profiles: list[dict], now: float | None = None) -> None:
@@ -604,15 +624,37 @@ class Guard:
             return
         async with self._lock:
             for prof in profiles:
-                if not cfg(prof)['on'] or now - self._at.get(prof['id'], 0) < EVERY - 60:
+                if not cfg(prof)['on'] or now - self._at.get(prof['id'], 0) < EVERY - 60 or prof['id'] in self.running:
                     continue
                 self._at[prof['id']] = now
-                try:
-                    await self.check(prof, now)
-                except Exception as e:  # noqa: BLE001 — одна группа не должна мешать остальным
-                    log.info('guard %s: %s', prof.get('id'), e)
-                    last = self.get(f'guard:last:{prof["id"]}', {})
-                    self.put(f'guard:last:{prof["id"]}', {**last, 'at': now, 'error': str(e)[:300]})
+                await self.run(prof, now)
+
+    async def run(self, prof: dict, now: float | None = None) -> None:
+        """Проверка группы с отметкой «идёт» (её видно в разделе) и записью ошибки в итог."""
+        pid, now = prof['id'], now if now is not None else time.time()
+        self.running[pid] = {'started': now, 'stage': 'Начинаю'}
+        try:
+            await self.check(prof, now)
+        except Exception as e:  # noqa: BLE001 — одна группа не должна мешать остальным
+            log.info('guard %s: %s', pid, e)
+            last = self.get(f'guard:last:{pid}', {})
+            self.put(f'guard:last:{pid}', {**last, 'at': now, 'error': str(e)[:300]})
+        finally:
+            self.running.pop(pid, None)
+
+    def start(self, prof: dict) -> dict:
+        """«Проверить сейчас»: в фоне, сразу возвращает состояние; уже идёт — вторую не запускаем."""
+        pid = prof['id']
+        if pid not in self.running:
+            self.running[pid] = {'started': time.time(), 'stage': 'Начинаю'}
+            t = asyncio.create_task(self.run(prof))
+            self._tasks.add(t)
+            t.add_done_callback(self._tasks.discard)
+        return dict(self.running.get(pid) or {})
+
+    def stage(self, pid: int, text_: str) -> None:
+        if pid in self.running:
+            self.running[pid]['stage'] = text_
 
     def own_ips(self, prof: dict) -> set[str]:
         """Свои серверы группы, через которые идут пользователи: входы мостов и проброса (их IP — не «хостинг клиента»)."""
@@ -621,28 +663,45 @@ class Guard:
         except Exception:  # noqa: BLE001
             return set()
 
-    async def check(self, prof: dict, now: float, data: dict | None = None) -> list[dict]:
+    def crunch(self, prof: dict, data: dict, now: float) -> tuple[list[dict], dict, set]:
+        """Тяжёлая часть проверки (в потоке, чтобы не задерживать бота): трафик, сети IP, разбор, срез для карточек."""
         conf, pid = cfg(prof), prof['id']
-        if data is None:
-            data = await asyncio.to_thread(collect, self.panel(prof), self.own_ips(prof))
         hist = remember_traffic(self.get(f'guard:traf:{pid}', {}), data['users'], now, conf['tz'])
         self.put(f'guard:traf:{pid}', hist)
         ix = index(data)
         conn_ips = {c['ip'] for k in ix['conn'] for c in live_ips(ix, k, now)}
         dev_ips = {d['ip'] for d in data['devices'] if d['ip'] and d['ip'] not in data['own']}
-        info = await asyncio.to_thread(self.lookup, sorted(conn_ips | dev_ips))
+        self.stage(pid, 'Узнаю, чьи сети у IP')
+        info = self.lookup(sorted(conn_ips | dev_ips))
+        self.stage(pid, 'Разбираю признаки')
         found = analyze(data, conf, hist, info, now, ix)
+        self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
+        return found, ix, conn_ips
+
+    async def check(self, prof: dict, now: float, data: dict | None = None) -> list[dict]:
+        conf, pid = cfg(prof), prof['id']
+        if data is None:
+            data = await asyncio.to_thread(collect, self.panel(prof), self.own_ips(prof), True, lambda t: self.stage(pid, t))
+        found, ix, conn_ips = await asyncio.to_thread(self.crunch, prof, data, now)
         seen = self.get(f'guard:seen:{pid}', {})
         ok = set(self.get(f'guard:ok:{pid}', []))
         acted = {'revoke': 0, 'disable': 0}
-        self.put(f'guard:snap:{pid}', snapshot(data, now))  # до сообщений: разбор нейросетью берёт карточку из среза
-        for f in fresh(found, seen, ok, now):
+        todo = fresh(found, seen, ok, now)
+        if todo:
+            self.stage(pid, f'Отправляю сообщения: {len(todo)}')
+        rest = []
+        for i, f in enumerate(todo):
             seen[f['key']] = {'sig': signature(f), 'ts': now, 'codes': [r['code'] for r in f['reasons']]}
             done = ''
             if f['crit'] and conf['auto'] != 'off' and f['key'] not in ok:
                 done = await self.act(prof, f['key'], conf['auto'])
                 acted[conf['auto']] += not done.startswith('❌')
-            await self.alert(prof, f, done, await self.ai_auto(prof, f['key'], now) if conf['ai'] else None)
+            if i < ALERTS_EACH or done:
+                await self.alert(prof, f, done, await self.ai_auto(prof, f['key'], now) if conf['ai'] else None)
+            else:
+                rest.append(f)
+        if rest:  # первая проверка большой панели — не заваливать сообщениями
+            await self.digest(prof, rest)
         live = {f['key'] for f in found}
         seen = {k: v for k, v in seen.items() if k in live or now - v.get('ts', 0) < REMIND}
         self.put(f'guard:seen:{pid}', seen)
@@ -656,6 +715,18 @@ class Guard:
                                                  | {'reasons': [r['text'] for r in f['reasons']], 'ok': f['key'] in ok}
                                                  for f in found[:100]]})
         return found
+
+    async def digest(self, prof: dict, rest: list[dict]) -> None:
+        """Одно сообщение вместо пачки: остальные подозрительные списком, подробности — в разделе."""
+        e = html.escape
+        crit = sum(f['level'] == 'crit' for f in rest)
+        lines = [f'🛡 <b>Страж: ещё {len(rest)} подозрительных</b> · {e(prof["name"])}' + (f' (критично: {crit})' if crit else ''), '']
+        lines += [f'{LEVELS[f["level"]]} {e(f["name"])} — {e(f["reasons"][0]["text"][:120])}' for f in rest[:15]]
+        if len(rest) > 15:
+            lines.append(f'… и ещё {len(rest) - 15}')
+        lines += ['', 'Подробности и кнопки — в разделе «Страж» панели управления.']
+        mk = self.panel_button() if callable(self.panel_button) else None
+        await self.notify.emit('security.guard', '\n'.join(lines)[:3900], prof, mk)
 
     def count(self, pid: int, now: float, tz: int, **vals) -> None:
         """Сводка по дням за 30 дней: сколько подозрительных (максимум за день) и сколько действий."""
