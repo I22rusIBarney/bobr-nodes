@@ -511,3 +511,31 @@ def test_notification_is_informative_and_copyable():
     assert '<code>3x-ui-server-92ff0059</code>' in t and '<code>45.38.3.215</code>' in t   # устройство признака и IP
     assert 'DESKTOP-FR15BBH_x86_64' in t and '<code>97351eb0-2c50-4ef8</code>' in t         # остальные устройства
     assert '🔴' in t and '🖥' in t and len(t) < 3900
+
+
+# ───────── «Windows 10 amd64» — не имя компьютера; не уникальные HWID ─────────
+def test_os_strings_are_not_pc_names():
+    for model, plat in (('Windows 10 amd64', 'Windows'), ('Windows 11 amd64', 'Windows'), ('Mac OS X aarch64', 'macOS'),
+                        ('Windows_10_x64', 'Windows'), ('Linux 6.1 x86_64', 'Linux'), ('My Computer', 'Windows')):
+        assert gd.pc_name({'platform': plat, 'model': model}) == '', model
+    assert gd.pc_name({'platform': 'Windows', 'model': 'DESKTOP-FR15BBH_x86_64'}) == 'desktop-fr15bbh'
+    assert gd.pc_name({'platform': 'macOS', 'model': 'Ivans-MacBook-Pro'}) == 'ivans-macbook-pro'
+
+
+def test_hwid_or_pc_name_shared_by_many_is_not_a_link():
+    users = [user(f'u{i}', f'n{i}') for i in range(8)] + [user('b', 'banned', status='DISABLED')]
+    devs = [device('constanthwid', f'u{i}') for i in range(8)] + [device('constanthwid', 'b')]
+    devs += [device(f'pc{i:010d}', f'u{i}', platform='Windows', model='DESKTOP-SAMEIMG') for i in range(7)]
+    ix = gd.index(data(users, devs))
+    assert ix['common_hw'] == {'constanthwid'} and ix['common_pc'] == {'desktop-sameimg'}
+    assert gd.judge(ix, 'u0', CONF, {}, {}, NOW)['reasons'] == []
+    two = data([user('a', 'a'), user('b2', 'b'), user('c', 'c')],
+               [device(f'pc{i:010d}', o, platform='Windows', model='DESKTOP-7F3K2LQ') for i, o in enumerate(('a', 'b2', 'c'))])
+    r = gd.judge(gd.index(two), 'a', CONF, {}, {}, NOW)['reasons']
+    assert [x['w'] for x in r] == [20] and 'b, c' in r[0]['text']   # одной строкой, а не по 20 за каждого
+
+
+def test_sales_names_with_suffix():
+    rx = __import__('re').compile(gd.NAMES_DEF, __import__('re').I)
+    assert rx.search('BOBR_774911976ekaterinamamont') and rx.search('343_1276251629') and not rx.search('statistics')
+    assert gd.copyable('у BOBR_774911976ekaterinamamont') == 'у <code>BOBR_774911976ekaterinamamont</code>'
