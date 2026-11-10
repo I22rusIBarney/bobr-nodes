@@ -594,3 +594,68 @@ def test_sales_names_with_suffix():
     rx = __import__('re').compile(gd.NAMES_DEF, __import__('re').I)
     assert rx.search('BOBR_774911976ekaterinamamont') and rx.search('343_1276251629') and not rx.search('statistics')
     assert gd.copyable('у BOBR_774911976ekaterinamamont') == 'у <code>BOBR_774911976ekaterinamamont</code>'
+
+
+# ───────── итог дня от нейросети ─────────
+def test_night_report_anonymous_sorted_and_cached(tmp_path):
+    import json
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True, 'night': True}})
+    prof = store.profile(pid)
+    gem = FakeGemini({'summary': 'Один перепродавец, остальное — шум.', 'users': [
+        {'id': 'S2', 'verdict': 'family', 'confidence': 70, 'action': 'none', 'why': 'Обычные телефоны.'},
+        {'id': 'S1', 'verdict': 'reselling', 'confidence': 90, 'action': 'revoke', 'why': 'Подписка на сервере 3x-ui.'},
+        {'id': 'S9', 'verdict': 'reselling', 'confidence': 99, 'action': 'disable', 'why': 'чужой id'}]})
+    n = FakeNotify()
+    g = gd.Guard(store, n, ipinfo=lambda ip: {}, gemini=gem)
+    users = [user('u1', 'BOBR_111', description='@reseller_man'), user('u2', 'BOBR_222'), user('u3', 'BOBR_333'), user('u4', 'BOBR_444')]
+    devs = [device('3x-ui-server-0001', 'u1', ua='3x-ui-outbound-sub/1.0', platform='', model=''),
+            device('samehwid0001', 'u2'), device('samehwid0001', 'u3'), device('samehwid0001', 'u4')]
+    asyncio.run(g.check(prof, NOW, data(users, devs)))
+    n.sent.clear()
+    rep = asyncio.run(g.night(prof, NOW + 3600))
+    sent = gem.asked[-1]
+    for secret in ('BOBR_111', 'reseller_man', '3x-ui-server-0001'):
+        assert secret not in sent
+    assert [x['id'] for x in json.loads(sent)][:1] == ['S1']
+    assert [u['name'] for u in rep['users']] == ['BOBR_111', next(u['name'] for u in rep['users'] if u['action'] == 'none')]
+    assert len(rep['users']) == 2  # чужой id S9 отброшен
+    t = n.sent[0][1]
+    assert n.sent[0][0] == 'security.guard_night' and 'Действовать (1)' in t and '<code>BOBR_111</code> · <code>@reseller_man</code>' in t
+    assert 'ложная тревога (1)' in t and 'Один перепродавец' in t
+    assert g.ai_cached(pid, 'u1')['verdict'] == 'reselling' and g.get(f'guard:nights:{pid}', [])[0]['users']
+    assert g.detail(prof, 'u1', NOW)['ai']['night']
+
+
+def test_night_runs_once_after_midnight_and_not_right_after_enabling(tmp_path, monkeypatch):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True, 'night': True, 'tz': 0}})
+    prof = store.profile(pid)
+    g = gd.Guard(store, FakeNotify(), gemini=FakeGemini({'summary': '', 'users': []}))
+    runs = []
+
+    async def fake_night(p, now=None):
+        runs.append(now)
+    monkeypatch.setattr(g, 'night', fake_night)
+    day = (NOW // 86400) * 86400
+    asyncio.run(g.night_due(prof, day + 15 * 3600))     # включили днём — не сразу
+    asyncio.run(g.night_due(prof, day + 23 * 3600))
+    assert runs == []
+    asyncio.run(g.night_due(prof, day + 86400 + 60))    # полночь
+    asyncio.run(g.night_due(prof, day + 86400 + 3600))  # тот же день — повторно не надо
+    assert runs == [day + 86400 + 60]
+    off = {**prof, 'guard': {**prof['guard'], 'night': False}}
+    asyncio.run(g.night_due(off, day + 2 * 86400 + 60))
+    assert len(runs) == 1
+
+
+def test_night_without_suspects_still_reports(tmp_path):
+    store = Store(tmp_path / 'db.sqlite')
+    pid = store.save_profile({'name': 'Main', 'panel_url': 'https://p', 'panel_token': 't', 'guard': {'names': '', 'on': True}})
+    gem = FakeGemini({})
+    n = FakeNotify()
+    g = gd.Guard(store, n, gemini=gem)
+    rep = asyncio.run(g.night(store.profile(pid), NOW))
+    assert rep['users'] == [] and gem.asked == [] and 'подозрительных не было' in n.sent[0][1]
+    with pytest.raises(ValueError, match='Gemini'):
+        asyncio.run(gd.Guard(store, n).night(store.profile(pid), NOW))

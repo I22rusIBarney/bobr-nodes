@@ -84,7 +84,9 @@ function groupGuard(g) {
           'Шаблон имени (регулярное выражение). По умолчанию — подписки бота продаж: BOBR_123… и 160_123…; test, bridge_…, statistics и другие системные не проверяются. Пусто — все.'),
         a.admin ? h('div', { class: 'list', style: 'background:var(--sheet-2)' }, switchRow('Разбор нейросетью в сообщениях',
           a.ai_ready ? 'К каждому сообщению — вывод Gemini: честный клиент, семья, раздача или перепродажа, и что сделать. Нейросеть не видит имени, TG ID, HWID и полных IP. Не больше 30 разборов в сутки на группу'
-            : 'Нужен ключ Gemini — задайте его в «Подключениях»', a.ai, v => save({ ai: v }))) : null) : h('div', { style: 'margin-bottom:22px' })),
+            : 'Нужен ключ Gemini — задайте его в «Подключениях»', a.ai, v => save({ ai: v })),
+          switchRow('Итог дня от нейросети', a.ai_ready ? 'В полночь по времени группы Gemini разбирает всех подозрительных за сутки и присылает одно сообщение: с кем действовать, кого понаблюдать, где ложная тревога. Один запрос к нейросети в сутки'
+            : 'Нужен ключ Gemini — задайте его в «Подключениях»', a.night, v => save({ night: v }))) : null) : h('div', { style: 'margin-bottom:22px' })),
     a.on || found.length ? section('Последняя проверка',
       h('div', { class: 'chips', style: 'margin-bottom:10px' },
         a.running ? guardRunning(a.running) : h('span', { class: 'faint' }, last.at ? `${ago(last.at * 1000)} · подписок ${last.users ?? '—'}` + (last.skipped ? ` (ещё ${last.skipped} не по шаблону)` : '') + `, устройств ${last.devices ?? '—'}` : 'ещё не было'),

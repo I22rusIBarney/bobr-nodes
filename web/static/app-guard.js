@@ -96,6 +96,33 @@ function vGuard(arg) {
     h('span', { class: 'chev' }, ic('chevR')))))];
 }
 
+/* итог дня от нейросети: последний разбор — сверху, раньшие — свёрнуто */
+const ACT_ICON = { disable: '🔴', revoke: '🟠', message: '🟠', watch: '🟡', none: '⚪' };
+function nightBlock(pid, a) {
+  const nights = a.nights || [];
+  if (!a.admin && !nights.length) return null;
+  const run = e => busyBtn(e, async () => {
+    try { const r = await api(`profiles/${pid}/guard/night`, 'POST', {}); GU.grp[pid] = { a: r, at: Date.now() }; toast('Нейросеть разбирает день', 'Итог придёт в Telegram и появится здесь примерно через минуту.'); setTimeout(() => guardGroup(pid, true), 60e3); }
+    catch (x) { toast('Не получилось', x.message, 'bad'); } render(); });
+  const n = nights[0], day = d => d.split('-').slice(1).reverse().join('.');
+  const users = n ? n.users : [];
+  return h('section', { class: 'section', style: 'margin-bottom:18px' },
+    h('div', { class: 'section-h' }, h('h2', null, 'Итог дня от нейросети'), n ? h('span', { class: 'faint' }, `за ${day(n.day)} · ${ago(n.at * 1000)}`) : null),
+    h('div', { class: 'sheet', style: 'padding:14px 16px' },
+      !n ? h('p', { style: 'margin:0 0 10px' }, a.night ? 'Первый итог придёт в ближайшую полночь по времени группы.' : 'Включите «Итог дня от нейросети» в настройках стража группы — или сделайте разбор сейчас.') : null,
+      n && n.summary ? h('p', { style: 'margin:0 0 10px' }, n.summary) : null,
+      n && !users.length ? h('p', { class: 'faint', style: 'margin:0 0 10px' }, 'За сутки подозрительных не было.') : null,
+      users.length ? h('div', { class: 'list', style: 'margin-bottom:10px' }, users.map(u => h('button', { type: 'button', class: 'li', style: 'align-items:flex-start', onclick: () => go(`guard/${pid}/${encodeURIComponent(u.key)}`) },
+        h('span', { 'aria-hidden': 'true' }, ACT_ICON[u.action] || '⚪'),
+        h('div', { class: 'grow', style: 'min-width:0' },
+          h('div', { class: 't' }, u.name + (u.handle ? ` · ${u.handle}` : '')),
+          h('div', { class: 's' }, `${(VERDICT[u.verdict] || VERDICT.unclear)[0]} · ${u.confidence}% · совет: ${AI_ACT[u.action] || u.action}`),
+          h('div', { class: 's' }, u.why)),
+        h('span', { class: 'chev' }, ic('chevR'))))) : null,
+      a.admin ? h('div', { class: 'chips' }, a.night_running ? h('span', { class: 'faint' }, 'Нейросеть разбирает…') : btn(n ? 'Разобрать сейчас ещё раз' : 'Сделать итог сейчас', run, 's', 'chart')) : null,
+      h('div', { class: 'hint', style: 'margin-top:6px' }, 'Нейросеть не видит имён, TG ID, HWID и полных IP и может ошибаться: решение за вами.')));
+}
+
 function guardGroupView(pid) {
   const g = groups().find(p => p.id === pid);
   const back = h('button', { type: 'button', class: 'back', onclick: () => go('guard') }, ic('chevL'), 'Страж');
@@ -122,6 +149,7 @@ function guardGroupView(pid) {
       h('div', { class: 'stats' }, stat(last.users ?? '—', 'подписчиков'), stat(last.devices ?? '—', 'устройств'), stat(last.online ?? '—', 'подключены сейчас'),
         stat(last.ips ?? '—', 'IP подключений'), stat(crit, 'критично', crit ? 'bad' : ''), stat(warn, 'внимание', warn ? 'warn' : '')),
       dailyBars((GU.list && (GU.list.groups || []).find(x => x.pid === pid) || {}).daily)),
+    nightBlock(pid, a),
     h('div', { class: 'chips', style: 'margin-bottom:10px;align-items:center' },
       seg([{ v: 'all', l: 'Все' }, { v: 'crit', l: 'Критично' }, { v: 'warn', l: 'Внимание' }], lvl, v => { GU.lvl[pid] = v; render(); }, 'Уровень'),
       h('input', { class: 'inp', type: 'search', placeholder: 'Найти подписчика: имя или TG ID', value: q, style: 'flex:1;min-width:180px', oninput: e => search(e.target.value) })),
@@ -151,7 +179,7 @@ function aiBlock(pid, key, d) {
     btn('Разобрать', e => ask(e), 'primary', 'chart'));
   const V = VERDICT[a.verdict] || VERDICT.unclear, list = (t, xs) => xs && xs.length ? [h('div', { class: 's', style: 'margin-top:10px' }, h('b', null, t)), xs.map(x => h('div', { class: 's' }, '• ' + x))] : null;
   return h('div', { class: 'sheet', style: 'padding:14px 16px' },
-    h('div', { class: 'chips', style: 'align-items:center' }, h('span', { class: 'st ' + V[1] }, V[0]), h('span', { class: 'faint' }, `уверенность ${a.confidence}% · совет: ${AI_ACT[a.action] || a.action}`)),
+    h('div', { class: 'chips', style: 'align-items:center' }, h('span', { class: 'st ' + V[1] }, V[0]), h('span', { class: 'faint' }, `уверенность ${a.confidence}% · совет: ${AI_ACT[a.action] || a.action}` + (a.night ? ' · из итога дня' : ''))),
     a.summary ? h('p', { style: 'margin:10px 0 0' }, a.summary) : null,
     list('На чём основан вывод', a.evidence), list('В пользу клиента', a.doubts), list('Проверьте руками', a.check),
     h('div', { style: 'margin-top:12px' }, btn('Разобрать заново', e => ask(e, true), 's', 'refresh')),
