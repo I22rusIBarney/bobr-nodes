@@ -86,9 +86,18 @@ def pc_name(d: dict) -> str:
 
 HOSTING = re.compile(r'hetzner|\bovh|digitalocean|amazon|\baws\b|google|microsoft|azure|oracle|linode|akamai|vultr|choopa|'
                      r'contabo|leaseweb|m247|aeza|timeweb|selectel|beget|vdsina|firstbyte|stark|hostinger|hostkey|serverius|'
-                     r'scaleway|ionos|netcup|kamatera|g-?core|cloudflare|datacamp|cdn77|psychz|hivelocity|quadranet|'
+                     r'scaleway|ionos|netcup|kamatera|g-?core|datacamp|cdn77|psychz|hivelocity|quadranet|'
                      r'colocrossing|buyvm|frantech|pq hosting|alibaba|tencent|huawei cloud|hosting|datacent|data cent|'
                      r'\bcloud|\bvps|server|dedicated|colo', re.I)
+
+# сети WARP и iCloud Private Relay: оттуда ходят обычные люди со «скрытием IP» — не хостинг клиента
+RELAY_NET = re.compile(r'cloudflare|akamai|fastly', re.I)
+NAMES_DEF = r'^(bobr_\d+|\d+_\d+)$'   # подписки бота продаж; test, bridge_…, statistics и прочие системные — не проверяем
+
+
+def hosting(h: str) -> bool:
+    return bool(h) and bool(HOSTING.search(h)) and not RELAY_NET.search(h)
+
 
 LEVELS = {'warn': '🟡', 'crit': '🔴'}
 ACTIONS = {'off': 'только сообщать', 'revoke': 'перевыпускать подписку', 'disable': 'отключать пользователя'}
@@ -103,7 +112,8 @@ def cfg(prof: dict) -> dict:
             'day_gb': int(g.get('day_gb', 50)),       # трафик за сутки выше — подозрительно (0 — не смотреть)
             'spike': int(g.get('spike', 5)),          # во сколько раз выше обычного (0 — не смотреть)
             'burst': int(g.get('burst', 4)),          # столько новых устройств за сутки (0 — не смотреть)
-            'ai': bool(g.get('ai')),                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
+            'ai': bool(g.get('ai')),
+            'names': str(g['names']) if isinstance(g.get('names'), str) else NAMES_DEF,  # какие подписки проверять ('' — все)                  # разбор нейросетью в сообщениях (ключ Gemini администратора)
             'tz': int(g.get('tz', (prof.get('auto') or {}).get('tz', 0)))}
 
 
@@ -113,6 +123,15 @@ def clean(raw: dict, prof: dict) -> dict:
         g['on'] = bool(raw['on'])
     if 'ai' in raw:
         g['ai'] = bool(raw['ai'])
+    if 'names' in raw:
+        v = str(raw['names'] or '').strip()
+        if len(v) > 200:
+            raise ValueError('Шаблон имён: не длиннее 200 символов')
+        try:
+            re.compile(v, re.I)
+        except re.error as e:
+            raise ValueError(f'Шаблон имён — не регулярное выражение: {e}') from None
+        g['names'] = v
     if 'auto' in raw:
         if raw['auto'] not in ACTIONS:
             raise ValueError('Автодействие: только сообщать, перевыпускать или отключать')
@@ -150,6 +169,12 @@ def _ts(v) -> float | None:
         return None
 
 
+def handle_of(desc) -> str:
+    """@имя в Telegram из описания пользователя (бот продаж пишет «@alchern1999 | Алексей Чернышков»)."""
+    m = re.search(r'@([A-Za-z][A-Za-z0-9_]{3,31})\b', str(desc or ''))
+    return '@' + m.group(1) if m else ''
+
+
 def norm_user(u: dict) -> dict | None:
     key = str(_first(u, 'uuid', 'id', default='') or '')
     if not key:
@@ -161,7 +186,8 @@ def norm_user(u: dict) -> dict | None:
     ids = {str(x) for x in (u.get('uuid'), u.get('id')) if x not in (None, '')}
     return {'key': key, 'ids': ids, 'name': str(u.get('username') or key)[:64], 'status': str(u.get('status') or '').upper(),
             'tg': u.get('telegramId'), 'limit': u.get('hwidDeviceLimit'), 'used': int(float(used or 0)),
-            'expire': _ts(u.get('expireAt')), 'created': _ts(u.get('createdAt'))}
+            'expire': _ts(u.get('expireAt')), 'created': _ts(u.get('createdAt')),
+            'handle': handle_of(u.get('description'))}
 
 
 def norm_device(d: dict) -> dict | None:
@@ -376,9 +402,11 @@ def gb(b: float) -> str:
 
 
 # ───────── разбор ─────────
-def index(data: dict) -> dict:
+def index(data: dict, names: str | None = None) -> dict:
     """Кто есть кто: пользователи, их устройства, IP подключений и запросы подписки — по ключу пользователя."""
-    users = {u['key']: u for u in data['users'] if not u['name'].startswith('bridge_')}  # служебные пользователи мостов
+    rx = re.compile(names, re.I) if names else None
+    users = {u['key']: u for u in data['users']  # служебные (мосты, test, statistics…) — не проверяем и не связываем
+             if not u['name'].startswith('bridge_') and (rx is None or rx.search(u['name']))}
     alias = {i: u['key'] for u in users.values() for i in u['ids']}
     alias.update({'name:' + u['name']: u['key'] for u in users.values()})
     own = data.get('own') or set()
@@ -428,19 +456,26 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     ex = ex or {}
     reasons: list[dict] = []
 
-    def add(code, w, text, crit=False):
-        reasons.append({'code': code, 'w': w, 'text': text, 'crit': crit})
+    def add(code, w, text, crit=False, dev=None, ip=None):
+        r = {'code': code, 'w': w, 'text': text, 'crit': crit}
+        if dev:
+            r['dev'] = dev_brief(dev, ipinfo)
+        if ip:
+            r['ip'] = ip
+            r['net'] = holder(ipinfo, ip)
+        reasons.append(r)
 
     devs = ix['dev'].get(k, [])
     for d in devs:
         ident = ' '.join(x for x in (d['ua'], d['hwid'], d['platform'], d['model']) if x)
         if SERVER_UA.search(ident) and not CLIENT_UA.search(d['ua'] or ''):
-            add('server:' + d['hwid'], CRIT, f'устройство похоже на сервер или скрипт: {d["ua"] or d["hwid"][:40]}', True)
+            add('server:' + d['hwid'], CRIT, f'устройство похоже на сервер или скрипт: {d["ua"] or d["hwid"][:40]}', True, d)
         elif not (d['platform'] or d['model'] or d['os']) and not CLIENT_UA.search(d['ua']):
-            add('bare:' + d['hwid'], 20, f'устройство без платформы и модели ({d["ua"] or "без User-Agent"})')
-    hosted = sorted({d['ip'] for d in devs if d['ip'] and d['ip'] not in own and HOSTING.search(holder(ipinfo, d['ip']))})
+            add('bare:' + d['hwid'], 20, f'устройство без платформы и модели ({d["ua"] or "без User-Agent"})', dev=d)
+    hosted = sorted({d['ip'] for d in devs if d['ip'] and d['ip'] not in own and hosting(holder(ipinfo, d['ip']))})
     for ip in hosted[:3]:
-        add('host:' + ip, 60, f'подписку забирали с IP хостинга {ip} ({holder(ipinfo, ip)[:40]})')
+        add('host:' + ip, 60, f'подписку забирали с IP хостинга {ip} ({holder(ipinfo, ip)[:40]})', ip=ip,
+            dev=next((d for d in devs if d['ip'] == ip), None))
     if conf['burst']:
         fresh_d = [d for d in devs if d['created'] and now - d['created'] < 86400]
         if len(fresh_d) >= conf['burst']:
@@ -448,17 +483,18 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     # то же устройство: совпадает HWID — его выдаёт приложение (Happ, Incy…) на конкретном устройстве, по модели
     # («iPhone 15») не сравниваем. Общий HWID — подписки двух аккаунтов в одном приложении на одном устройстве:
     # один аккаунт рядом — бывает (две подписки у одного человека), два и больше — повод посмотреть
-    twins = set()
+    twins, twin_dev = set(), None
     for d in devs:
         for o in ix['hwid'].get(d['hwid'], set()) - {k}:
             if o in banned:
-                add('ban-hwid:' + o, CRIT, f'то же устройство (HWID), что у отключённого {ix["users"][o]["name"]}', True)
+                add('ban-hwid:' + o, CRIT, f'то же устройство (HWID), что у отключённого {ix["users"][o]["name"]}', True, d)
             else:
                 twins.add(o)
+                twin_dev = twin_dev or d
     if twins:
         names = ', '.join(ix['users'][o]['name'] for o in sorted(twins)[:3]) + (f' и ещё {len(twins) - 3}' if len(twins) > 3 else '')
         add('twin:' + ','.join(sorted(twins)[:5]), 30 if len(twins) == 1 else 50,
-            f'то же устройство (HWID) у других аккаунтов: {names}')
+            f'то же устройство (HWID) у других аккаунтов: {names}', dev=twin_dev)
     # ферма пробных периодов: соседи по устройству или компьютеру, и большинство уже истекли
     pcs = {o for d in devs if pc_name(d) for o in (ix['pc'].get(pc_name(d)) or {})} - {k} - banned
     near = twins | pcs
@@ -470,9 +506,9 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     xb = ex.get('ban') or {}
     for d in devs:
         if d['hwid'] in (xb.get('hw') or {}):
-            add('xban-hw', CRIT, 'устройство (HWID) было у отключённого подписчика в другой вашей группе', True)
+            add('xban-hw', CRIT, 'устройство (HWID) было у отключённого подписчика в другой вашей группе', True, d)
         if pc_name(d) and pc_name(d) in (xb.get('pc') or {}):
-            add('xban-pc', 50, f'компьютер «{d["model"]}» был у отключённого подписчика в другой вашей группе')
+            add('xban-pc', 50, f'компьютер «{d["model"]}» был у отключённого подписчика в другой вашей группе', dev=d)
     # тот же компьютер под другим HWID (другое приложение или переустановка): уникальное имя ПК вроде DESKTOP-7F3K2LQ
     for d in devs:
         name = pc_name(d)
@@ -480,13 +516,14 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
             if o == k or d['hwid'] in hw:
                 continue
             if o in banned:
-                add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}')
+                add('ban-pc:' + o, 50, f'компьютер «{d["model"]}» — с тем же именем, что у отключённого {ix["users"][o]["name"]}', dev=d)
             else:
-                add('pc:' + o, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {ix["users"][o]["name"]}')
+                add('pc:' + o, 20, f'компьютер «{d["model"]}» — с тем же именем есть у {ix["users"][o]["name"]}', dev=d)
     mine_ips = {d['ip'] for d in devs if d['ip']} | set(ix['conn'].get(k) or {})
     for ip in sorted(mine_ips - own):
         for o in sorted((ix['ip'].get(ip, set()) & banned) - {k})[:2]:
-            add('ban-ip:' + o, 50, f'тот же IP {ip}, что у отключённого {ix["users"][o]["name"]}')
+            add('ban-ip:' + o, 50, f'тот же IP {ip}, что у отключённого {ix["users"][o]["name"]}', ip=ip,
+                dev=next((d for d in devs if d['ip'] == ip), None))
     # подключения на нодах: ключи, вставленные мимо подписки, и серверы-посредники
     ips = live_ips(ix, k, now)
     n_dev = max(len(devs), 1)
@@ -496,8 +533,9 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
             + (' — похоже, ключи вставлены в чужие клиенты мимо подписки' if bad else ''))
     if u.get('limit') and len(ips) > int(u['limit']) + 2:
         add('over', 20, f'IP подключений больше лимита устройств ({u["limit"]})')
-    for c in sorted((c for c in ips if HOSTING.search(holder(ipinfo, c['ip']))), key=lambda c: c['ip'])[:3]:
-        add('conn-host:' + c['ip'], 70, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) — сервер-посредник')
+    for c in sorted((c for c in ips if hosting(holder(ipinfo, c['ip']))), key=lambda c: c['ip'])[:3]:
+        add('conn-host:' + c['ip'], 70, f'подключение к ноде с IP хостинга {c["ip"]} ({holder(ipinfo, c["ip"])[:40]}) — сервер-посредник'
+            + (f', ноды: {", ".join(c["nodes"])}' if c['nodes'] else ''), ip=c['ip'])
     # запросы подписки: запрещённый клиент или сервер
     for r in (ix['subs'].get(k) or [])[:50]:
         if now - r['at'] > 3 * 86400:
@@ -539,7 +577,8 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
     score = sum(r['w'] for r in reasons)
     crit = any(r['crit'] for r in reasons)
     level = 'crit' if crit or score >= CRIT else 'warn' if score >= WARN else ''
-    return {'key': k, 'name': u['name'], 'tg': u['tg'], 'status': u['status'], 'score': score, 'crit': crit, 'level': level,
+    return {'key': k, 'name': u['name'], 'tg': u['tg'], 'handle': u.get('handle', ''), 'status': u['status'], 'score': score,
+            'crit': crit, 'level': level, 'dev_list': [dev_brief(d, ipinfo) for d in devs][:12],
             'reasons': reasons, 'devices': len(devs), 'ips': len(ips), 'limit': u['limit'], 'yesterday': y, 'usual': base,
             'week_devices': len(week), 'sub_ips': len(subips), 'active_hours': hours['active'] if hours else None,
             'torrents': len(tor)}
@@ -548,7 +587,7 @@ def judge(ix: dict, k: str, conf: dict, hist: dict, ipinfo: dict, now: float, ex
 def analyze(data: dict, conf: dict, hist: dict, ipinfo: dict, now: float, ix: dict | None = None, ex: dict | None = None) -> list[dict]:
     """Подозрительные пользователи (от WARN или с критичным признаком), по убыванию баллов. Отключённые — не в счёт.
     ipinfo — {ip: {'holder': …}} (что успели узнать); hist — отметки трафика (remember_traffic)."""
-    ix = ix or index(data)
+    ix = ix or index(data, conf.get('names'))
     out = [f for f in (judge(ix, k, conf, hist, ipinfo, now, ex) for k in ix['users'] if k not in ix['banned']) if f['level']]
     return sorted(out, key=lambda x: -x['score'])
 
@@ -573,18 +612,68 @@ def fresh(found: list[dict], seen: dict, ok: set[str], now: float) -> list[dict]
     return out
 
 
-def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
+def dev_brief(d: dict, ipinfo: dict | None = None) -> dict:
+    """Устройство для сообщения: что это, каким клиентом, откуда."""
+    sysname = ' '.join(x for x in (d['platform'], d['os']) if x)
+    return {'hwid': d['hwid'], 'what': ' · '.join(x for x in (d['model'], sysname) if x) or 'платформа неизвестна',
+            'platform': d['platform'], 'ua': d['ua'], 'ip': d['ip'], 'net': holder(ipinfo or {}, d['ip']) if d['ip'] else '',
+            'server': bool(SERVER_UA.search(' '.join((d['ua'], d['hwid']))) and not CLIENT_UA.search(d['ua'])),
+            'created': d.get('created')}
+
+
+_COPY = re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b|\b(?:bobr_\d+|\d+_\d+)\b', re.I)
+
+
+def copyable(text_: str) -> str:
+    """HTML-текст, где IP и имена подписок — <code> (в Telegram копируются по нажатию)."""
+    return _COPY.sub(lambda m: f'<code>{m.group(0)}</code>', html.escape(text_))
+
+
+def dev_line(b: dict) -> str:
     e = html.escape
-    who = e(f['name']) + (f' · TG <code>{e(str(f["tg"]))}</code>' if f.get('tg') else '')
+    icon = '🖥' if DESKTOP.search(b['platform'] or '') else '🤖' if b['server'] else '📱'
+    out = f'{icon} <b>{e(b["what"])}</b>' + (f' · {e(b["ua"][:60])}' if b['ua'] else ' · без User-Agent')
+    if b['ip']:
+        out += f'\n     IP <code>{e(b["ip"])}</code>' + (f' ({e(b["net"][:40])})' if b['net'] else '')
+    out += f'\n     HWID <code>{e(b["hwid"])}</code>'
+    return out
+
+
+def text(prof: dict, f: dict, done: str = '', ai: dict | None = None) -> str:
+    """Сообщение о подозрительном: имя и @ копируются нажатием, у признаков — какое устройство и откуда, ниже — все устройства."""
+    e = html.escape
+    who = f'<code>{e(f["name"])}</code>' + (f' · <code>{e(f["handle"])}</code>' if f.get('handle') else '')
     lines = [f'{LEVELS[f["level"]]} <b>Подозрительная подписка</b> · {e(prof["name"])}', who,
              f'Устройств: {f["devices"]}' + (f' из {f["limit"]}' if f.get('limit') else '')
              + (f' · IP подключений сейчас: {f["ips"]}' if f.get('ips') else ''), '']
-    lines += ['• ' + e(r['text']) for r in f['reasons'][:8]]
+    shown = set()
+    for r in f['reasons'][:8]:
+        lines.append(('🔴 ' if r.get('crit') else '• ') + copyable(r['text']))
+        if r.get('dev') and r['dev']['hwid'] in shown:
+            lines.append(f'   ↳ то же устройство: {html.escape(r["dev"]["what"])}')
+        elif r.get('dev'):
+            lines.append('   ' + dev_line(r['dev']).replace('\n', '\n   '))
+            shown.add(r['dev']['hwid'])
+    rest = [b for b in f.get('dev_list') or [] if b['hwid'] not in shown]
+    if rest:
+        lines += ['', '<b>Устройства:</b>'] + [dev_line(b) for b in rest[:6]]
+        if len(rest) > 6:
+            lines.append(f'… и ещё {len(rest) - 6}')
     if ai:
         lines += ['', ai_line(ai)]
     if done:
         lines += ['', done]
-    return '\n'.join(lines)[:3900]
+    out = '\n'.join(lines)
+    if len(out) > 3900:  # Telegram: не больше 4096 — срезаем по строкам, чтобы не порвать разметку
+        keep, n = [], 0
+        for line in lines:
+            if n + len(line) > 3800:
+                keep.append('…')
+                break
+            keep.append(line)
+            n += len(line) + 1
+        out = '\n'.join(keep)
+    return out
 
 
 # ───────── память между проверками ─────────
@@ -719,7 +808,7 @@ def _scrub(text: str, secrets_: list[str]) -> str:
 
 def ai_input(card: dict, now: float) -> str:
     """Сводка карточки без имени, TG ID, HWID и полных IP."""
-    hide = [card['name'], str(card.get('tg') or '')] + [x['name'] for x in card['links']] + [d['hwid'] for d in card['device_list']]
+    hide = [card['name'], str(card.get('tg') or ''), card.get('handle') or '', (card.get('handle') or '').lstrip('@')] + [x['name'] for x in card['links']] + [d['hwid'] for d in card['device_list']]
     hide += [d['hwid'][:40] for d in card['device_list']] + [d['model'] for d in card['device_list'] if pc_name(d)]
     days = lambda t: None if not t else round((now - t) / 86400, 1)  # noqa: E731
     net = lambda x: {k: x[k] for k in ('holder', 'hosting', 'own') if k in x} if x else None  # noqa: E731
@@ -912,7 +1001,7 @@ class Guard:
         conf, pid = cfg(prof), prof['id']
         hist = remember_traffic(self.get(f'guard:traf:{pid}', {}), data['users'], now, conf['tz'])
         self.put(f'guard:traf:{pid}', hist)
-        ix = index(data)
+        ix = index(data, conf['names'])
         conn_ips = {c['ip'] for k in ix['conn'] for c in live_ips(ix, k, now)}
         dev_ips = {d['ip'] for d in data['devices'] if d['ip'] and d['ip'] not in data['own']}
         self.stage(pid, 'Узнаю, чьи сети у IP')
@@ -952,11 +1041,12 @@ class Guard:
         self.put(f'guard:seen:{pid}', seen)
         self.count(pid, now, conf['tz'], warn=sum(f['level'] == 'warn' for f in found), crit=sum(f['level'] == 'crit' for f in found),
                    users=len(ix['users']), **acted)
-        self.put(f'guard:last:{pid}', {'at': now, 'users': len(data['users']), 'devices': len(data['devices']),
+        self.put(f'guard:last:{pid}', {'at': now, 'users': len(ix['users']), 'skipped': len(data['users']) - len(ix['users']),
+                                       'devices': len(data['devices']),
                                        'ips': len(conn_ips), 'online': sum(1 for k in ix['conn'] if live_ips(ix, k, now)),
                                        'dev_err': data.get('dev_err', ''), 'conn_err': data.get('conn_err', ''),
                                        'subs_err': data.get('subs_err', ''), 'error': '',
-                                       'found': [{k: f[k] for k in ('key', 'name', 'tg', 'score', 'level', 'devices', 'ips', 'limit')}
+                                       'found': [{k: f[k] for k in ('key', 'name', 'tg', 'handle', 'score', 'level', 'devices', 'ips', 'limit')}
                                                  | {'reasons': [r['text'] for r in f['reasons']], 'ok': f['key'] in ok}
                                                  for f in found[:100]]})
         return found
@@ -991,7 +1081,7 @@ class Guard:
         if not snap:
             return None
         data = unsnap(snap)
-        ix = index(data)
+        ix = index(data, conf['names'])
         if key not in ix['users']:
             return None
         ips = sorted({d['ip'] for d in ix['dev'].get(key, []) if d['ip']} | set(ix['conn'].get(key) or {}))
@@ -1004,7 +1094,8 @@ class Guard:
         info.update(self.cached([ip for ip, _ in subips if ip not in info]))
         cur = {d['hwid'] for d in ix['dev'].get(key, [])}
         hours = active_hours(ex['hourly'].get(key), at)
-        net = lambda ip: {'holder': holder(info, ip), 'hosting': bool(HOSTING.search(holder(info, ip))), 'own': ip in ix['own']}  # noqa: E731
+        net = lambda ip: {'holder': holder(info, ip), 'hosting': hosting(holder(info, ip)), 'own': ip in ix['own'],  # noqa: E731
+                          'relay': bool(RELAY_NET.search(holder(info, ip)))}
         links = {}
         for d in ix['dev'].get(key, []):
             for o in ix['hwid'].get(d['hwid'], set()) - {key}:
@@ -1019,7 +1110,7 @@ class Guard:
         days = sorted(h)
         traffic_days = [{'day': days[i], 'bytes': h[days[i + 1]] - h[days[i]]} for i in range(len(days) - 1) if h[days[i + 1]] >= h[days[i]]]
         u = ix['users'][key]
-        return {**{k: f[k] for k in ('key', 'name', 'tg', 'status', 'score', 'level', 'devices', 'ips', 'limit', 'yesterday', 'usual')},
+        return {**{k: f[k] for k in ('key', 'name', 'tg', 'handle', 'status', 'score', 'level', 'devices', 'ips', 'limit', 'yesterday', 'usual')},
                 'reasons': [{'text': r['text'], 'w': r['w'], 'crit': r['crit']} for r in f['reasons']],
                 'used': u['used'], 'at': snap.get('at'), 'ok': key in set(self.get(f'guard:ok:{pid}', [])),
                 'device_list': [{**{k: d[k] for k in ('hwid', 'platform', 'os', 'model', 'ua', 'ip', 'created')},
@@ -1044,7 +1135,10 @@ class Guard:
     def search(self, pid: int, q: str, limit: int = 20) -> list[dict]:
         snap = self.get(f'guard:snap:{pid}', {})
         q = q.strip().lower()
-        out = [{'key': u['key'], 'name': u['name'], 'status': u['status'], 'tg': u['tg']} for u in snap.get('users') or []
+        names = self.store.profile(pid) if hasattr(self.store, 'profile') else None
+        rx = re.compile(cfg(names or {})['names'], re.I) if cfg(names or {})['names'] else None
+        out = [{'key': u['key'], 'name': u['name'], 'status': u['status'], 'tg': u['tg'], 'handle': u.get('handle', ''),
+                'checked': rx is None or bool(rx.search(u['name']))} for u in snap.get('users') or []
                if q and (q in u['name'].lower() or q == str(u.get('tg') or '') or q == u['key'].lower())]
         return out[:limit]
 

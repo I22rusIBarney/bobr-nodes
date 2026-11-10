@@ -8,7 +8,7 @@ const tsAgo = t => t ? ago(t * 1000) : '—';
 const STATUS_RU = { ACTIVE: 'активен', DISABLED: 'отключён', LIMITED: 'лимит трафика', EXPIRED: 'истёк' };
 const lvlChip = l => h('span', { class: 'st ' + (l === 'crit' ? 'bad' : l === 'warn' ? 'warn' : 'ok') }, l === 'crit' ? 'критично' : l === 'warn' ? 'внимание' : 'чисто');
 const netTag = n => n ? h('span', { class: 's', style: 'color:' + (n.own ? 'var(--muted)' : n.hosting ? 'var(--air-red)' : 'inherit') },
-  n.own ? 'своя нода или вход' : (n.holder || 'сеть неизвестна') + (n.hosting ? ' · хостинг' : '')) : null;
+  n.own ? 'своя нода или вход' : (n.holder || 'сеть неизвестна') + (n.hosting ? ' · хостинг' : n.relay ? ' · WARP или iCloud Private Relay' : '')) : null;
 
 /* «Проверить сейчас»: проверка идёт в фоне (большая панель — минуты), раздел раз в 3 секунды спрашивает, как дела */
 const GW = {};
@@ -126,13 +126,13 @@ function guardGroupView(pid) {
       seg([{ v: 'all', l: 'Все' }, { v: 'crit', l: 'Критично' }, { v: 'warn', l: 'Внимание' }], lvl, v => { GU.lvl[pid] = v; render(); }, 'Уровень'),
       h('input', { class: 'inp', type: 'search', placeholder: 'Найти подписчика: имя или TG ID', value: q, style: 'flex:1;min-width:180px', oninput: e => search(e.target.value) })),
     GU.found[pid] ? h('div', { class: 'list', style: 'margin-bottom:16px' }, GU.found[pid].length ? GU.found[pid].map(u => h('button', { type: 'button', class: 'li', onclick: () => go(`guard/${pid}/${encodeURIComponent(u.key)}`) },
-      h('div', { class: 'grow' }, h('div', { class: 't' }, u.name), h('div', { class: 's' }, (STATUS_RU[u.status] || u.status || '') + (u.tg ? ` · TG ${u.tg}` : ''))), h('span', { class: 'chev' }, ic('chevR'))))
+      h('div', { class: 'grow' }, h('div', { class: 't' }, u.name), h('div', { class: 's' }, (STATUS_RU[u.status] || u.status || '') + (u.handle ? ` · ${u.handle}` : '') + (u.tg ? ` · TG ${u.tg}` : '') + (u.checked === false ? ' · не проверяется: системная или не по шаблону' : ''))), h('span', { class: 'chev' }, ic('chevR'))))
       : h('div', { class: 'li' }, h('span', { class: 'faint' }, 'Никого не нашлось в последней проверке'))) : null,
     found.length ? h('div', { class: 'list' }, found.map(f => h('button', { type: 'button', class: 'li', style: 'align-items:flex-start', onclick: () => go(`guard/${pid}/${encodeURIComponent(f.key)}`) },
       lvlChip(f.level),
       h('div', { class: 'grow', style: 'min-width:0' },
         h('div', { class: 't' }, f.name + (f.ok ? ' · «всё в порядке»' : '')),
-        h('div', { class: 's' }, `баллов ${f.score} · устройств ${f.devices}` + (f.limit ? ` из ${f.limit}` : '') + (f.ips ? ` · IP сейчас ${f.ips}` : '') + (f.tg ? ` · TG ${f.tg}` : '')),
+        h('div', { class: 's' }, `баллов ${f.score} · устройств ${f.devices}` + (f.limit ? ` из ${f.limit}` : '') + (f.ips ? ` · IP сейчас ${f.ips}` : '') + (f.handle ? ` · ${f.handle}` : '')),
         f.reasons.slice(0, 3).map(r => h('div', { class: 's' }, '• ' + r))),
       h('span', { class: 'chev' }, ic('chevR')))))
       : last.at ? empty('shield', lvl === 'all' ? 'Подозрительных нет' : 'Таких нет', 'Бот напишет, если кто-то начнёт раздавать или перепродавать подписку.') : null];
@@ -172,7 +172,7 @@ function guardCard(pid, key) {
     h('div', { class: 'grow', style: 'min-width:0' }, h('div', { class: 't', style: 'overflow-wrap:anywhere' }, main), sub), right || null);
   const maxT = Math.max(1, ...d.traffic.map(t => t.bytes));
   return [back,
-    pageH(d.name, [STATUS_RU[d.status] || d.status, d.tg ? `TG ${d.tg}` : '', `проверено ${tsAgo(d.at)}`].filter(Boolean).join(' · '), [lvlChip(d.level)]),
+    pageH(d.name, [STATUS_RU[d.status] || d.status, d.handle || '', d.tg ? `TG ${d.tg}` : '', `проверено ${tsAgo(d.at)}`].filter(Boolean).join(' · '), [lvlChip(d.level)]),
     h('div', { class: 'sheet', style: 'padding:14px 16px' },
       h('div', { class: 'stats' },
         ...[[d.score, 'баллов риска', d.level === 'crit' ? 'bad' : d.level === 'warn' ? 'warn' : ''], [d.devices + (d.limit ? ` / ${d.limit}` : ''), 'устройств / лимит'],
