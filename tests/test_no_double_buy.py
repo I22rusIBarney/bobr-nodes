@@ -11,13 +11,19 @@ class Stop(Exception):
 
 
 class FakeBC:
-    def __init__(self, lose_answer=True):
-        self.lose_answer, self.buys, self.list = lose_answer, 0, []
+    def __init__(self, lose_answer=True, api=1):
+        self.lose_answer, self.buys, self.list, self.api_v, self.refs = lose_answer, 0, [], api, {}
 
-    async def buy(self, location, os_, idx, period, password, custom=None):
+    async def api(self):
+        return self.api_v
+
+    async def buy(self, location, os_, idx, period, password, custom=None, ref=None):
+        if self.api_v >= 2 and ref in self.refs:  # bcloud с API 2: повтор с тем же ключом — тот же сервер
+            return self.refs[ref]
         self.buys += 1
         srv = {'id': 500 + self.buys, 'status': 'provisioning', 'location': location, 'root_password': None}
         self.list.append(srv)
+        self.refs[ref] = srv
         if self.lose_answer:
             self.lose_answer = False
             raise BcloudUnavailable('Bobr Cloud недоступен: ReadTimeout')  # купил, а ответ не дошёл
@@ -97,3 +103,20 @@ def test_old_server_without_password_is_not_taken(tmp_path):
     store.patch_job_data(jid, buy_tried=True)
     run(runner, jid)
     assert bc.buys == 1 and store.job(jid)['data']['server_id'] == 501
+
+
+def test_new_bcloud_retry_with_same_ref_returns_bought_server(tmp_path):
+    """bcloud с API 2: повтор после обрыва идёт с тем же ключом и получает уже купленный сервер — даже без пароля
+    и после перезапуска бота во время покупки."""
+    store = Store(tmp_path / 'bot.db')
+    bc = FakeBC(api=2)
+    runner = Runner(store, None, tmp_path / 'logs', bcloud_factory=lambda store, buyer: bc)
+    runner.render = lambda *a, **k: asyncio.sleep(0)
+    jid = job(store)
+    run(runner, jid)
+    ref = store.job(jid)['data']['buy_ref']
+    assert store.job(jid)['status'] == 'failed' and bc.buys == 1 and ref
+    store.update_job(jid, status='buying')  # бот перезапустился посреди покупки
+    run(runner, jid)
+    d = store.job(jid)['data']
+    assert bc.buys == 1 and d['server_id'] == 501 and d['buy_ref'] == ref

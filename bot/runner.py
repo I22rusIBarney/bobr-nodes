@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import secrets
 import time
 from pathlib import Path
 
@@ -548,7 +549,8 @@ class Runner:
                 # Bobr Cloud (Astra) иногда не выдаёт сервер — деньги возвращаются, а бот сам пробует купить ещё раз;
                 # после второй неудачи предлагает другую конфигурацию или локацию
                 while True:
-                    if not d.get('server_id') and d.get('buy_tried'):
+                    # bcloud с API 2 сам узнаёт повтор по ключу покупки — гадать по списку серверов не нужно
+                    if not d.get('server_id') and d.get('buy_tried') and not (d.get('buy_ref') and await bc.api() >= 2):
                         sid = await self._lost_purchase(jid, bc, d)  # прошлая покупка могла пройти без ответа
                         if sid:
                             d = self.store.patch_job_data(jid, server_id=sid)
@@ -558,8 +560,11 @@ class Runner:
                                        'проверьте «Мои серверы» в Bobr Cloud. Повтор купит новый сервер.')
                     if not d.get('server_id'):
                         await self._set(jid, status='buying', stage='buy', error='')
-                        d = self.store.patch_job_data(jid, buy_tried=True, buy_at=int(time.time()))  # до запроса: ответ может не дойти
-                        srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'))
+                        # до запроса: ответ может не дойти. Ключ живёт, пока покупка не прошла: повтор с ним не купит второй сервер
+                        d = self.store.patch_job_data(jid, buy_tried=True, buy_at=int(time.time()),
+                                                      buy_ref=d.get('buy_ref') or f'job{jid}-{secrets.token_hex(4)}')
+                        srv = await bc.buy(d['location'], d['os'], d['idx'], d.get('period', '1m'), d['password'], d.get('custom'),
+                                           ref=d['buy_ref'])
                         d = self.store.patch_job_data(jid, server_id=srv['id'])
 
                     await self._set(jid, status='provisioning', stage='ip', error='')
@@ -586,14 +591,14 @@ class Runner:
                                 raise Fail(f'сервер в Bobr Cloud недоступен (статус {srv["status"]})')
                             tries = int(d.get('create_tries') or 0) + 1
                             if tries < CREATE_TRIES:
-                                d = self.store.patch_job_data(jid, server_id=None, create_tries=tries)
+                                d = self.store.patch_job_data(jid, server_id=None, buy_ref=None, create_tries=tries)
                                 self.last[jid] = 'Bobr Cloud не смог создать сервер — покупаю ещё раз'
                                 await self.render(jid)
                                 await asyncio.sleep(self.rebuy_wait)  # пусть Bobr Cloud вернёт деньги за первую попытку
                                 rebuy = True
                                 break
                             # следующий «Повторить» — снова с двумя попытками
-                            d = self.store.patch_job_data(jid, server_id=None, create_tries=0, create_failed=True)
+                            d = self.store.patch_job_data(jid, server_id=None, buy_ref=None, create_tries=0, create_failed=True)
                             raise Fail(f'Bobr Cloud дважды не смог создать сервер (статус {srv["status"]}) — похоже, в этой локации '
                                        'сейчас нет мощностей под такую конфигурацию. Выберите другую конфигурацию или локацию. '
                                        'Деньги за обе попытки Bobr Cloud возвращает сам')

@@ -8,7 +8,14 @@ import httpx
 
 
 class BcloudError(Exception):
-    pass
+    def __init__(self, msg: str = '', status: int | None = None, detail=None):
+        super().__init__(msg)
+        self.status, self.detail = status, detail  # HTTP-ответ bcloud, если он был
+
+    @property
+    def no_route(self) -> bool:
+        """bcloud не знает такого метода (старая версия): FastAPI сам отвечает 404/405 без своего текста."""
+        return (self.status, self.detail) in ((404, 'Not Found'), (405, 'Method Not Allowed'))
 
 
 class NoMoney(BcloudError):
@@ -37,10 +44,10 @@ class Bcloud:
         self.h = {'Authorization': f'Bearer {token}'}
         self.timeout = timeout
 
-    async def _call(self, method: str, path: str, **kw):
+    async def _call(self, method: str, path: str, retry_for: float | None = None, **kw):
         # Повторяем, только когда запрос точно не дошёл (нет соединения, имя не разрешилось) — это безопасно и для
         # покупки. Чтение (GET) повторяем при любой сетевой ошибке. Ответ bcloud с ошибкой не повторяем.
-        end, wait = time.monotonic() + self.RETRY_FOR, 2.0
+        end, wait = time.monotonic() + (self.RETRY_FOR if retry_for is None else retry_for), 2.0
         while True:
             try:
                 async with httpx.AsyncClient(timeout=self.timeout) as c:
@@ -67,8 +74,12 @@ class Bcloud:
                 raise NoMoney(int(detail.get('balance_kop') or 0), int(detail.get('need_kop') or 0))
             hint = {401: ' — неверный токен', 404: ' — API выключен или неверный адрес (bcloud api-token)',
                     403: ' — доступ запрещён'}.get(r.status_code, '')
-            raise BcloudError(f'Bobr Cloud {r.status_code}{hint}: {detail}')
+            raise BcloudError(f'Bobr Cloud {r.status_code}{hint}: {detail}', r.status_code, detail)
         return payload
+
+    async def api(self) -> int:
+        """Версия служебного API bcloud: 1 — старый, 2 — покупка с ключом ref."""
+        return int((await self._call('GET', '/ping')).get('api') or 1)
 
     async def resolve(self, q: str) -> dict:
         return await self._call('GET', '/users/resolve', params={'q': q})
@@ -79,9 +90,12 @@ class Bcloud:
     async def catalog(self) -> dict:
         return await self._call('GET', '/catalog', params={'tg_id': self.tg_id})
 
-    async def buy(self, location: str, os_: str, idx: int | None, period: str, password: str, spec: dict | None = None) -> dict:
-        """Готовый тариф (idx) или своя конфигурация из конструктора (idx=None, spec={cpu, ram, disk})."""
-        body = {'tg_id': self.tg_id, 'location': location, 'os': os_, 'idx': idx, 'period': period, 'password': password}
+    async def buy(self, location: str, os_: str, idx: int | None, period: str, password: str, spec: dict | None = None,
+                  ref: str | None = None) -> dict:
+        """Готовый тариф (idx) или своя конфигурация из конструктора (idx=None, spec={cpu, ram, disk}).
+        ref — ключ покупки: bcloud с API 2 на повтор с тем же ref вернёт уже купленный сервер, а не купит второй."""
+        body = {'tg_id': self.tg_id, 'location': location, 'os': os_, 'idx': idx, 'period': period, 'password': password,
+                **({'ref': ref} if ref else {})}
         if idx is None:
             if not spec:
                 raise BcloudError('не указана конфигурация сервера')
@@ -94,7 +108,7 @@ class Bcloud:
             return await self._call('GET', '/quote', params={'tg_id': self.tg_id, 'location': location,
                                                              'cpu': int(cpu), 'ram': int(ram), 'disk': int(disk)})
         except BcloudError as e:
-            if str(e).startswith('Bobr Cloud 404') and str(e).endswith(': Not Found'):  # старый bcloud: конструктора в API нет
+            if e.no_route:  # старый bcloud: конструктора в API нет
                 raise BcloudError('Bobr Cloud не считает цену своей конфигурации — обновите его: bcloud update') from None
             raise
 
@@ -103,7 +117,7 @@ class Bcloud:
         try:
             return (await self._call('GET', '/servers', params={'tg_id': self.tg_id}))['servers']
         except BcloudError as e:
-            if str(e).startswith('Bobr Cloud 405'):  # старый bcloud: списка серверов в служебном API ещё нет
+            if e.no_route:  # старый bcloud: списка серверов в служебном API ещё нет
                 raise BcloudError('Bobr Cloud не отдаёт список серверов — обновите его: bcloud update') from None
             raise
 
@@ -147,8 +161,7 @@ class Bcloud:
     async def charge(self, amount_kop: int, ref: str, comment: str = '') -> dict:
         """Списать с баланса клиента оплату (подписка BobrNet). Повтор с тем же ref не спишет второй раз.
         Не хватает денег — NoMoney. Списание не повторяем при обрыве: повторит следующая попытка с тем же ref."""
-        self.RETRY_FOR = 0
-        return await self._new_api(self._call('POST', '/charge', json={'tg_id': self.tg_id, 'amount_kop': int(amount_kop),
+        return await self._new_api(self._call('POST', '/charge', retry_for=0, json={'tg_id': self.tg_id, 'amount_kop': int(amount_kop),
                                                                         'ref': ref, 'comment': comment}))
 
     @staticmethod
@@ -156,6 +169,6 @@ class Bcloud:
         try:
             return await coro
         except BcloudError as e:
-            if str(e).startswith(('Bobr Cloud 404', 'Bobr Cloud 405')) and str(e).endswith(('Not Found', 'Method Not Allowed')):
+            if e.no_route:
                 raise BcloudError('Bobr Cloud не умеет этого через API — обновите его: bcloud update') from None
             raise
